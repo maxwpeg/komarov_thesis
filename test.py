@@ -1,4 +1,11 @@
-import PDFGenerator
+from Project import Project
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 
-gen = PDFGenerator.PDFGenerator("SLKSB.pdf", orientation='horizontal')
-gen.create_pdf()
+
+pdfmetrics.registerFont(TTFont("GOST Type A", "./GOST_A.TTF"))
+pdfmetrics.registerFont(TTFont("GOST Type A Bold", "./GOST_A_BOLD.TTF"))
+p = Project()
+p.launch()
+p.save()
+print(p.code)
