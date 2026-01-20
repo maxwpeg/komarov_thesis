@@ -1,72 +1,35 @@
-import React, { useState, useEffect } from "react";
-import { Stage, Layer, Rect, Text } from "react-konva";
+import React from 'react';
+import { BrowserRouter as Router, Routes, Route, Link } from 'react-router-dom';
+import ProjectList from './pages/ProjectList';
+import ProjectDetail from './pages/ProjectDetail';
+import FloorPlanEditor from './pages/FloorPlanEditor';
+import CreateProject from './pages/CreateProject';
+import './App.css';
 
 function App() {
-  const [image, setImage] = useState(null);
-  const [objects, setObjects] = useState([]);
-  const [selectedId, setSelectedId] = useState(null);
-
-  const handleUpload = async (e) => {
-    const file = e.target.files[0];
-    setImage(URL.createObjectURL(file));
-
-    const formData = new FormData();
-    formData.append("file", file);
-
-    const res = await fetch("/predict", {
-      method: "POST",
-      body: formData,
-    });
-
-    const data = await res.json();
-    setObjects(data.objects);
-  };
-
-  const handleDragEnd = (e, id) => {
-    const newObjects = objects.map((obj) =>
-      obj.id === id ? { ...obj, x: e.target.x(), y: e.target.y() } : obj
-    );
-    setObjects(newObjects);
-  };
-
-  const sendFeedback = async () => {
-    await fetch("/feedback", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ objects }),
-    });
-    alert("Feedback saved!");
-  };
-
   return (
-    <div className="p-4">
-      <h2>📐 Floor Plan Annotator</h2>
-      <input type="file" accept="image/*" onChange={handleUpload} />
-      <div>
-        {image && (
-          <Stage width={800} height={600}>
-            <Layer>
-              <image href={image} />
-              {objects.map((obj) => (
-                <Rect
-                  key={obj.id}
-                  x={obj.x}
-                  y={obj.y}
-                  width={obj.width}
-                  height={obj.height}
-                  fill="transparent"
-                  stroke={obj.type === "wall" ? "brown" : obj.type === "door" ? "green" : "blue"}
-                  draggable
-                  onDragEnd={(e) => handleDragEnd(e, obj.id)}
-                  onClick={() => setSelectedId(obj.id)}
-                />
-              ))}
-            </Layer>
-          </Stage>
-        )}
+    <Router>
+      <div className="app">
+        <nav className="navbar">
+          <div className="navbar-brand">
+            <Link to="/" className="logo">Менеджер планов этажей</Link>
+          </div>
+          <div className="navbar-links">
+            <Link to="/" className="nav-link">Проекты</Link>
+            <Link to="/create-project" className="nav-link">Новый проект</Link>
+          </div>
+        </nav>
+
+        <main className="main-content">
+          <Routes>
+            <Route path="/" element={<ProjectList />} />
+            <Route path="/create-project" element={<CreateProject />} />
+            <Route path="/projects/:projectId" element={<ProjectDetail />} />
+            <Route path="/floor-plans/:floorPlanId" element={<FloorPlanEditor />} />
+          </Routes>
+        </main>
       </div>
-      <button onClick={sendFeedback}>💾 Save Feedback</button>
-    </div>
+    </Router>
   );
 }
 
