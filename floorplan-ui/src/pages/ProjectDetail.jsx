@@ -8,6 +8,7 @@ function ProjectDetail() {
   const [floorPlans, setFloorPlans] = useState([]);
   const [loading, setLoading] = useState(true);
   const [uploadingFloor, setUploadingFloor] = useState(false);
+  const [generatingPDF, setGeneratingPDF] = useState(false);
 
   useEffect(() => {
     fetchProject();
@@ -72,8 +73,52 @@ function ProjectDetail() {
   };
 
   const handleGeneratePDF = async () => {
-    // TODO: Implement PDF generation
-    alert('Генерация PDF будет реализована в следующей версии!');
+    setGeneratingPDF(true);
+    
+    try {
+      const response = await fetch(`/api/projects/${projectId}/generate-pdf`, {
+        method: 'POST',
+      });
+
+      if (response.ok) {
+        // Получаем PDF как blob
+        const blob = await response.blob();
+        
+        // Создаем URL для скачивания
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        
+        // Получаем имя файла из заголовка ответа или используем дефолтное
+        const contentDisposition = response.headers.get('Content-Disposition');
+        let filename = `Проект_${project.code}_${new Date().toISOString().split('T')[0]}.pdf`;
+        
+        if (contentDisposition) {
+          const filenameMatch = contentDisposition.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);
+          if (filenameMatch && filenameMatch[1]) {
+            filename = filenameMatch[1].replace(/['"]/g, '');
+          }
+        }
+        
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        
+        // Очистка
+        window.URL.revokeObjectURL(url);
+        document.body.removeChild(a);
+        
+        alert('PDF успешно создан и загружен!');
+      } else {
+        const error = await response.json();
+        alert(`Ошибка генерации PDF: ${error.detail || 'Неизвестная ошибка'}`);
+      }
+    } catch (error) {
+      console.error('Error generating PDF:', error);
+      alert('Ошибка при генерации PDF. Проверьте консоль для деталей.');
+    } finally {
+      setGeneratingPDF(false);
+    }
   };
 
   const handleDeleteProject = async () => {
@@ -141,8 +186,12 @@ function ProjectDetail() {
           <p style={{ color: '#6c757d' }}>Шифр: {project.code}</p>
         </div>
         <div style={{ display: 'flex', gap: '10px' }}>
-          <button className="btn btn-success" onClick={handleGeneratePDF}>
-            Сгенерировать PDF
+          <button 
+            className="btn btn-success" 
+            onClick={handleGeneratePDF}
+            disabled={generatingPDF}
+          >
+            {generatingPDF ? 'Генерация PDF...' : 'Сгенерировать PDF'}
           </button>
           <button 
             className="btn btn-danger" 

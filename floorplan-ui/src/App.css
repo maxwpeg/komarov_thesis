@@ -149,6 +149,15 @@
   background-color: #545b62;
 }
 
+.btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.btn:disabled:hover {
+  background-color: inherit;
+}
+
 /* Form Styles */
 .form-container {
   background: white;

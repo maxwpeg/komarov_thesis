@@ -33,6 +33,10 @@ from backend.image_processor import FloorPlanProcessor
 from backend.pdf_generator import generate_project_pdf
 from backend.fire_alarm_placement import calculate_fire_alarm_layout
 
+# Import for PDF font registration
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+
 app = FastAPI(title="Floor Plan API", version="1.0.0")
 
 app.add_middleware(
@@ -47,6 +51,15 @@ app.add_middleware(
 @app.on_event("startup")
 def on_startup():
     init_db()
+    
+    # Register PDF fonts
+    try:
+        pdfmetrics.registerFont(TTFont("GOST Type A", "./GOST_A.TTF"))
+        pdfmetrics.registerFont(TTFont("GOST Type A Bold", "./GOST_A_BOLD.TTF"))
+        print("✓ PDF fonts registered successfully")
+    except Exception as e:
+        print(f"⚠ Warning: Could not register PDF fonts: {e}")
+    
     # Create uploads directory
     os.makedirs("uploads", exist_ok=True)
     os.makedirs("outputs", exist_ok=True)

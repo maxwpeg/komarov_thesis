@@ -315,14 +315,41 @@ def generate_project_pdf(project_data: dict, floor_plans_data: list, output_dir:
     """
     os.makedirs(output_dir, exist_ok=True)
     
-    generator = FloorPlanPDFGenerator(project_data, floor_plans_data)
-    pdf_path = generator.create_pdf()
+    # Prepare credentials dictionary
+    creds = {
+        "Contractor": project_data.get("contractor", DEFAULT_CONTRACTOR_NAME),
+        "Engineer": project_data.get("engineer", DEFAULT_ENGINEER_NAME),
+        "CPE": project_data.get("cpe", DEFAULT_CPE_NAME),
+        "Checker": project_data.get("checker", DEFAULT_CHECKER_NAME),
+        "Facility": project_data.get("facility", DEFAULT_FACILITY_NAME),
+        "Facility Address": project_data.get("facility_address", ""),
+        "Project Description": project_data.get("project_description", DEFAULT_PROJECT_DESCRIPTION),
+        "Stage": project_data.get("stage", DEFAULT_STAGE),
+    }
+    
+    # Create PDF using Project class with new comprehensive page structure
+    project = PDFProject(
+        project_type=project_data.get("project_type", "ПС"),
+        number=project_data.get("number", 1),
+        year=project_data.get("year", datetime.datetime.now().year),
+        creds=creds,
+        number_of_floors=len(floor_plans_data),
+        floor_plans_data=floor_plans_data
+    )
+    
+    # Generate all pages using the new launch method
+    project.launch()
+    
+    # Save PDF
+    project.save()
     
     # Move to output directory if needed
+    pdf_path = project._c._filename
     if output_dir and not pdf_path.startswith(output_dir):
         import shutil
         new_path = os.path.join(output_dir, os.path.basename(pdf_path))
-        shutil.move(pdf_path, new_path)
-        return new_path
+        if os.path.exists(pdf_path):
+            shutil.move(pdf_path, new_path)
+            return new_path
     
     return pdf_path

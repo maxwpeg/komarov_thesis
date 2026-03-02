@@ -1,6 +1,7 @@
 from reportlab.pdfgen import canvas
 from Page import Page
 from TitlePage import TitlePage
+from DrawingPage import DrawingPage
 from consts import *
 import os
 import json
@@ -43,7 +44,8 @@ class Project:
             number: int | None = None, 
             year: int = datetime.datetime.now().year, 
             creds: dict[str, str] = DEFAULT_CREDS_DICT,
-            number_of_floors: int = DEFAULT_NUMBER_OF_FLOORS
+            number_of_floors: int = DEFAULT_NUMBER_OF_FLOORS,
+            floor_plans_data: list = None
             ):
         if number is None:
             number = Project.number_of_projects
@@ -55,6 +57,7 @@ class Project:
         self.year = year
         self.creds = creds.copy()
         self.number_of_floors = number_of_floors
+        self.floor_plans_data = floor_plans_data or []
 
         self.code = f"РП-ЗК-{number}/{year % 100}-{project_type}"
         self.creds["Project Code"] = self.code
@@ -76,11 +79,78 @@ class Project:
         title_page = TitlePage(creds=self.creds, signed=signed)
         title_page.draw(self._c, year=self.year)
     
+    def add_drawing_page_with_image(self, floor_plan_data: dict = None, pagesize: tuple[float, float] = PAGESIZE_A3_LANDSCAPE, title: str = ""):
+        """Добавляет страницу с чертежом (только линии элементов)."""
+        page = DrawingPage(
+            page_format=pagesize,
+            page_number=self.number_of_pages + 1,
+            creds=self.creds,
+            main_title_box_type="1",
+            floor_plan_data=floor_plan_data,
+            title=title
+        )
+        
+        # Рисуем страницу (все элементы отрисовываются внутри)
+        page.draw(self._c)
+        self.number_of_pages += 1
+    
     def launch(self):
-        self.add_title_page()
+        """Генерирует полный PDF документ со всеми необходимыми страницами."""
+        # 1. Титульный лист без подписи
+        self.add_title_page(signed=False)
+        
+        # 2. Титульный лист с подписью
         self.add_title_page(signed=True)
-        self.add_page(PAGESIZE_A4)
+        
+        # 3. Страница A3 горизонтальная
+        self.add_page(PAGESIZE_A3_LANDSCAPE, mtbox_type="1")
+        
+        # 4. Страница A4 вертикальная
+        self.add_page(PAGESIZE_A4, mtbox_type="1")
+        
+        # 5. Страница A4 вертикальная с рамкой типа 2
         self.add_page(PAGESIZE_A4, mtbox_type="2")
+        
+        # 6. Еще 2 страницы A4 вертикальных
+        self.add_page(PAGESIZE_A4, mtbox_type="1")
+        self.add_page(PAGESIZE_A4, mtbox_type="1")
+        
+        # 7-9. Каждый план этажа трижды: ЗКСПС, СПС, СОУЭ
+        # Рисуем каждый план на трех отдельных листах A3 горизонтальных
+        for fp in self.floor_plans_data:
+            # ЗКСПС
+            self.add_drawing_page_with_image(
+                floor_plan_data=fp,
+                pagesize=PAGESIZE_A3_LANDSCAPE,
+                title=f"ЗКСПС - {fp.get('name', 'План этажа')}"
+            )
+            
+            # СПС
+            self.add_drawing_page_with_image(
+                floor_plan_data=fp,
+                pagesize=PAGESIZE_A3_LANDSCAPE,
+                title=f"СПС - {fp.get('name', 'План этажа')}"
+            )
+            
+            # СОУЭ
+            self.add_drawing_page_with_image(
+                floor_plan_data=fp,
+                pagesize=PAGESIZE_A3_LANDSCAPE,
+                title=f"СОУЭ - {fp.get('name', 'План этажа')}"
+            )
+        
+        # 10. Лист A3 горизонтальный (схемы подключения)
+        self.add_page(PAGESIZE_A3_LANDSCAPE, mtbox_type="1")
+        # TODO: Добавить логику для схем подключения
+        
+        # 11. Лист A3 горизонтальный (спецификация)
+        self.add_page(PAGESIZE_A3_LANDSCAPE, mtbox_type="1")
+        # TODO: Добавить логику для спецификации
+        
+        # 12. Лист A4 вертикальный (расчет токопотребления)
+        self.add_page(PAGESIZE_A4, mtbox_type="1")
+        # TODO: Добавить логику для расчета токопотребления
+
 
     def save(self):
         self._c.save()
