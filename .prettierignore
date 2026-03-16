@@ -1,0 +1,11 @@
+backend/__pycache__/
+floorplan-ui/build/
+floorplan-ui/node_modules/
+debug_output/
+outputs/
+uploads/
+floor_plans.db
+*.pdf
+*.png
+*.jpg
+*.jpeg

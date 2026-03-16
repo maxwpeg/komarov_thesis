@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Frontend
+node_modules/
+dist/
+build/
+coverage/
+.eslintcache
+
+# Environments and editor state
+.venv/
+venv/
+.idea/
+.DS_Store
+Thumbs.db
+*.log
+
+# Generated app artifacts
+uploads/
+outputs/
+debug_output/
+floor_plans.db
+
+# Binary documents and images
+*.pdf
+*.jpeg
+*.jpg
+*.png

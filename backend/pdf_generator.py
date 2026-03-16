@@ -1,22 +1,34 @@
-"""
-PDF generation service integrating existing Page, Project, TitlePage classes.
-"""
+"""PDF generation service integrating the legacy rendering layer."""
+
+from __future__ import annotations
+
 import datetime
-import os
-import sys
-from reportlab.pdfgen import canvas
-from reportlab.lib.units import mm
-from PIL import Image
 import io
+import os
 
-# Add parent directory to path to import existing classes
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+from PIL import Image
+from reportlab.lib import colors
+from reportlab.lib.units import mm
+from reportlab.lib.utils import ImageReader
+from reportlab.pdfgen import canvas
 
+from DrawingPage import DrawingPage, draw_fire_alarm_symbol
 from Page import Page
-from TitlePage import TitlePage
 from Project import Project as PDFProject
-from DrawingPage import DrawingPage
-from consts import *
+from TitlePage import TitlePage
+from backend.bootstrap import register_pdf_fonts
+from consts import (
+    DEFAULT_CHECKER_NAME,
+    DEFAULT_CONTRACTOR_NAME,
+    DEFAULT_CPE_NAME,
+    DEFAULT_ENGINEER_NAME,
+    DEFAULT_FACILITY_NAME,
+    DEFAULT_FONT_NAME,
+    DEFAULT_PROJECT_DESCRIPTION,
+    DEFAULT_STAGE,
+    MAIN_TITLE_BOX_DICT,
+    PAGESIZE_A3_LANDSCAPE,
+)
 
 
 class FloorPlanPDFGenerator:
@@ -43,6 +55,8 @@ class FloorPlanPDFGenerator:
         Returns:
             Path to generated PDF
         """
+        register_pdf_fonts()
+
         # Prepare credentials dictionary
         creds = {
             "Contractor": self.project_data.get("contractor", DEFAULT_CONTRACTOR_NAME),
@@ -182,7 +196,7 @@ class FloorPlanPDFGenerator:
             img_buffer.seek(0)
             
             c.drawImage(
-                img_buffer,
+                ImageReader(img_buffer),
                 x + offset_x, y + offset_y,
                 width=scaled_width,
                 height=scaled_height,
@@ -259,23 +273,11 @@ class FloorPlanPDFGenerator:
         scale_y = draw_height / orig_height
         scale = min(scale_x, scale_y)
         
-        c.setStrokeColor(colors.red)
-        c.setFillColor(colors.red)
-        c.setFont(DEFAULT_FONT_NAME, 8)
-        
         for alarm in fire_alarms:
             x = offset_x + alarm["x"] * scale
             y = offset_y + alarm["y"] * scale
-            
-            # Draw device symbol (circle for detectors)
-            radius = 3 * mm
-            c.circle(x, y, radius, stroke=1, fill=1)
-            
-            # Draw device label
-            device_type = alarm.get("device_type", "")
-            if device_type:
-                c.setFillColor(colors.black)
-                c.drawCentredString(x, y - radius - 3 * mm, device_type[:4].upper())
+
+            draw_fire_alarm_symbol(c, x, y, alarm.get("device_type"))
     
     def _draw_dimensions(
         self,
@@ -313,6 +315,7 @@ def generate_project_pdf(project_data: dict, floor_plans_data: list, output_dir:
     Returns:
         Path to generated PDF file
     """
+    register_pdf_fonts()
     os.makedirs(output_dir, exist_ok=True)
     
     # Prepare credentials dictionary

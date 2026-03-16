@@ -13,14 +13,17 @@
     "react-dom": "^19.2.0",
     "react-konva": "^19.0.10",
     "react-router-dom": "^6.28.0",
-    "react-scripts": "^5.0.1",
+    "react-scripts": "5.0.1",
     "use-image": "^1.1.4",
     "web-vitals": "^2.1.4"
   },
   "scripts": {
     "start": "react-scripts start",
     "build": "react-scripts build",
-    "test": "react-scripts test",
+    "lint": "eslint src --ext .js,.jsx",
+    "lint:fix": "eslint src --ext .js,.jsx --fix",
+    "test": "node ./scripts/run-react-scripts-test.cjs",
+    "test:ci": "node ./scripts/run-react-scripts-test.cjs --watch=false",
     "eject": "react-scripts eject"
   },
   "eslintConfig": {
@@ -41,5 +44,5 @@
       "last 1 safari version"
     ]
   },
-  "proxy": "http://localhost:8000"
+  "proxy": "http://127.0.0.1:8000"
 }

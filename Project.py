@@ -1,57 +1,37 @@
-from reportlab.pdfgen import canvas
-from Page import Page
-from TitlePage import TitlePage
-from DrawingPage import DrawingPage
-from consts import *
-import os
-import json
 import datetime
 
-# файл для хранения счётчика проектов
-_COUNTER_FILE = os.path.join(os.path.dirname(__file__), "project_counter.json")
+from reportlab.pdfgen import canvas
+
+from DrawingPage import DrawingPage
+from Page import Page
+from TitlePage import TitlePage
+from backend.bootstrap import register_pdf_fonts
+from backend.project_codes import build_project_code
+from consts import *
+
 
 def _sanitize_filename(filename: str) -> str:
-    """Заменяет недопустимые символы в имени файла на подчеркивания."""
+    """Replace characters that are invalid in a filesystem path."""
     invalid_chars = '<>:"/\\|?*'
     for char in invalid_chars:
         filename = filename.replace(char, '')
     return filename
 
-def _load_counter() -> int:
-    try:
-        with open(_COUNTER_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return int(data.get("number_of_projects", 1))
-    except Exception:
-        return 1
-
-def _save_counter(value: int):
-    try:
-        with open(_COUNTER_FILE, "w", encoding="utf-8") as f:
-            json.dump({"number_of_projects": int(value)}, f)
-    except Exception:
-        # молча игнорируем ошибки записи
-        pass
 
 class Project:
     """Handles file-level operations (canvas creation, page lifecycle)."""
 
-    number_of_projects = 1
-
     def __init__(
-            self, 
-            project_type: str = DEFAULT_PROJECT_TYPE, 
-            number: int | None = None, 
-            year: int = datetime.datetime.now().year, 
-            creds: dict[str, str] = DEFAULT_CREDS_DICT,
-            number_of_floors: int = DEFAULT_NUMBER_OF_FLOORS,
-            floor_plans_data: list = None
-            ):
+        self,
+        project_type: str = DEFAULT_PROJECT_TYPE,
+        number: int | None = None,
+        year: int = datetime.datetime.now().year,
+        creds: dict[str, str] = DEFAULT_CREDS_DICT,
+        number_of_floors: int = DEFAULT_NUMBER_OF_FLOORS,
+        floor_plans_data: list | None = None,
+    ):
         if number is None:
-            number = Project.number_of_projects
-        
-        Project.number_of_projects += 1
-        _save_counter(Project.number_of_projects)
+            number = DEFAULT_PROJECT_NUMBER
         self.project_type = project_type
         self.number = number
         self.year = year
@@ -59,105 +39,77 @@ class Project:
         self.number_of_floors = number_of_floors
         self.floor_plans_data = floor_plans_data or []
 
-        self.code = f"РП-ЗК-{number}/{year % 100}-{project_type}"
+        self.code = build_project_code(number=number, year=year, project_type=project_type)
         self.creds["Project Code"] = self.code
         self.number_of_pages = 0
 
-        # приватное поле для canvas
         filename = f"{self.creds['Facility']} {number}-{self.year} {self.creds['Contractor']}.pdf"
         filename = _sanitize_filename(filename)
+        register_pdf_fonts()
         self._c = canvas.Canvas(filename, pagesize=PAGESIZE_A4)
         self._c.setFont(DEFAULT_FONT_NAME, DEFAULT_FONT_SIZE)
 
     def add_page(self, pagesize: tuple[float, float], mtbox_type: str = "1"):
-        # используем внутреннее поле canvas
-        page = Page(pagesize, page_number=self.number_of_pages + 1, creds=self.creds, main_title_box_type=mtbox_type)
+        page = Page(
+            pagesize,
+            page_number=self.number_of_pages + 1,
+            creds=self.creds,
+            main_title_box_type=mtbox_type,
+        )
         page.draw(self._c)
         self.number_of_pages += 1
 
     def add_title_page(self, signed: bool = False):
         title_page = TitlePage(creds=self.creds, signed=signed)
         title_page.draw(self._c, year=self.year)
-    
-    def add_drawing_page_with_image(self, floor_plan_data: dict = None, pagesize: tuple[float, float] = PAGESIZE_A3_LANDSCAPE, title: str = ""):
-        """Добавляет страницу с чертежом (только линии элементов)."""
+
+    def add_drawing_page_with_image(
+        self,
+        floor_plan_data: dict | None = None,
+        pagesize: tuple[float, float] = PAGESIZE_A3_LANDSCAPE,
+        title: str = "",
+    ):
         page = DrawingPage(
             page_format=pagesize,
             page_number=self.number_of_pages + 1,
             creds=self.creds,
             main_title_box_type="1",
             floor_plan_data=floor_plan_data,
-            title=title
+            title=title,
         )
-        
-        # Рисуем страницу (все элементы отрисовываются внутри)
         page.draw(self._c)
         self.number_of_pages += 1
-    
+
     def launch(self):
-        """Генерирует полный PDF документ со всеми необходимыми страницами."""
-        # 1. Титульный лист без подписи
         self.add_title_page(signed=False)
-        
-        # 2. Титульный лист с подписью
         self.add_title_page(signed=True)
-        
-        # 3. Страница A3 горизонтальная (ведомости)
         self.add_page(PAGESIZE_A3_LANDSCAPE, mtbox_type="1")
-        
-        # 4. Страница A4 вертикальная (общие указания)
         self.add_page(PAGESIZE_A4, mtbox_type="1")
-        # TODO: Добавить логику для автоматического добавления страниц с общими указаниями,
-        #  если их количество превышает вместимость одной страницы A4. (последующие страницы с рамкой типа 2) 
-
-        # 5. Страница A4 вертикальная с рамкой типа 2 (общие указания (продолжение))
         self.add_page(PAGESIZE_A4, mtbox_type="2")
-        
-        # 6. Условные обозначения на листе A4 вертикальном с рамкой типа 1
+        self.add_page(PAGESIZE_A4, mtbox_type="1")
         self.add_page(PAGESIZE_A4, mtbox_type="1")
 
-        # 7. Структурная схема пожарной сигнализации
-        self.add_page(PAGESIZE_A4, mtbox_type="1")
-        
-        # 8-10. Каждый план этажа трижды: ЗКСПС, СПС, СОУЭ
-        # Рисуем каждый план на трех отдельных листах A3 горизонтальных
-        for fp in self.floor_plans_data:
-            # ЗКСПС
+        for floor_plan in self.floor_plans_data:
+            floor_name = floor_plan.get("name", "План этажа")
             self.add_drawing_page_with_image(
-                floor_plan_data=fp,
+                floor_plan_data=floor_plan,
                 pagesize=PAGESIZE_A3_LANDSCAPE,
-                title=f"ЗКСПС - {fp.get('name', 'План этажа')}"
+                title=f"ЗКСПС - {floor_name}",
             )
-            
-            # СПС
             self.add_drawing_page_with_image(
-                floor_plan_data=fp,
+                floor_plan_data=floor_plan,
                 pagesize=PAGESIZE_A3_LANDSCAPE,
-                title=f"СПС - {fp.get('name', 'План этажа')}"
+                title=f"СПС - {floor_name}",
             )
-            
-            # СОУЭ
             self.add_drawing_page_with_image(
-                floor_plan_data=fp,
+                floor_plan_data=floor_plan,
                 pagesize=PAGESIZE_A3_LANDSCAPE,
-                title=f"СОУЭ - {fp.get('name', 'План этажа')}"
+                title=f"СОУЭ - {floor_name}",
             )
-        
-        # 11. Лист A3 горизонтальный (схемы подключения)
-        self.add_page(PAGESIZE_A3_LANDSCAPE, mtbox_type="1")
-        # TODO: Добавить логику для схем подключения
-        
-        # 12. Лист A3 горизонтальный (спецификация)
-        self.add_page(PAGESIZE_A3_LANDSCAPE, mtbox_type="1")
-        # TODO: Добавить логику для спецификации
-        
-        # 13. Лист A4 вертикальный (расчет токопотребления)
-        self.add_page(PAGESIZE_A4, mtbox_type="1")
-        # TODO: Добавить логику для расчета токопотребления
 
+        self.add_page(PAGESIZE_A3_LANDSCAPE, mtbox_type="1")
+        self.add_page(PAGESIZE_A3_LANDSCAPE, mtbox_type="1")
+        self.add_page(PAGESIZE_A4, mtbox_type="1")
 
     def save(self):
         self._c.save()
-
-
-Project.number_of_projects = _load_counter()

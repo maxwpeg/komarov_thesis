@@ -1,0 +1,52 @@
+"""Recognition routes."""
+
+from __future__ import annotations
+
+import json
+
+from fastapi import APIRouter, Depends, Query
+
+from backend.config import settings
+from backend.dependencies import get_recognition_use_cases
+from backend.modules.recognition.application.use_cases import RecognitionUseCases
+from backend.schemas import FeedbackCreate, MessageRead, RecognitionProcessRead, RecognitionRead
+
+
+router = APIRouter(tags=["recognition"])
+
+
+@router.post("/api/floor-plans/{floor_plan_id}/process", response_model=RecognitionProcessRead)
+def process_floor_plan(
+    floor_plan_id: int,
+    debug: bool = Query(False),
+    service: RecognitionUseCases = Depends(get_recognition_use_cases),
+) -> RecognitionProcessRead:
+    recognition_id, walls, doors, windows, rooms, dimensions = service.process_floor_plan(
+        floor_plan_id,
+        debug=debug,
+    )
+    return RecognitionProcessRead(
+        message="Floor plan recognized successfully",
+        walls_detected=walls,
+        doors_detected=doors,
+        windows_detected=windows,
+        rooms_detected=rooms,
+        dimensions_detected=dimensions,
+        recognition_id=recognition_id,
+    )
+
+
+@router.get("/api/floor-plans/{floor_plan_id}/recognition", response_model=RecognitionRead)
+def get_floor_plan_recognition(
+    floor_plan_id: int,
+    debug: bool = Query(False),
+    service: RecognitionUseCases = Depends(get_recognition_use_cases),
+) -> RecognitionRead:
+    return service.get_recognition(floor_plan_id, debug=debug)
+
+
+@router.post("/feedback", response_model=MessageRead)
+def save_feedback(payload: FeedbackCreate) -> MessageRead:
+    with settings.feedback_file.open("w", encoding="utf-8") as file:
+        json.dump(payload.model_dump(), file, ensure_ascii=False, indent=2)
+    return MessageRead(message="saved")

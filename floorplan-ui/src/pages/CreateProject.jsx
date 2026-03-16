@@ -1,11 +1,16 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
+import { projectsApi } from '../api/client';
+
+const CURRENT_YEAR = new Date().getFullYear();
+
 function CreateProject() {
   const navigate = useNavigate();
   const [formData, setFormData] = useState({
     name: '',
     project_type: 'ПС',
+    year: CURRENT_YEAR,
     contractor: 'ООО "Флагман-СБ"',
     engineer: 'Комарова Н.С.',
     cpe: 'Гостев В.В.',
@@ -13,39 +18,35 @@ function CreateProject() {
     facility: '',
     facility_address: '',
     project_description: 'Система пожарной сигнализации и система оповещения и управления эвакуацией людей при пожаре',
-    stage: '«Р»',
-    number_of_floors: 1
+    stage: 'Р',
+    number_of_floors: 1,
   });
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const handleChange = (e) => {
-    const { name, value } = e.target;
-    setFormData(prev => ({
+  const handleChange = (event) => {
+    const { name, value } = event.target;
+    const nextValue = name === 'year' || name === 'number_of_floors'
+      ? (value === '' ? '' : Number(value))
+      : value;
+
+    setFormData((prev) => ({
       ...prev,
-      [name]: value
+      [name]: nextValue,
     }));
   };
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    
-    try {
-      const response = await fetch('/api/projects', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(formData),
-      });
+  const handleSubmit = async (event) => {
+    event.preventDefault();
+    setIsSubmitting(true);
 
-      if (response.ok) {
-        const project = await response.json();
-        navigate(`/projects/${project.id}`);
-      } else {
-        alert('Ошибка создания проекта');
-      }
+    try {
+      const project = await projectsApi.create(formData);
+      navigate(`/projects/${project.id}`);
     } catch (error) {
-      console.error('Error:', error);
-      alert('Ошибка создания проекта');
+      console.error('Error creating project:', error);
+      alert(`Ошибка создания проекта: ${error.message}`);
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -92,6 +93,18 @@ function CreateProject() {
             name="project_type"
             value={formData.project_type}
             onChange={handleChange}
+          />
+        </div>
+
+        <div className="form-group">
+          <label>Год</label>
+          <input
+            type="number"
+            name="year"
+            value={formData.year}
+            onChange={handleChange}
+            min="2000"
+            required
           />
         </div>
 
@@ -166,11 +179,16 @@ function CreateProject() {
         </div>
 
         <div className="form-actions">
-          <button type="button" className="btn btn-secondary" onClick={() => navigate('/')}>
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={() => navigate('/')}
+            disabled={isSubmitting}
+          >
             Отмена
           </button>
-          <button type="submit" className="btn btn-primary">
-            Создать проект
+          <button type="submit" className="btn btn-primary" disabled={isSubmitting}>
+            {isSubmitting ? 'Создание...' : 'Создать проект'}
           </button>
         </div>
       </form>
