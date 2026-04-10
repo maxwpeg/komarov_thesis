@@ -25,6 +25,7 @@ from backend.schemas import (
 )
 from backend.signal_planning import (
     MERGE_CAPABLE_INSTRUMENTS,
+    build_alarm_route_metadata,
     calculate_zkspc_layout,
     recalculate_cable_routes,
     route_length_m,
@@ -129,11 +130,17 @@ class SignalService:
                 },
             )
             self.db.add(FireAlarmModel(**normalized))
+        self.db.flush()
+        instruments = self.list_signal_instruments(floor_plan_id, normalized_system)
+        devices_cables_status = "draft"
+        if instruments:
+            self._replace_routes_for_instrument(instruments[0], use_shared_trunk=False)
+            devices_cables_status = "validated"
         update_signal_branch_state(
             floor_plan,
             normalized_system,
             fire_alarms_status="validated",
-            devices_cables_status="draft",
+            devices_cables_status=devices_cables_status,
             active_step="devices_cables",
         )
         self.db.commit()
@@ -255,11 +262,12 @@ class SignalService:
 
     def _replace_routes_for_instrument(self, instrument: SignalInstrumentModel, *, use_shared_trunk: bool) -> None:
         floor_plan = self._get_floor_plan(instrument.floor_plan_id)
-        alarms = [
-            alarm.to_dict()
+        alarm_models = [
+            alarm
             for alarm in floor_plan.fire_alarms
             if alarm.system_type == instrument.system_type
         ]
+        alarms = [alarm.to_dict() for alarm in alarm_models]
         routes = recalculate_cable_routes(
             floor_plan.to_dict(include_elements=True),
             system_type=instrument.system_type,
@@ -267,6 +275,15 @@ class SignalService:
             alarms=alarms,
             use_shared_trunk=use_shared_trunk and instrument.supports_cable_merge,
         )
+        sequence_updates = build_alarm_route_metadata(routes, system_type=instrument.system_type)
+        for alarm in alarm_models:
+            if alarm.id is None or alarm.id not in sequence_updates:
+                continue
+            update = sequence_updates[alarm.id]
+            alarm.loop_kind = update["loop_kind"]
+            alarm.loop_number = update["loop_number"]
+            alarm.device_number = update["device_number"]
+            alarm.address = update["address"]
         self.db.query(CableRouteModel).filter(CableRouteModel.instrument_id == instrument.id).delete(synchronize_session=False)
         for route_payload in routes:
             self.db.add(CableRouteModel(floor_plan_id=instrument.floor_plan_id, **route_payload))

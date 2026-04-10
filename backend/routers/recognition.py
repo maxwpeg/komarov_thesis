@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, Query
 from backend.config import settings
 from backend.dependencies import get_recognition_use_cases
 from backend.modules.recognition.application.use_cases import RecognitionUseCases
-from backend.schemas import FeedbackCreate, MessageRead, RecognitionProcessRead, RecognitionRead
+from backend.schemas import FeedbackCreate, MessageRead, RecognitionFeedbackRead, RecognitionProcessRead, RecognitionRead
 
 
 router = APIRouter(tags=["recognition"])
@@ -43,6 +43,14 @@ def get_floor_plan_recognition(
     service: RecognitionUseCases = Depends(get_recognition_use_cases),
 ) -> RecognitionRead:
     return service.get_recognition(floor_plan_id, debug=debug)
+
+
+@router.post("/api/floor-plans/{floor_plan_id}/recognition-feedback", response_model=RecognitionFeedbackRead)
+def submit_floor_plan_recognition_feedback(
+    floor_plan_id: int,
+    service: RecognitionUseCases = Depends(get_recognition_use_cases),
+) -> RecognitionFeedbackRead:
+    return service.submit_feedback_sample(floor_plan_id)
 
 
 @router.post("/feedback", response_model=MessageRead)

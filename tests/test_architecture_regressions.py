@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sqlite3
+
 from sqlalchemy import event
 
 import backend.database as database
@@ -9,6 +11,72 @@ from backend.composition import build_elements_geometry_use_cases, build_floor_p
 from backend.models import AuditEvent, FloorPlan, Project, Room, Wall, ZkspcZone, ZkspcZoneRoom
 from backend.schemas import WallCreate
 from backend.services.storage_service import StorageService
+
+
+def test_init_db_backfills_missing_floor_plan_scale_source_column(tmp_path):
+    database_path = tmp_path / "legacy.db"
+    connection = sqlite3.connect(database_path)
+    try:
+        connection.executescript(
+            """
+            CREATE TABLE projects (
+                id INTEGER PRIMARY KEY,
+                name VARCHAR(255) NOT NULL,
+                project_type VARCHAR(50),
+                number INTEGER NOT NULL,
+                year INTEGER NOT NULL,
+                code VARCHAR(100) NOT NULL UNIQUE,
+                contractor VARCHAR(255) NOT NULL,
+                engineer VARCHAR(255) NOT NULL,
+                cpe VARCHAR(255) NOT NULL,
+                checker VARCHAR(255) NOT NULL,
+                facility VARCHAR(255) NOT NULL,
+                facility_address TEXT,
+                project_description TEXT,
+                stage VARCHAR(50),
+                number_of_floors INTEGER,
+                created_at DATETIME,
+                updated_at DATETIME
+            );
+            CREATE TABLE floor_plans (
+                id INTEGER PRIMARY KEY,
+                project_id INTEGER NOT NULL,
+                floor_number INTEGER NOT NULL,
+                name VARCHAR(255),
+                original_image_path VARCHAR(500),
+                processed_image_path VARCHAR(500),
+                image_width INTEGER,
+                image_height INTEGER,
+                scale_factor FLOAT,
+                created_at DATETIME,
+                updated_at DATETIME,
+                FOREIGN KEY(project_id) REFERENCES projects(id)
+            );
+            INSERT INTO projects (
+                id, name, project_type, number, year, code, contractor, engineer, cpe, checker, facility
+            ) VALUES (
+                1, 'Legacy Project', 'PS', 1, 2026, 'PRJ-LEGACY', 'Contractor', 'Engineer', 'CPE', 'Checker', 'Facility'
+            );
+            INSERT INTO floor_plans (id, project_id, floor_number, name, scale_factor)
+            VALUES (1, 1, 1, 'Floor 1', 12.5);
+            """
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    database.configure_database(f"sqlite:///{database_path.as_posix()}")
+    database.init_db()
+
+    connection = sqlite3.connect(database_path)
+    try:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(floor_plans)")}
+        scale_source = connection.execute("SELECT scale_source FROM floor_plans WHERE id = 1").fetchone()
+    finally:
+        connection.close()
+
+    assert "scale_source" in columns
+    assert scale_source == ("auto",)
 
 
 def test_elements_use_case_persists_audit_event(isolated_database):

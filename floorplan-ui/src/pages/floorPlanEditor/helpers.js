@@ -262,7 +262,175 @@ export const SIGNAL_INSTRUMENT_OPTIONS = [
   { key: 'annunciator', label: 'Оповещатель', supportsMerge: false },
 ];
 
-const ZONE_COLORS = ['#fff1b8', '#d9f7be', '#bae7ff', '#ffd6e7', '#efdbff', '#ffd8bf'];
+function hexToRgb(hexColor) {
+  const normalized = String(hexColor || '').replace('#', '');
+  if (normalized.length !== 6) {
+    return { r: 124, g: 58, b: 237 };
+  }
+  return {
+    r: Number.parseInt(normalized.slice(0, 2), 16),
+    g: Number.parseInt(normalized.slice(2, 4), 16),
+    b: Number.parseInt(normalized.slice(4, 6), 16),
+  };
+}
+
+function rgbaFromHex(hexColor, alpha) {
+  const { r, g, b } = hexToRgb(hexColor);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+function getZoneSeed(zoneNumber, floorPlanId = 0) {
+  const safeZone = Math.max(1, Number(zoneNumber || 1));
+  const safeFloor = Math.max(0, Number(floorPlanId || 0));
+  return Math.abs(((safeFloor + 1) * 92821) + (safeZone * 68917));
+}
+
+const ZKSPC_COLOR_PALETTE = [
+  '#d94841',
+  '#2563eb',
+  '#15803d',
+  '#f08c00',
+  '#7c3aed',
+  '#0f766e',
+  '#c026d3',
+  '#0891b2',
+];
+
+function colorDistance(leftHex, rightHex) {
+  const left = hexToRgb(leftHex);
+  const right = hexToRgb(rightHex);
+  return Math.sqrt(
+    ((left.r - right.r) ** 2)
+    + ((left.g - right.g) ** 2)
+    + ((left.b - right.b) ** 2)
+  );
+}
+
+function roomBoundsTouch(boundsA, boundsB) {
+  if (!boundsA || !boundsB) {
+    return false;
+  }
+  const tolerance = 14;
+  const minimumOverlap = 18;
+  const horizontalOverlap = Math.min(boundsA.x + boundsA.width, boundsB.x + boundsB.width) - Math.max(boundsA.x, boundsB.x);
+  const verticalOverlap = Math.min(boundsA.y + boundsA.height, boundsB.y + boundsB.height) - Math.max(boundsA.y, boundsB.y);
+  return (
+    (
+      verticalOverlap >= minimumOverlap
+      && (
+        Math.abs((boundsA.x + boundsA.width) - boundsB.x) <= tolerance
+        || Math.abs((boundsB.x + boundsB.width) - boundsA.x) <= tolerance
+      )
+    )
+    || (
+      horizontalOverlap >= minimumOverlap
+      && (
+        Math.abs((boundsA.y + boundsA.height) - boundsB.y) <= tolerance
+        || Math.abs((boundsB.y + boundsB.height) - boundsA.y) <= tolerance
+      )
+    )
+  );
+}
+
+function buildZkspcStyle(zoneNumber, floorPlanId, color) {
+  const seed = getZoneSeed(zoneNumber, floorPlanId);
+  return {
+    color,
+    fillColor: rgbaFromHex(color, 0.14),
+    hatchColor: rgbaFromHex(color, 0.78),
+    outlineColor: rgbaFromHex(color, 0.92),
+    labelColor: '#111111',
+    hatchSpacing: 18 + ((seed % 5) * 3),
+    label: `\u0417\u041a\u0421\u041f\u0421 \u2116${zoneNumber}`,
+  };
+}
+
+export function buildZkspcStyleMap(zones = [], rooms = [], floorPlanId = 0) {
+  const preparedZones = (zones || [])
+    .filter((zone) => zone?.zone_number !== null && zone?.zone_number !== undefined)
+    .map((zone) => ({ ...zone, zone_number: Math.max(1, Number(zone.zone_number || 1)) }));
+  if (!preparedZones.length) {
+    return {};
+  }
+
+  const roomsById = Object.fromEntries((rooms || [])
+    .filter((room) => room?.id !== null && room?.id !== undefined)
+    .map((room) => [room.id, room]));
+  const zoneNumbers = preparedZones.map((zone) => zone.zone_number);
+  const adjacency = Object.fromEntries(zoneNumbers.map((zoneNumber) => [zoneNumber, new Set()]));
+  const zoneRoomBounds = Object.fromEntries(zoneNumbers.map((zoneNumber) => [zoneNumber, []]));
+
+  preparedZones.forEach((zone) => {
+    (zone.room_ids || []).forEach((roomId) => {
+      const room = roomsById[roomId];
+      const bounds = room?.boundary_points?.length ? getBoundingBox(room.boundary_points) : null;
+      if (bounds) {
+        zoneRoomBounds[zone.zone_number].push(bounds);
+      }
+    });
+  });
+
+  for (let leftIndex = 0; leftIndex < zoneNumbers.length; leftIndex += 1) {
+    const leftZone = zoneNumbers[leftIndex];
+    for (let rightIndex = leftIndex + 1; rightIndex < zoneNumbers.length; rightIndex += 1) {
+      const rightZone = zoneNumbers[rightIndex];
+      const touches = zoneRoomBounds[leftZone].some((leftBounds) => (
+        zoneRoomBounds[rightZone].some((rightBounds) => roomBoundsTouch(leftBounds, rightBounds))
+      ));
+      if (touches) {
+        adjacency[leftZone].add(rightZone);
+        adjacency[rightZone].add(leftZone);
+      }
+    }
+  }
+
+  const paletteUsage = Array.from({ length: ZKSPC_COLOR_PALETTE.length }, () => 0);
+  const assignedIndexes = {};
+  const zoneOrder = [...zoneNumbers].sort((leftZone, rightZone) => {
+    const degreeDelta = adjacency[rightZone].size - adjacency[leftZone].size;
+    if (degreeDelta !== 0) {
+      return degreeDelta;
+    }
+    return leftZone - rightZone;
+  });
+
+  zoneOrder.forEach((zoneNumber) => {
+    const seedIndex = getZoneSeed(zoneNumber, floorPlanId) % ZKSPC_COLOR_PALETTE.length;
+    const rotationRank = Object.fromEntries(
+      ZKSPC_COLOR_PALETTE.map((_, offset) => [((seedIndex + offset) % ZKSPC_COLOR_PALETTE.length), offset]),
+    );
+    const usedNeighborIndexes = [...adjacency[zoneNumber]]
+      .filter((neighborZone) => assignedIndexes[neighborZone] !== undefined)
+      .map((neighborZone) => assignedIndexes[neighborZone]);
+    const candidates = ZKSPC_COLOR_PALETTE
+      .map((_, index) => index)
+      .filter((index) => !usedNeighborIndexes.includes(index));
+    const candidatePool = candidates.length ? candidates : ZKSPC_COLOR_PALETTE.map((_, index) => index);
+    candidatePool.sort((leftIndex, rightIndex) => {
+      const leftDistance = usedNeighborIndexes.length
+        ? Math.min(...usedNeighborIndexes.map((neighborIndex) => colorDistance(ZKSPC_COLOR_PALETTE[leftIndex], ZKSPC_COLOR_PALETTE[neighborIndex])))
+        : Number.POSITIVE_INFINITY;
+      const rightDistance = usedNeighborIndexes.length
+        ? Math.min(...usedNeighborIndexes.map((neighborIndex) => colorDistance(ZKSPC_COLOR_PALETTE[rightIndex], ZKSPC_COLOR_PALETTE[neighborIndex])))
+        : Number.POSITIVE_INFINITY;
+      if (rightDistance !== leftDistance) {
+        return rightDistance - leftDistance;
+      }
+      if (paletteUsage[leftIndex] !== paletteUsage[rightIndex]) {
+        return paletteUsage[leftIndex] - paletteUsage[rightIndex];
+      }
+      return rotationRank[leftIndex] - rotationRank[rightIndex];
+    });
+    const chosenIndex = candidatePool[0];
+    assignedIndexes[zoneNumber] = chosenIndex;
+    paletteUsage[chosenIndex] += 1;
+  });
+
+  return Object.fromEntries(zoneNumbers.map((zoneNumber) => {
+    const paletteIndex = assignedIndexes[zoneNumber] ?? (getZoneSeed(zoneNumber, floorPlanId) % ZKSPC_COLOR_PALETTE.length);
+    return [zoneNumber, buildZkspcStyle(zoneNumber, floorPlanId, ZKSPC_COLOR_PALETTE[paletteIndex])];
+  }));
+}
 
 export function normalizeSignalSystemType(value) {
   return value === 'addressable' ? 'addressable' : 'non_addressable';
@@ -283,8 +451,19 @@ export function getSignalInstrumentDefinition(type) {
   return SIGNAL_INSTRUMENT_OPTIONS.find((option) => option.key === type) || SIGNAL_INSTRUMENT_OPTIONS[0];
 }
 
-export function getZkspcColor(zoneNumber) {
-  return ZONE_COLORS[(Math.max(1, Number(zoneNumber || 1)) - 1) % ZONE_COLORS.length];
+export function getZkspcStyle(zoneOrNumber, floorPlanId = 0) {
+  const zoneNumber = typeof zoneOrNumber === 'object'
+    ? Number(zoneOrNumber?.zone_number || 1)
+    : Number(zoneOrNumber || 1);
+  const resolvedFloorPlanId = typeof zoneOrNumber === 'object'
+    ? Number(zoneOrNumber?.floor_plan_id || floorPlanId || 0)
+    : Number(floorPlanId || 0);
+  const color = ZKSPC_COLOR_PALETTE[getZoneSeed(zoneNumber, resolvedFloorPlanId) % ZKSPC_COLOR_PALETTE.length];
+  return buildZkspcStyle(zoneNumber, resolvedFloorPlanId, color);
+}
+
+export function getZkspcColor(zoneOrNumber, floorPlanId = 0) {
+  return getZkspcStyle(zoneOrNumber, floorPlanId).color;
 }
 
 export function buildRoomZoneMap(zones) {

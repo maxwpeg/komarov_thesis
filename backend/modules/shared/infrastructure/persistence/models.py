@@ -97,6 +97,7 @@ class FloorPlan(Base):
     
     # Scale information (mm per pixel)
     scale_factor = Column(Float, default=1.0)  # Real world mm per pixel
+    scale_source = Column(String(20), default="auto")
     ceiling_height_mm = Column(Float, default=3000.0)
     active_signal_system_type = Column(String(32), default="non_addressable")
     pipeline_state = Column(JSON, nullable=True)
@@ -121,6 +122,7 @@ class FloorPlan(Base):
     signal_instruments = relationship("SignalInstrument", back_populates="floor_plan", cascade="all, delete-orphan")
     cable_routes = relationship("CableRoute", back_populates="floor_plan", cascade="all, delete-orphan")
     floorplan_recognition = relationship("FloorplanRecognition", back_populates="floor_plan", cascade="all, delete-orphan", uselist=False)
+    recognition_feedback_samples = relationship("RecognitionFeedbackSample", back_populates="floor_plan", cascade="all, delete-orphan")
     
     def to_dict(self, include_elements=False):
         data = {
@@ -168,6 +170,7 @@ class Wall(Base):
     
     # Wall properties
     thickness = Column(Float, default=200.0)  # mm
+    alignment = Column(String(10), default="center")
     is_load_bearing = Column(Boolean, default=False)
     material = Column(String(100), nullable=True)
     length_m = Column(Float, nullable=True)
@@ -185,6 +188,7 @@ class Wall(Base):
             "x2": self.x2,
             "y2": self.y2,
             "thickness": self.thickness,
+            "alignment": self.alignment or "center",
             "is_load_bearing": self.is_load_bearing,
             "material": self.material,
             "length_m": self.length_m,
@@ -312,11 +316,11 @@ class Room(Base):
     # Geometry (polygon vertices in pixels, stored as JSON)
     boundary_points = Column(JSON, nullable=True)  # [[x1, y1], [x2, y2], ...]
     
-    # Calculated properties
+    # Calculated properties derived from room geometry and floor-plan scale.
     area_sqm = Column(Float, nullable=True)  # Square meters
     perimeter_m = Column(Float, nullable=True)  # Meters
-    length_m = Column(Float, nullable=True)
-    width_m = Column(Float, nullable=True)
+    length_m = Column(Float, nullable=True)  # Informational long side of fitted room geometry
+    width_m = Column(Float, nullable=True)  # Informational short side of fitted room geometry
     
     # Center point for labeling
     center_x = Column(Float, nullable=True)
@@ -525,6 +529,8 @@ class FireAlarm(Base):
     room_id = Column(Integer, nullable=True)
     offset_left_m = Column(Float, nullable=True)
     offset_top_m = Column(Float, nullable=True)
+    label_dx = Column(Float, nullable=True)
+    label_dy = Column(Float, nullable=True)
 
     # Relationships
     floor_plan = relationship("FloorPlan", back_populates="fire_alarms")
@@ -550,6 +556,8 @@ class FireAlarm(Base):
             "room_id": self.room_id,
             "offset_left_m": self.offset_left_m,
             "offset_top_m": self.offset_top_m,
+            "label_dx": self.label_dx,
+            "label_dy": self.label_dy,
         }
 
 
@@ -620,6 +628,8 @@ class SignalInstrument(Base):
     y = Column(Float, nullable=False)
     name = Column(String(100), nullable=True)
     supports_cable_merge = Column(Boolean, default=False)
+    label_dx = Column(Float, nullable=True)
+    label_dy = Column(Float, nullable=True)
 
     floor_plan = relationship("FloorPlan", back_populates="signal_instruments")
     cable_routes = relationship("CableRoute", back_populates="instrument", cascade="all, delete-orphan")
@@ -634,6 +644,8 @@ class SignalInstrument(Base):
             "y": self.y,
             "name": self.name,
             "supports_cable_merge": self.supports_cable_merge,
+            "label_dx": self.label_dx,
+            "label_dy": self.label_dy,
         }
 
 
@@ -653,6 +665,8 @@ class CableRoute(Base):
     warnings = Column(JSON, nullable=True)
     length_m = Column(Float, nullable=True)
     is_manual = Column(Boolean, default=False)
+    zc_label_dx = Column(Float, nullable=True)
+    zc_label_dy = Column(Float, nullable=True)
 
     floor_plan = relationship("FloorPlan", back_populates="cable_routes")
     instrument = relationship("SignalInstrument", back_populates="cable_routes")
@@ -670,6 +684,8 @@ class CableRoute(Base):
             "warnings": self.warnings or [],
             "length_m": self.length_m,
             "is_manual": self.is_manual,
+            "zc_label_dx": self.zc_label_dx,
+            "zc_label_dy": self.zc_label_dy,
         }
 
 
@@ -693,6 +709,7 @@ class FloorplanRecognition(Base):
     
     # Relationships
     floor_plan = relationship("FloorPlan", back_populates="floorplan_recognition")
+    feedback_sample = relationship("RecognitionFeedbackSample", back_populates="recognition", cascade="all, delete-orphan", uselist=False)
     
     def to_dict(self):
         return {
@@ -703,6 +720,40 @@ class FloorplanRecognition(Base):
             "error_message": self.error_message,
             "processed_at": self.processed_at.isoformat() if self.processed_at else None,
             "debug_artifacts_dir": self.debug_artifacts_dir,
+        }
+
+
+class RecognitionFeedbackSample(Base):
+    """Human-corrected architecture snapshot collected for future retraining."""
+
+    __tablename__ = "recognition_feedback_samples"
+
+    id = Column(Integer, primary_key=True, index=True)
+    floor_plan_id = Column(Integer, ForeignKey("floor_plans.id"), nullable=False, index=True)
+    recognition_id = Column(Integer, ForeignKey("floorplan_recognitions.id"), nullable=False, unique=True, index=True)
+    original_image_path = Column(String(500), nullable=True)
+    source_recognition_result = Column(JSON, nullable=False)
+    corrected_snapshot = Column(JSON, nullable=False)
+    status = Column(String(32), nullable=False, default="approved")
+    submitted_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    exported_at = Column(DateTime, nullable=True)
+    export_batch_id = Column(String(64), nullable=True)
+
+    floor_plan = relationship("FloorPlan", back_populates="recognition_feedback_samples")
+    recognition = relationship("FloorplanRecognition", back_populates="feedback_sample")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "floor_plan_id": self.floor_plan_id,
+            "recognition_id": self.recognition_id,
+            "original_image_path": self.original_image_path,
+            "source_recognition_result": self.source_recognition_result,
+            "corrected_snapshot": self.corrected_snapshot,
+            "status": self.status,
+            "submitted_at": self.submitted_at.isoformat() if self.submitted_at else None,
+            "exported_at": self.exported_at.isoformat() if self.exported_at else None,
+            "export_batch_id": self.export_batch_id,
         }
 
 

@@ -102,64 +102,18 @@ class FloorPlanPDFGenerator:
             floor_plan_data: Floor plan data including image, rooms, fire alarms
             creds: Credentials dictionary
         """
-        # Create a drawing page
         page = DrawingPage(
-            page_format=PAGESIZE_A3_LANDSCAPE,  # Use A3 landscape for better space
+            page_format=PAGESIZE_A3_LANDSCAPE,
             page_number=project.number_of_pages + 1,
             creds=creds,
-            main_title_box_type="1"
+            main_title_box_type="1",
+            floor_plan_data=floor_plan_data,
+            title=floor_plan_data.get("name", ""),
+            sheet_kind="generic",
         )
-        
-        # Calculate drawing area
-        drawing_x = page.borders_mm["left"]
-        drawing_y = page.borders_mm["bottom"] + MAIN_TITLE_BOX_DICT["1"][1] + 5 * mm
-        drawing_width = page.page_width - page.borders_mm["left"] - page.borders_mm["right"]
-        drawing_height = (page.page_height - page.borders_mm["top"] - 
-                         page.borders_mm["bottom"] - MAIN_TITLE_BOX_DICT["1"][1] - 10 * mm)
-        
-        # Draw the page structure
+
         project._c.setPageSize((page.page_width, page.page_height))
         page.draw(project._c)
-        
-        # Add floor plan image if exists
-        if floor_plan_data.get("original_image_path"):
-            self._draw_floor_plan_image(
-                project._c,
-                floor_plan_data["original_image_path"],
-                drawing_x, drawing_y, drawing_width, drawing_height
-            )
-        
-        # Draw rooms
-        self._draw_rooms(
-            project._c,
-            floor_plan_data.get("rooms", []),
-            drawing_x, drawing_y,
-            floor_plan_data.get("image_width", 1),
-            floor_plan_data.get("image_height", 1),
-            drawing_width, drawing_height
-        )
-        
-        # Draw fire alarms
-        self._draw_fire_alarms(
-            project._c,
-            floor_plan_data.get("fire_alarms", []),
-            drawing_x, drawing_y,
-            floor_plan_data.get("image_width", 1),
-            floor_plan_data.get("image_height", 1),
-            drawing_width, drawing_height
-        )
-        
-        # Draw dimensions
-        self._draw_dimensions(
-            project._c,
-            floor_plan_data.get("dimensions", []),
-            drawing_x, drawing_y,
-            floor_plan_data.get("image_width", 1),
-            floor_plan_data.get("image_height", 1),
-            drawing_width, drawing_height
-        )
-        
-        project._c.showPage()
         project.number_of_pages += 1
     
     def _draw_floor_plan_image(

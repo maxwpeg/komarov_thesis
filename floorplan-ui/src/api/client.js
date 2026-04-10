@@ -168,6 +168,9 @@ export const recognitionApi = {
     const suffix = debug ? '?debug=true' : '';
     return apiRequest(`/api/floor-plans/${floorPlanId}/recognition${suffix}`);
   },
+  submitFeedback(floorPlanId) {
+    return apiRequest(`/api/floor-plans/${floorPlanId}/recognition-feedback`, { method: 'POST' });
+  },
 };
 
 export const elementsApi = {
@@ -251,6 +254,13 @@ export const elementsApi = {
   updateSignalInstrument(instrumentId, payload) {
     return apiRequest(`/api/signal-instruments/${instrumentId}`, {
       method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  },
+  mergeRoutesForInstrument(instrumentId, payload) {
+    return apiRequest(`/api/signal-instruments/${instrumentId}/merge-routes`, {
+      method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });

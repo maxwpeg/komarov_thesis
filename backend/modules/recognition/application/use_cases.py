@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
+import shutil
+import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
 import cv2
 import numpy as np
 
+from backend.config import settings
 from backend.errors import AppError
 from backend.modules.recognition.ports.repositories import RecognitionRepository
 from backend.modules.recognition.domain.records import RecognitionRecord
@@ -17,7 +23,7 @@ from backend.modules.recognition.infrastructure.adapter import FloorplanRecognit
 from backend.modules.shared.application.ports import FileStoragePort
 from backend.modules.shared.application.unit_of_work import UnitOfWork
 from backend.modules.shared.infrastructure.runtime import NoOpEventPublisher
-from backend.schemas import RecognitionRead
+from backend.schemas import RecognitionFeedbackRead, RecognitionRead
 
 
 logger = logging.getLogger("komarov_thesis")
@@ -169,6 +175,125 @@ class RecognitionUseCases:
             result.debug_images = self.storage.list_debug_images(result.debug_artifacts_dir)
         return result
 
+    def submit_feedback_sample(self, floor_plan_id: int) -> RecognitionFeedbackRead:
+        floor_plan = self.repository.get_floor_plan(floor_plan_id)
+        recognition = self.repository.get_recognition(floor_plan_id)
+        if recognition is None:
+            raise AppError(404, "recognition_not_found", "Recognition result not found for floor plan")
+        if recognition.status != "completed" or recognition.recognition_result is None:
+            raise AppError(409, "recognition_not_completed", "Recognition must complete before feedback can be submitted")
+
+        now = datetime.now(timezone.utc)
+        snapshot = self._build_corrected_snapshot(floor_plan.to_dict(include_elements=True))
+        sample = self.repository.get_feedback_sample(recognition.id)
+        if sample is None:
+            sample = self.repository.create_feedback_sample(
+                {
+                    "floor_plan_id": floor_plan_id,
+                    "recognition_id": recognition.id,
+                    "original_image_path": floor_plan.original_image_path,
+                    "source_recognition_result": recognition.recognition_result,
+                    "corrected_snapshot": snapshot,
+                    "status": "approved",
+                    "submitted_at": now,
+                    "exported_at": None,
+                    "export_batch_id": None,
+                }
+            )
+            self.repository.add(sample)
+        else:
+            sample.original_image_path = floor_plan.original_image_path
+            sample.source_recognition_result = recognition.recognition_result
+            sample.corrected_snapshot = snapshot
+            sample.status = "approved"
+            sample.submitted_at = now
+            sample.exported_at = None
+            sample.export_batch_id = None
+
+        self.repository.flush()
+        self.uow.commit()
+        self.events.publish(
+            "recognition_feedback_submitted",
+            {"category": "recognition", "use_case": "SubmitRecognitionFeedback", "floor_plan_id": floor_plan_id},
+        )
+        return RecognitionFeedbackRead.model_validate(sample)
+
+    def export_feedback_samples(
+        self,
+        *,
+        batch_id: str | None = None,
+        output_root: Path | None = None,
+    ) -> dict[str, Any]:
+        export_batch_id = batch_id or datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S") + f"_{uuid.uuid4().hex[:8]}"
+        export_root = Path(output_root or (settings.outputs_dir / "recognition_feedback"))
+        batch_dir = export_root / export_batch_id
+        images_dir = batch_dir / "images"
+        annotations_dir = batch_dir / "annotations"
+        images_dir.mkdir(parents=True, exist_ok=True)
+        annotations_dir.mkdir(parents=True, exist_ok=True)
+
+        samples = self.repository.list_feedback_samples_for_export()
+        exported_at = datetime.now(timezone.utc)
+        manifest_lines: list[str] = []
+        exported_count = 0
+        try:
+            for sample in samples:
+                source_path = self.storage.absolute_path(sample.original_image_path)
+                if source_path is None or not source_path.exists():
+                    raise AppError(
+                        400,
+                        "recognition_feedback_source_missing",
+                        f"Source image for feedback sample {sample.id} is missing",
+                    )
+                image_name = f"sample_{sample.id}_recognition_{sample.recognition_id}{source_path.suffix or '.bin'}"
+                annotation_name = f"sample_{sample.id}_recognition_{sample.recognition_id}.json"
+                image_target = images_dir / image_name
+                annotation_target = annotations_dir / annotation_name
+                shutil.copy2(source_path, image_target)
+                self._write_json(annotation_target, sample.corrected_snapshot)
+                manifest_lines.append(
+                    json.dumps(
+                        {
+                            "sample_id": sample.id,
+                            "floor_plan_id": sample.floor_plan_id,
+                            "recognition_id": sample.recognition_id,
+                            "image_path": f"images/{image_name}",
+                            "annotation_path": f"annotations/{annotation_name}",
+                            "original_image_path": sample.original_image_path,
+                            "source_recognition_result": sample.source_recognition_result,
+                            "submitted_at": sample.submitted_at.isoformat() if sample.submitted_at else None,
+                            "exported_at": exported_at.isoformat(),
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+                sample.status = "exported"
+                sample.exported_at = exported_at
+                sample.export_batch_id = export_batch_id
+                exported_count += 1
+
+            manifest_path = batch_dir / "manifest.jsonl"
+            manifest_path.write_text("\n".join(manifest_lines) + ("\n" if manifest_lines else ""), encoding="utf-8")
+            self.repository.flush()
+            self.uow.commit()
+        except Exception:
+            self.uow.rollback()
+            raise
+
+        self.events.publish(
+            "recognition_feedback_exported",
+            {
+                "category": "recognition",
+                "use_case": "ExportRecognitionFeedback",
+                "payload": {"batch_id": export_batch_id, "count": exported_count},
+            },
+        )
+        return {
+            "batch_id": export_batch_id,
+            "export_dir": str(batch_dir.resolve()),
+            "count": exported_count,
+        }
+
     @staticmethod
     def _build_wall_id_map(walls: Iterable) -> Dict[int, int]:
         mapping: Dict[int, int] = {}
@@ -240,3 +365,17 @@ class RecognitionUseCases:
         if union == 0:
             return 0.0
         return float(intersection) / float(union)
+
+    @staticmethod
+    def _build_corrected_snapshot(floor_plan_data: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "walls": floor_plan_data.get("walls") or [],
+            "doors": floor_plan_data.get("doors") or [],
+            "windows": floor_plan_data.get("windows") or [],
+            "rooms": floor_plan_data.get("rooms") or [],
+            "dimensions": floor_plan_data.get("dimensions") or [],
+        }
+
+    @staticmethod
+    def _write_json(path: Path, payload: dict[str, Any]) -> None:
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

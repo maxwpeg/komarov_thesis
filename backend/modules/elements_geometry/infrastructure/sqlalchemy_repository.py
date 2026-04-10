@@ -6,11 +6,13 @@ from sqlalchemy.orm import Session
 
 from backend.errors import AppError
 from backend.modules.shared.infrastructure.persistence.models import (
+    CableRoute as CableRouteModel,
     Dimension as DimensionModel,
     Door as DoorModel,
     FireAlarm as FireAlarmModel,
     FloorPlan as FloorPlanModel,
     Room as RoomModel,
+    SignalInstrument as SignalInstrumentModel,
     Stair as StairModel,
     Wall as WallModel,
     Window as WindowModel,
@@ -73,6 +75,12 @@ class SqlAlchemyElementsRepository(ElementsRepository):
     def list_fire_alarms(self, floor_plan_id: int) -> list[FireAlarmModel]:
         return self.session.query(FireAlarmModel).filter(FireAlarmModel.floor_plan_id == floor_plan_id).all()
 
+    def list_signal_instruments(self, floor_plan_id: int, system_type: str | None = None) -> list[SignalInstrumentModel]:
+        query = self.session.query(SignalInstrumentModel).filter(SignalInstrumentModel.floor_plan_id == floor_plan_id)
+        if system_type:
+            query = query.filter(SignalInstrumentModel.system_type == system_type)
+        return query.order_by(SignalInstrumentModel.id.asc()).all()
+
     def list_zkspc_zones(self, floor_plan_id: int) -> list[ZkspcZoneModel]:
         return (
             self.session.query(ZkspcZoneModel)
@@ -102,6 +110,9 @@ class SqlAlchemyElementsRepository(ElementsRepository):
     def create_fire_alarm(self, data: dict) -> FireAlarmModel:
         return FireAlarmModel(**data)
 
+    def create_cable_route(self, data: dict) -> CableRouteModel:
+        return CableRouteModel(**data)
+
     def add(self, entity) -> None:
         self.session.add(entity)
 
@@ -113,6 +124,15 @@ class SqlAlchemyElementsRepository(ElementsRepository):
 
     def refresh(self, entity) -> None:
         self.session.refresh(entity)
+
+    def delete_routes_for_instrument(self, instrument_id: int) -> None:
+        self.session.query(CableRouteModel).filter(CableRouteModel.instrument_id == instrument_id).delete(synchronize_session=False)
+
+    def delete_routes_for_branch(self, floor_plan_id: int, system_type: str) -> None:
+        self.session.query(CableRouteModel).filter(
+            CableRouteModel.floor_plan_id == floor_plan_id,
+            CableRouteModel.system_type == system_type,
+        ).delete(synchronize_session=False)
 
     def get_optional_by_type(self, element_type: str, entity_id: int):
         model_map = {

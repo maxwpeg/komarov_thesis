@@ -3,20 +3,31 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { Stage, Layer, Line, Rect, Circle, Text, Arc, Group } from 'react-konva';
 import { elementsApi, floorPlansApi, pipelineApi, recognitionApi } from '../api/client';
 import {
+  clampViewportPan,
   clampHoverPanelPosition,
+  createViewportTransform,
+  getVisibleWallBoundarySegments,
   getOpeningEdgeHandles,
   getRotatedRectCorners,
   getStairGuideLines,
   getWallAxis as getWallAxisData,
+  getWallBounds,
+  getWallOutlineGeometry,
   millimetersToPx,
+  normalizeWallIntersections,
   normalizeOpeningToWall,
+  normalizeQuarterTurns,
   normalizeRectFromPoints,
+  normalizeWallAlignment,
   projectPointToWall,
+  resolveWallEndpointSnap,
+  viewportPointToPlan,
 } from '../utils/floorPlanGeometry';
 import {
   BackgroundImage as BackgroundImagePrimitive,
   DeleteButton as DeleteButtonPrimitive,
   FireAlarmSymbol as FireAlarmSymbolPrimitive,
+  SignalInstrumentSymbol as SignalInstrumentSymbolPrimitive,
 } from './floorPlanEditor/CanvasPrimitives';
 import CableRoutesLayer from './floorPlanEditor/CableRoutesLayer';
 import DevicesCablesSidebarSection from './floorPlanEditor/DevicesCablesSidebarSection';
@@ -25,6 +36,7 @@ import ZkspcSidebarSection from './floorPlanEditor/ZkspcSidebarSection';
 import {
   SIGNAL_INSTRUMENT_OPTIONS,
   SIGNAL_SYSTEM_OPTIONS,
+  buildZkspcStyleMap,
   buildRoomZoneMap,
   formatCableMeters,
   getBranchCableRoutes,
@@ -33,7 +45,7 @@ import {
   getSignalBranchSummary,
   getSignalInstrumentDefinition,
   getSignalSystemLabel,
-  getZkspcColor,
+  getZkspcStyle,
   groupFireAlarmsByZone,
   normalizeSignalSystemType,
   polylineToKonvaPoints,
@@ -46,8 +58,8 @@ function DeleteButton({ x, y, onClick }) {
 }
 
 // Background Image Component
-function BackgroundImage({ src, grayscale = true }) {
-  return <BackgroundImagePrimitive src={src} grayscale={grayscale} />;
+function BackgroundImage({ src, grayscale = true, onImageLoad }) {
+  return <BackgroundImagePrimitive src={src} grayscale={grayscale} onImageLoad={onImageLoad} />;
 }
 
 function getWallThicknessPx(wall, scaleFactor) {
@@ -200,6 +212,357 @@ function rectsIntersect(a, b) {
   );
 }
 
+function areViewportStatesEqual(left, right) {
+  return left?.zoom === right?.zoom
+    && left?.rotationQuarterTurns === right?.rotationQuarterTurns
+    && left?.pan?.x === right?.pan?.x
+    && left?.pan?.y === right?.pan?.y;
+}
+
+function estimateTextRect(text, x, y, fontSize = 10) {
+  const content = String(text || '');
+  const width = Math.max(fontSize, content.length * fontSize * 0.62);
+  const height = Math.max(fontSize + 2, fontSize * 1.2);
+  return {
+    x,
+    y,
+    width,
+    height,
+  };
+}
+
+const CANVAS_FONT_FAMILY = 'GOST A';
+
+function getInstrumentLabelText(instrument) {
+  if (!instrument) {
+    return null;
+  }
+  const explicitName = String(instrument.name || '').trim();
+  if (explicitName) {
+    return explicitName;
+  }
+  return instrument.instrument_type === 'control_panel' ? 'ARK' : null;
+}
+
+function getSignalInstrumentBounds(instrument) {
+  if (!instrument) {
+    return null;
+  }
+  const isControlPanel = instrument.instrument_type === 'control_panel';
+  const width = isControlPanel ? 48 : 36;
+  const height = isControlPanel ? 28 : 36;
+  return {
+    x: instrument.x - (width / 2),
+    y: instrument.y - (height / 2),
+    width,
+    height,
+  };
+}
+
+function getFireAlarmBounds(alarm) {
+  if (!alarm) {
+    return null;
+  }
+  return {
+    x: alarm.x - 14,
+    y: alarm.y - 14,
+    width: 28,
+    height: 28,
+  };
+}
+
+function getDoorSymbolSegmentsForOpening(opening) {
+  if (!opening) {
+    return null;
+  }
+  const halfWidth = Number(opening.width || 0) / 2;
+  const halfHeight = Number(opening.height || 0) / 2;
+  const centerHalfHeight = halfHeight + (Number(opening.height || 0) * 0.75);
+  return {
+    start: [-halfWidth, -halfHeight, -halfWidth, halfHeight],
+    center: [0, -centerHalfHeight, 0, centerHalfHeight],
+    end: [halfWidth, -halfHeight, halfWidth, halfHeight],
+  };
+}
+
+function getSymbolLabelCandidates(anchorX, anchorY, text, fontSize, symbolHalfWidth, symbolHalfHeight) {
+  const horizontalGap = symbolHalfWidth + 8;
+  const verticalGap = symbolHalfHeight + 8;
+  const sideGap = symbolHalfHeight + 6;
+  return [
+    estimateTextRect(text, anchorX + horizontalGap, anchorY - 8, fontSize),
+    estimateTextRect(text, anchorX + horizontalGap, anchorY - verticalGap, fontSize),
+    estimateTextRect(text, anchorX + horizontalGap, anchorY + verticalGap, fontSize),
+    estimateTextRect(text, anchorX - horizontalGap, anchorY - 8, fontSize),
+    estimateTextRect(text, anchorX - horizontalGap, anchorY - verticalGap, fontSize),
+    estimateTextRect(text, anchorX - horizontalGap, anchorY + verticalGap, fontSize),
+    estimateTextRect(text, anchorX - (symbolHalfWidth / 2), anchorY - sideGap, fontSize),
+    estimateTextRect(text, anchorX - (symbolHalfWidth / 2), anchorY + sideGap, fontSize),
+  ];
+}
+
+function isRectInsideBounds(rect, bounds) {
+  if (!rect || !bounds) {
+    return true;
+  }
+  return rect.x >= bounds.x
+    && rect.y >= bounds.y
+    && rect.x + rect.width <= bounds.x + bounds.width
+    && rect.y + rect.height <= bounds.y + bounds.height;
+}
+
+function chooseSymbolLabelRect({
+  anchorX,
+  anchorY,
+  text,
+  fontSize,
+  symbolHalfWidth,
+  symbolHalfHeight,
+  obstacles = [],
+  bounds = null,
+}) {
+  const candidates = getSymbolLabelCandidates(
+    anchorX,
+    anchorY,
+    text,
+    fontSize,
+    symbolHalfWidth,
+    symbolHalfHeight,
+  );
+  return candidates.find((candidate) => (
+    isRectInsideBounds(candidate, bounds)
+    && !obstacles.some((obstacle) => rectsIntersect(candidate, obstacle))
+  )) || candidates[0];
+}
+
+function padRect(rect, padding = 0) {
+  if (!rect) {
+    return null;
+  }
+  return {
+    x: rect.x - padding,
+    y: rect.y - padding,
+    width: rect.width + (padding * 2),
+    height: rect.height + (padding * 2),
+  };
+}
+
+function clampRectToBounds(rect, bounds) {
+  if (!rect || !bounds) {
+    return rect;
+  }
+  return {
+    ...rect,
+    x: Math.max(bounds.x, Math.min(rect.x, bounds.x + bounds.width - rect.width)),
+    y: Math.max(bounds.y, Math.min(rect.y, bounds.y + bounds.height - rect.height)),
+  };
+}
+
+function rectCenter(rect) {
+  return {
+    x: rect.x + (rect.width / 2),
+    y: rect.y + (rect.height / 2),
+  };
+}
+
+function translateRect(rect, dx, dy) {
+  return {
+    ...rect,
+    x: rect.x + dx,
+    y: rect.y + dy,
+  };
+}
+
+function resolveRectObstacleOffset(rect, obstacle, threshold = 6) {
+  if (!rect || !obstacle) {
+    return { dx: 0, dy: 0 };
+  }
+  const expandedObstacle = padRect(obstacle, threshold);
+  if (!rectsIntersect(rect, expandedObstacle)) {
+    return { dx: 0, dy: 0 };
+  }
+  const moveLeft = expandedObstacle.x - (rect.x + rect.width);
+  const moveRight = (expandedObstacle.x + expandedObstacle.width) - rect.x;
+  const moveUp = expandedObstacle.y - (rect.y + rect.height);
+  const moveDown = (expandedObstacle.y + expandedObstacle.height) - rect.y;
+  const candidates = [
+    { dx: moveLeft, dy: 0, distance: Math.abs(moveLeft) },
+    { dx: moveRight, dy: 0, distance: Math.abs(moveRight) },
+    { dx: 0, dy: moveUp, distance: Math.abs(moveUp) },
+    { dx: 0, dy: moveDown, distance: Math.abs(moveDown) },
+  ].sort((left, right) => left.distance - right.distance);
+  return candidates[0] || { dx: 0, dy: 0 };
+}
+
+function resolveRectAgainstObstacles(rect, obstacles = [], bounds = null, threshold = 6) {
+  let nextRect = rect ? { ...rect } : rect;
+  if (!nextRect) {
+    return null;
+  }
+  for (let iteration = 0; iteration < 12; iteration += 1) {
+    let moved = false;
+    obstacles.filter(Boolean).forEach((obstacle) => {
+      const { dx, dy } = resolveRectObstacleOffset(nextRect, obstacle, threshold);
+      if (dx !== 0 || dy !== 0) {
+        nextRect = translateRect(nextRect, dx, dy);
+        nextRect = clampRectToBounds(nextRect, bounds);
+        moved = true;
+      }
+    });
+    if (!moved) {
+      break;
+    }
+  }
+  return clampRectToBounds(nextRect, bounds);
+}
+
+function getOpeningBounds(opening) {
+  if (!opening) {
+    return null;
+  }
+  const corners = getRotatedRectCorners(opening);
+  return getBoundingBox(corners.map(({ x, y }) => [x, y]));
+}
+
+function getLabelRectFromOffset(anchorX, anchorY, text, fontSize, dx, dy) {
+  if (dx === null || dx === undefined || dy === null || dy === undefined) {
+    return null;
+  }
+  return estimateTextRect(text, anchorX + dx, anchorY + dy, fontSize);
+}
+
+function getSegmentOrientation(start, end) {
+  if (!start || !end) {
+    return null;
+  }
+  if (Math.abs(Number(end[0] || 0) - Number(start[0] || 0)) >= Math.abs(Number(end[1] || 0) - Number(start[1] || 0))) {
+    return 'horizontal';
+  }
+  return 'vertical';
+}
+
+function normalizeOrthogonalPolyline(polyline) {
+  const source = Array.isArray(polyline) ? polyline : [];
+  if (!source.length) {
+    return [];
+  }
+  const nextPoints = [[Number(source[0][0] || 0), Number(source[0][1] || 0)]];
+  for (let index = 1; index < source.length; index += 1) {
+    const target = [Number(source[index][0] || 0), Number(source[index][1] || 0)];
+    const previous = nextPoints[nextPoints.length - 1];
+    if (previous[0] !== target[0] && previous[1] !== target[1]) {
+      const beforePrevious = nextPoints[nextPoints.length - 2];
+      const preferredOrientation = beforePrevious ? getSegmentOrientation(beforePrevious, previous) : 'horizontal';
+      const corner = preferredOrientation === 'vertical'
+        ? [previous[0], target[1]]
+        : [target[0], previous[1]];
+      if (corner[0] !== previous[0] || corner[1] !== previous[1]) {
+        nextPoints.push(corner);
+      }
+    }
+    if (target[0] !== nextPoints[nextPoints.length - 1][0] || target[1] !== nextPoints[nextPoints.length - 1][1]) {
+      nextPoints.push(target);
+    }
+  }
+  return nextPoints.filter((point, index) => (
+    index === 0
+    || point[0] !== nextPoints[index - 1][0]
+    || point[1] !== nextPoints[index - 1][1]
+  ));
+}
+
+function updateOrthogonalHandlePoint(polyline, pointIndex, targetPoint) {
+  const points = normalizeOrthogonalPolyline(polyline).map((point) => [Number(point[0] || 0), Number(point[1] || 0)]);
+  if (pointIndex <= 0 || pointIndex >= points.length - 1) {
+    return points;
+  }
+  const previous = points[pointIndex - 1];
+  const current = [...points[pointIndex]];
+  const next = points[pointIndex + 1];
+  const prevOrientation = getSegmentOrientation(previous, current);
+  const nextOrientation = getSegmentOrientation(current, next);
+  const targetX = Number(targetPoint?.x ?? current[0]);
+  const targetY = Number(targetPoint?.y ?? current[1]);
+
+  if (prevOrientation === 'horizontal' && nextOrientation === 'vertical') {
+    current[0] = targetX;
+    current[1] = targetY;
+  } else if (prevOrientation === 'vertical' && nextOrientation === 'horizontal') {
+    current[0] = targetX;
+    current[1] = targetY;
+  } else if (prevOrientation === 'horizontal' && nextOrientation === 'horizontal') {
+    previous[1] = targetY;
+    current[1] = targetY;
+    next[1] = targetY;
+  } else if (prevOrientation === 'vertical' && nextOrientation === 'vertical') {
+    previous[0] = targetX;
+    current[0] = targetX;
+    next[0] = targetX;
+  } else {
+    current[0] = targetX;
+    current[1] = targetY;
+  }
+
+  points[pointIndex] = current;
+  points[pointIndex - 1] = previous;
+  points[pointIndex + 1] = next;
+  return normalizeOrthogonalPolyline(points);
+}
+
+function insertOrthogonalDogleg(polyline, insertIndex, targetPoint) {
+  const points = normalizeOrthogonalPolyline(polyline).map((point) => [Number(point[0] || 0), Number(point[1] || 0)]);
+  if (insertIndex <= 0 || insertIndex >= points.length) {
+    return points;
+  }
+  const start = points[insertIndex - 1];
+  const end = points[insertIndex];
+  const orientation = getSegmentOrientation(start, end);
+  const targetX = Number(targetPoint?.x ?? ((start[0] + end[0]) / 2));
+  const targetY = Number(targetPoint?.y ?? ((start[1] + end[1]) / 2));
+  const dogleg = orientation === 'vertical'
+    ? [
+      [start[0], targetY],
+      [targetX, targetY],
+      [targetX, end[1]],
+    ]
+    : [
+      [targetX, start[1]],
+      [targetX, targetY],
+      [end[0], targetY],
+    ];
+  points.splice(insertIndex, 0, ...dogleg);
+  return normalizeOrthogonalPolyline(points);
+}
+
+function translateInstrumentRouteStart(polyline, fromPoint, toPoint) {
+  const points = normalizeOrthogonalPolyline(polyline).map((point) => [Number(point[0] || 0), Number(point[1] || 0)]);
+  if (!points.length) {
+    return points;
+  }
+  const nextPoints = points.map((point) => [...point]);
+  nextPoints[0] = [Number(toPoint?.x || 0), Number(toPoint?.y || 0)];
+  if (nextPoints.length === 1) {
+    return nextPoints;
+  }
+  const nextPoint = [...nextPoints[1]];
+  const orientation = getSegmentOrientation(points[0], points[1]) || getSegmentOrientation(fromPoint, toPoint) || 'horizontal';
+  if (orientation === 'horizontal') {
+    nextPoint[1] = Number(toPoint?.y || 0);
+  } else {
+    nextPoint[0] = Number(toPoint?.x || 0);
+  }
+  nextPoints[1] = nextPoint;
+  return normalizeOrthogonalPolyline(nextPoints);
+}
+
+function getRotatedBounds(rect) {
+  if (!rect) {
+    return null;
+  }
+  const corners = getRotatedRectCorners(rect);
+  return getBoundingBox(corners.map(({ x, y }) => [x, y]));
+}
+
 function pointInPolygon(point, polygon) {
   if (!polygon || polygon.length < 3) {
     return false;
@@ -307,7 +670,105 @@ function FireAlarmSymbol({ x, y, deviceType, isSelected, isHovered, onClick, ...
   );
 }
 
-const HOVER_PANEL_SIZE = { width: 160, height: 170 };
+function SignalInstrumentSymbol({ x, y, instrumentType, isSelected, isHovered, onClick, ...rest }) {
+  return (
+    <SignalInstrumentSymbolPrimitive
+      x={x}
+      y={y}
+      instrumentType={instrumentType}
+      isSelected={isSelected}
+      isHovered={isHovered}
+      onClick={onClick}
+      {...rest}
+    />
+  );
+}
+
+function getPolygonBounds(flatPoints) {
+  if (!flatPoints?.length) {
+    return null;
+  }
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  for (let index = 0; index < flatPoints.length; index += 2) {
+    const x = flatPoints[index];
+    const y = flatPoints[index + 1];
+    minX = Math.min(minX, x);
+    minY = Math.min(minY, y);
+    maxX = Math.max(maxX, x);
+    maxY = Math.max(maxY, y);
+  }
+  return {
+    x: minX,
+    y: minY,
+    width: maxX - minX,
+    height: maxY - minY,
+  };
+}
+
+function buildZkspcHatchLines(bounds, spacing) {
+  if (!bounds || bounds.width <= 0 || bounds.height <= 0) {
+    return [];
+  }
+  const safeSpacing = Math.max(10, Number(spacing || 20));
+  const lines = [];
+  const startOffset = -bounds.height;
+  const endOffset = bounds.width + bounds.height;
+  for (let offset = startOffset; offset <= endOffset; offset += safeSpacing) {
+    lines.push([
+      bounds.x + offset,
+      bounds.y,
+      bounds.x + offset + bounds.height,
+      bounds.y + bounds.height,
+    ]);
+  }
+  return lines;
+}
+
+function getRoomDisplayCenter(room) {
+  if (room?.center_x !== null && room?.center_x !== undefined && room?.center_y !== null && room?.center_y !== undefined) {
+    return { x: room.center_x, y: room.center_y };
+  }
+  const bounds = getBoundingBox(room?.boundary_points || []);
+  if (!bounds) {
+    return null;
+  }
+  return {
+    x: bounds.x + (bounds.width / 2),
+    y: bounds.y + (bounds.height / 2),
+  };
+}
+
+const HOVER_PANEL_SIZE = { width: 360, height: 280 };
+const HOVER_PANEL_SECTION_STYLE = { display: 'flex', flexDirection: 'column', gap: '10px' };
+const HOVER_PANEL_FIELD_ROW_STYLE = { display: 'flex', alignItems: 'center', gap: '10px' };
+const HOVER_PANEL_LABEL_STYLE = {
+  flex: '0 0 118px',
+  fontSize: '12px',
+  fontWeight: 600,
+  color: '#4f4131',
+};
+const HOVER_PANEL_INPUT_STYLE = {
+  flex: '1 1 auto',
+  minWidth: 0,
+  height: '32px',
+  padding: '0 10px',
+  borderRadius: '10px',
+  border: '1px solid #d9d2c8',
+  backgroundColor: '#fffdfa',
+  color: '#1f2933',
+  fontSize: '13px',
+  boxSizing: 'border-box',
+};
+const HOVER_PANEL_INFO_ROW_STYLE = {
+  display: 'flex',
+  justifyContent: 'space-between',
+  gap: '10px',
+  fontSize: '12px',
+  color: '#6c5f52',
+};
 const INTERACTIVE_TYPES_BY_STEP = {
   original: [],
   walls: ['wall', 'new-wall', 'stair', 'new-stair'],
@@ -315,8 +776,20 @@ const INTERACTIVE_TYPES_BY_STEP = {
   rooms: ['room'],
   zkspc: ['room'],
   fire_alarms: ['fire-alarm', 'new-fire-alarm'],
-  devices_cables: ['signal-instrument', 'cable-route'],
+  devices_cables: ['signal-instrument', 'cable-route', 'fire-alarm', 'new-fire-alarm'],
 };
+const DEFAULT_WALL_THICKNESS_MM = 200;
+const DEFAULT_WALL_THICKNESS_M = '0.20';
+const WALL_PRESET_THICKNESS_DEFAULTS = {
+  outer: 300,
+  inner: 160,
+  manual: 200,
+};
+const WALL_ALIGNMENT_OPTIONS = [
+  { value: 'center', label: 'По центру' },
+  { value: 'left', label: 'Слева от оси' },
+  { value: 'right', label: 'Справа от оси' },
+];
 
 function FloorPlanEditor() {
   const { floorPlanId } = useParams();
@@ -366,16 +839,23 @@ function FloorPlanEditor() {
   const [shiftPressed, setShiftPressed] = useState(false);
   const [undoHistory, setUndoHistory] = useState([]);
   const [recognition, setRecognition] = useState(null);
+  const [recognitionMeta, setRecognitionMeta] = useState(null);
   // eslint-disable-next-line no-unused-vars
   const [recognizing, setRecognizing] = useState(false);
+  const [recognitionFeedbackSubmitting, setRecognitionFeedbackSubmitting] = useState(false);
+  const [recognitionFeedbackStatus, setRecognitionFeedbackStatus] = useState('idle');
+  const [recognitionFeedbackError, setRecognitionFeedbackError] = useState('');
   const [debugImages, setDebugImages] = useState([]);
   const [selectedDebugImagePath, setSelectedDebugImagePath] = useState(null);
   const [showDebugPanel, setShowDebugPanel] = useState(false);
-  const [stageScale, setStageScale] = useState(1);
-  const [userZoom, setUserZoom] = useState(1);
-  const [containerSize, setContainerSize] = useState({ width: 800, height: 600 });
-  const [stageOffset, setStageOffset] = useState({ x: 0, y: 0 });
-  const [stagePanOffset, setStagePanOffset] = useState({ x: 0, y: 0 });
+  const [stageContainerNode, setStageContainerNode] = useState(null);
+  const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
+  const [viewport, setViewport] = useState({
+    zoom: 1,
+    pan: { x: 0, y: 0 },
+    rotationQuarterTurns: 0,
+  });
+  const [renderedImageSize, setRenderedImageSize] = useState(null);
   const [isStagePanning, setIsStagePanning] = useState(false);
   const stagePanStartRef = useRef(null);
   const stagePanMovedRef = useRef(false);
@@ -392,11 +872,17 @@ function FloorPlanEditor() {
   const [hoverPanelMouseInside, setHoverPanelMouseInside] = useState(false);
   const [wallLengthDraft, setWallLengthDraft] = useState('');
   const [wallThicknessDraft, setWallThicknessDraft] = useState('');
+  const [wallAlignmentDraft, setWallAlignmentDraft] = useState('center');
+  const [wallDraftPreset, setWallDraftPreset] = useState('manual');
+  const [newWallAlignment, setNewWallAlignment] = useState('center');
+  const [newWallThicknessDraft, setNewWallThicknessDraft] = useState(DEFAULT_WALL_THICKNESS_M);
+  const [wallAutoSnapEnabled, setWallAutoSnapEnabled] = useState(true);
   const [openingSizeDraft, setOpeningSizeDraft] = useState({ width: '', height: '', wallId: '' });
   const [stairDraft, setStairDraft] = useState({ width: '', height: '' });
   const [roomDraft, setRoomDraft] = useState({ name: '', type: 'базовое', length: '', width: '' });
   const [fireAlarmDraft, setFireAlarmDraft] = useState({ zone: '', address: '' });
   const [signalInstrumentDraft, setSignalInstrumentDraft] = useState({ name: '', instrumentType: 'control_panel' });
+  const [mergeInstrumentId, setMergeInstrumentId] = useState(null);
   const [viewStep, setViewStep] = useState(null);
   const [planMetaDraft, setPlanMetaDraft] = useState({ name: '', floor_number: '', ceiling_height_m: '' });
   const [savingPlanMeta, setSavingPlanMeta] = useState(false);
@@ -410,6 +896,10 @@ function FloorPlanEditor() {
   const [activeDrag, setActiveDrag] = useState(null);
   const [activeCableHandle, setActiveCableHandle] = useState(null);
   const [calibrationDraft, setCalibrationDraft] = useState({ start: null, end: null, distance_m: '' });
+  const setStageContainerNodeRef = useCallback((node) => {
+    stageContainerRef.current = node;
+    setStageContainerNode((prev) => (prev === node ? prev : node));
+  }, []);
 
   const newFireAlarms = useMemo(
     () => newFireAlarmsBySystem[normalizeSignalSystemType(activeSignalSystemType)] || [],
@@ -434,6 +924,11 @@ function FloorPlanEditor() {
     }));
   }, [activeSignalSystemType]);
   const currentSignalSystem = normalizeSignalSystemType(activeSignalSystemType || floorPlan?.active_signal_system_type);
+  const currentWallDraftThicknessMm = useMemo(() => {
+    const parsedValue = Number(newWallThicknessDraft);
+    return parsedValue > 0 ? parsedValue * 1000 : DEFAULT_WALL_THICKNESS_MM;
+  }, [newWallThicknessDraft]);
+  const flipWallAlignment = useCallback(() => 'center', []);
   const currentZkspcZones = zkspcDraftZones.length ? zkspcDraftZones : zkspcZones;
   const roomZoneMap = useMemo(() => buildRoomZoneMap(currentZkspcZones), [currentZkspcZones]);
   const branchFireAlarms = useMemo(
@@ -446,25 +941,115 @@ function FloorPlanEditor() {
   const MIN_ZOOM = 0.1;
   const MAX_ZOOM = 5.0;
   const ZOOM_STEP = 0.1;
-
+  const userZoom = viewport.zoom;
+  const stagePanOffset = viewport.pan;
+  const imageUrl = floorPlan?.original_image_path 
+    ? `http://localhost:8000/${floorPlan.original_image_path.replace(/\\/g, '/')}`
+    : null;
+  const selectedDebugImage = debugImages.find((debugImg) => debugImg.path === selectedDebugImagePath) || null;
+  const displayedImageUrl = selectedDebugImage
+    ? `http://localhost:8000/${selectedDebugImage.path.replace(/\\/g, '/')}`
+    : imageUrl;
+  const effectiveImageWidth = Math.max(
+    1,
+    Number(
+      (renderedImageSize?.url === displayedImageUrl ? renderedImageSize?.width : null)
+      || floorPlan?.image_width
+      || 800,
+    ),
+  );
+  const effectiveImageHeight = Math.max(
+    1,
+    Number(
+      (renderedImageSize?.url === displayedImageUrl ? renderedImageSize?.height : null)
+      || floorPlan?.image_height
+      || 600,
+    ),
+  );
+  const clampViewportState = useCallback((nextState) => {
+    const normalizedZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, Number(nextState?.zoom ?? 1) || 1));
+    const normalizedRotationQuarterTurns = normalizeQuarterTurns(nextState?.rotationQuarterTurns || 0);
+    const normalizedPan = clampViewportPan(nextState?.pan || { x: 0, y: 0 }, {
+      containerWidth: containerSize.width,
+      containerHeight: containerSize.height,
+      imageWidth: effectiveImageWidth,
+      imageHeight: effectiveImageHeight,
+      zoom: normalizedZoom,
+      rotationQuarterTurns: normalizedRotationQuarterTurns,
+    });
+    return {
+      zoom: normalizedZoom,
+      pan: normalizedPan,
+      rotationQuarterTurns: normalizedRotationQuarterTurns,
+    };
+  }, [
+    containerSize.width,
+    containerSize.height,
+    effectiveImageWidth,
+    effectiveImageHeight,
+    MAX_ZOOM,
+    MIN_ZOOM,
+  ]);
+  const updateViewport = useCallback((updater) => {
+    setViewport((prev) => {
+      const candidate = typeof updater === 'function'
+        ? updater(prev)
+        : { ...prev, ...updater };
+      const next = clampViewportState({
+        zoom: candidate?.zoom ?? prev.zoom,
+        pan: candidate?.pan ?? prev.pan,
+        rotationQuarterTurns: candidate?.rotationQuarterTurns ?? prev.rotationQuarterTurns,
+      });
+      return areViewportStatesEqual(prev, next) ? prev : next;
+    });
+  }, [clampViewportState]);
+  const viewTransform = useMemo(() => createViewportTransform({
+    containerWidth: containerSize.width,
+    containerHeight: containerSize.height,
+    imageWidth: effectiveImageWidth,
+    imageHeight: effectiveImageHeight,
+    zoom: viewport.zoom,
+    pan: viewport.pan,
+    rotationQuarterTurns: viewport.rotationQuarterTurns,
+  }), [
+    containerSize.width,
+    containerSize.height,
+    effectiveImageWidth,
+    effectiveImageHeight,
+    viewport.zoom,
+    viewport.pan.x,
+    viewport.pan.y,
+    viewport.rotationQuarterTurns,
+  ]);
   // Zoom functions
   const handleZoomIn = useCallback(() => {
-    setUserZoom(prev => Math.min(prev + ZOOM_STEP, MAX_ZOOM));
-  }, []);
+    updateViewport((prev) => ({
+      ...prev,
+      zoom: Math.min(prev.zoom + ZOOM_STEP, MAX_ZOOM),
+    }));
+  }, [MAX_ZOOM, ZOOM_STEP, updateViewport]);
 
   const handleZoomOut = useCallback(() => {
-    setUserZoom(prev => Math.max(prev - ZOOM_STEP, MIN_ZOOM));
-  }, []);
+    updateViewport((prev) => ({
+      ...prev,
+      zoom: Math.max(prev.zoom - ZOOM_STEP, MIN_ZOOM),
+    }));
+  }, [MIN_ZOOM, ZOOM_STEP, updateViewport]);
 
   const handleZoomReset = useCallback(() => {
-    setUserZoom(1);
-    setStagePanOffset({ x: 0, y: 0 });
-  }, []);
+    updateViewport((prev) => ({
+      ...prev,
+      zoom: 1,
+      pan: { x: 0, y: 0 },
+    }));
+  }, [updateViewport]);
 
-  const effectiveStageOffset = useMemo(() => ({
-    x: stageOffset.x + stagePanOffset.x,
-    y: stageOffset.y + stagePanOffset.y,
-  }), [stageOffset.x, stageOffset.y, stagePanOffset.x, stagePanOffset.y]);
+  const handleRotateViewport = useCallback(() => {
+    updateViewport((prev) => ({
+      ...prev,
+      rotationQuarterTurns: normalizeQuarterTurns(prev.rotationQuarterTurns + 1),
+    }));
+  }, [updateViewport]);
 
   // Функция скачивания изображения
   const downloadImage = async (imageUrl, filename) => {
@@ -518,6 +1103,15 @@ function FloorPlanEditor() {
       applyFloorPlanData(data);
       const state = await pipelineApi.getState(floorPlanId);
       setPipelineState(state);
+      try {
+        const recognitionData = await recognitionApi.get(floorPlanId);
+        setRecognitionMeta(recognitionData);
+        setRecognition(recognitionData?.recognition_result || null);
+      } catch (recognitionError) {
+        console.error('Error fetching recognition state:', recognitionError);
+        setRecognitionMeta(null);
+        setRecognition(null);
+      }
       setLoading(false);
     } catch (error) {
       console.error('Error fetching floor plan:', error);
@@ -574,21 +1168,38 @@ function FloorPlanEditor() {
     setPlacementDraft(null);
   }, [selectedTool, viewStep]);
 
+  const buildEditableWall = useCallback((wall) => {
+    if (!wall) {
+      return null;
+    }
+    const fallbackLength = getDerivedWallLengthMeters(wall, floorPlan?.scale_factor);
+    return {
+      ...wall,
+      thickness: wall.thickness ?? DEFAULT_WALL_THICKNESS_MM,
+      alignment: 'center',
+      length_m: wall.length_m ?? fallbackLength,
+      length_source: wall.length_source || 'derived',
+    };
+  }, [floorPlan?.scale_factor]);
+
   const activeWallGeometries = useMemo(() => (
     walls
       .filter((wall) => !deletedElements.some((del) => del.type === 'walls' && del.id === wall.id))
       .map((wall) => {
         const modifications = modifiedWalls[wall.id] || {};
-        return {
+        return buildEditableWall({
           ...wall,
           x1: modifications.x1 !== undefined ? modifications.x1 : wall.x1,
           y1: modifications.y1 !== undefined ? modifications.y1 : wall.y1,
           x2: modifications.x2 !== undefined ? modifications.x2 : wall.x2,
           y2: modifications.y2 !== undefined ? modifications.y2 : wall.y2,
           thickness: modifications.thickness !== undefined ? modifications.thickness : wall.thickness,
-        };
+          length_m: modifications.length_m !== undefined ? modifications.length_m : wall.length_m,
+          length_source: modifications.length_source !== undefined ? modifications.length_source : wall.length_source,
+        });
       })
-  ), [walls, deletedElements, modifiedWalls]);
+      .filter(Boolean)
+  ), [walls, deletedElements, modifiedWalls, buildEditableWall]);
 
   const getOpeningCurrentGeometry = useCallback((kind, entityId, fallbackEntity = null) => {
     const collection = kind === 'doors'
@@ -649,14 +1260,204 @@ function FloorPlanEditor() {
     return {
       ...entity,
       ...modifications,
-      x,
-      y,
+      x: placement.x,
+      y: placement.y,
+      label_dx: modifications.label_dx !== undefined ? modifications.label_dx : entity.label_dx,
+      label_dy: modifications.label_dy !== undefined ? modifications.label_dy : entity.label_dy,
       room_id: metadata.roomId ?? entity.room_id ?? null,
       offset_left_m: metadata.offsetLeftM ?? entity.offset_left_m ?? null,
       offset_top_m: metadata.offsetTopM ?? entity.offset_top_m ?? null,
       room_name: metadata.room?.name || null,
     };
   }, [fireAlarms, newFireAlarms, modifiedElements, rooms, floorPlan?.scale_factor]);
+
+  const placementBounds = useMemo(() => ({
+    x: 0,
+    y: 0,
+    width: effectiveImageWidth,
+    height: effectiveImageHeight,
+  }), [effectiveImageHeight, effectiveImageWidth]);
+
+  const collectDevicePlacementObstacles = useCallback((exclude = {}) => {
+    const {
+      excludeFireAlarmId = null,
+      excludeInstrumentId = null,
+    } = exclude;
+    const obstacles = [];
+    activeWallGeometries.forEach((wall) => {
+      const bounds = getWallBounds(wall, floorPlan?.scale_factor);
+      if (bounds) {
+        obstacles.push(bounds);
+      }
+    });
+    [...doors, ...newDoors].forEach((door) => {
+      const current = getOpeningCurrentGeometry(door.id?.toString?.().startsWith('temp_') ? 'new-doors' : 'doors', door.id, door);
+      const bounds = getOpeningBounds(current || door);
+      if (bounds) {
+        obstacles.push(bounds);
+      }
+    });
+    [...windows, ...newWindows].forEach((windowItem) => {
+      const current = getOpeningCurrentGeometry(windowItem.id?.toString?.().startsWith('temp_') ? 'new-windows' : 'windows', windowItem.id, windowItem);
+      const bounds = getOpeningBounds(current || windowItem);
+      if (bounds) {
+        obstacles.push(bounds);
+      }
+    });
+    branchFireAlarms.forEach((alarm) => {
+      if (alarm.id === excludeFireAlarmId) {
+        return;
+      }
+      const current = getFireAlarmCurrentGeometry('fire-alarms', alarm.id, alarm);
+      const bounds = getFireAlarmBounds(current);
+      if (bounds) {
+        obstacles.push(bounds);
+      }
+    });
+    newFireAlarms.forEach((alarm) => {
+      if (alarm.id === excludeFireAlarmId) {
+        return;
+      }
+      const current = getFireAlarmCurrentGeometry('new-fire-alarms', alarm.id, alarm);
+      const bounds = getFireAlarmBounds(current);
+      if (bounds) {
+        obstacles.push(bounds);
+      }
+    });
+    signalInstruments
+      .filter((instrument) => normalizeSignalSystemType(instrument.system_type) === currentSignalSystem)
+      .forEach((instrument) => {
+        if (instrument.id === excludeInstrumentId) {
+          return;
+        }
+        const bounds = getSignalInstrumentBounds(instrument);
+        if (bounds) {
+          obstacles.push(bounds);
+        }
+      });
+    return obstacles;
+  }, [
+    activeWallGeometries,
+    branchFireAlarms,
+    currentSignalSystem,
+    doors,
+    floorPlan?.scale_factor,
+    getFireAlarmCurrentGeometry,
+    getOpeningCurrentGeometry,
+    newDoors,
+    newFireAlarms,
+    newWindows,
+    signalInstruments,
+    windows,
+  ]);
+
+  const resolveDevicePlacementPoint = useCallback((point, getBoundsForCenter, exclude = {}) => {
+    const bounds = getBoundsForCenter(point);
+    const nextBounds = resolveRectAgainstObstacles(
+      bounds,
+      collectDevicePlacementObstacles(exclude),
+      placementBounds,
+      8,
+    );
+    return rectCenter(nextBounds || bounds);
+  }, [collectDevicePlacementObstacles, placementBounds]);
+
+  const resolveManualCallPointPlacement = useCallback((point) => {
+    const candidateDoors = [...doors, ...newDoors]
+      .map((door) => (
+        door.id?.toString?.().startsWith('temp_')
+          ? getOpeningCurrentGeometry('new-doors', door.id, door)
+          : getOpeningCurrentGeometry('doors', door.id, door)
+      ))
+      .filter(Boolean)
+      .filter((door) => door.wall_id);
+    if (!candidateDoors.length) {
+      return point;
+    }
+    const nearestDoor = [...candidateDoors].sort((left, right) => {
+      const leftCenterX = left.x + (left.width / 2);
+      const leftCenterY = left.y + (left.height / 2);
+      const rightCenterX = right.x + (right.width / 2);
+      const rightCenterY = right.y + (right.height / 2);
+      return Math.hypot(point.x - leftCenterX, point.y - leftCenterY) - Math.hypot(point.x - rightCenterX, point.y - rightCenterY);
+    })[0];
+    const wall = activeWallGeometries.find((item) => item.id === nearestDoor.wall_id);
+    const axis = wall ? getWallAxisData(wall) : null;
+    if (!wall || !axis) {
+      return point;
+    }
+    const center = {
+      x: nearestDoor.x + (nearestDoor.width / 2),
+      y: nearestDoor.y + (nearestDoor.height / 2),
+    };
+    const centerProjection = projectPointToWall(center, wall);
+    if (!centerProjection) {
+      return point;
+    }
+    const scale = floorPlan?.scale_factor && floorPlan.scale_factor > 0 ? floorPlan.scale_factor : 1;
+    const placementOffsetPx = Math.max(4, 300 / scale);
+    const tangentClearancePx = Math.max(8, 180 / scale);
+    const halfSpan = Math.max(6, Number(nearestDoor.width || 0) / 2);
+    const doorStart = Math.max(0, centerProjection.along - halfSpan);
+    const doorEnd = Math.min(axis.length, centerProjection.along + halfSpan);
+    let leftLimit = 0;
+    let rightLimit = axis.length;
+    candidateDoors
+      .filter((door) => door.wall_id === nearestDoor.wall_id && door.id !== nearestDoor.id)
+      .forEach((door) => {
+        const doorCenter = {
+          x: door.x + (door.width / 2),
+          y: door.y + (door.height / 2),
+        };
+        const projection = projectPointToWall(doorCenter, wall);
+        if (!projection) {
+          return;
+        }
+        const otherHalfSpan = Math.max(6, Number(door.width || 0) / 2);
+        const otherStart = Math.max(0, projection.along - otherHalfSpan);
+        const otherEnd = Math.min(axis.length, projection.along + otherHalfSpan);
+        if (otherEnd <= doorStart && otherEnd > leftLimit) {
+          leftLimit = otherEnd;
+        }
+        if (otherStart >= doorEnd && otherStart < rightLimit) {
+          rightLimit = otherStart;
+        }
+      });
+    const availableLeft = Math.max(0, doorStart - leftLimit);
+    const availableRight = Math.max(0, rightLimit - doorEnd);
+    const alongSign = availableRight >= availableLeft ? 1 : -1;
+    const availableSpan = alongSign > 0 ? availableRight : availableLeft;
+    const shiftAlongWall = halfSpan + Math.min(
+      Math.max(0, availableSpan - 2),
+      Math.max(tangentClearancePx, halfSpan + (tangentClearancePx * 0.35)),
+    );
+    const projected = Math.max(0, Math.min(axis.length, centerProjection.along + (alongSign * shiftAlongWall)));
+    const sideDot = ((point.x - center.x) * axis.nx) + ((point.y - center.y) * axis.ny);
+    const normalSign = sideDot >= 0 ? 1 : -1;
+    return {
+      x: axis.x1 + (axis.ux * projected) + (axis.nx * placementOffsetPx * normalSign),
+      y: axis.y1 + (axis.uy * projected) + (axis.ny * placementOffsetPx * normalSign),
+    };
+  }, [activeWallGeometries, doors, floorPlan?.scale_factor, getOpeningCurrentGeometry, newDoors]);
+
+  const resolveFireAlarmPlacement = useCallback((deviceType, point, exclude = {}) => {
+    const basePoint = deviceType === 'manual_call_point'
+      ? resolveManualCallPointPlacement(point)
+      : point;
+    return resolveDevicePlacementPoint(
+      basePoint,
+      (center) => getFireAlarmBounds({ x: center.x, y: center.y }),
+      exclude,
+    );
+  }, [resolveDevicePlacementPoint, resolveManualCallPointPlacement]);
+
+  const resolveInstrumentPlacement = useCallback((point, exclude = {}) => (
+    resolveDevicePlacementPoint(
+      point,
+      (center) => getSignalInstrumentBounds({ ...exclude.instrument, x: center.x, y: center.y }),
+      exclude,
+    )
+  ), [resolveDevicePlacementPoint]);
 
   const currentStairGeometries = useMemo(() => (
     [
@@ -682,15 +1483,154 @@ function FloorPlanEditor() {
       return null;
     }
     const modifications = modifiedWalls[wallId] || {};
-    return {
+    return buildEditableWall({
+      ...wall,
       x1: modifications.x1 !== undefined ? modifications.x1 : wall.x1,
       y1: modifications.y1 !== undefined ? modifications.y1 : wall.y1,
       x2: modifications.x2 !== undefined ? modifications.x2 : wall.x2,
       y2: modifications.y2 !== undefined ? modifications.y2 : wall.y2,
       thickness: modifications.thickness !== undefined ? modifications.thickness : wall.thickness,
       length_m: modifications.length_m !== undefined ? modifications.length_m : wall.length_m,
-    };
-  }, [walls, modifiedWalls]);
+      length_source: modifications.length_source !== undefined ? modifications.length_source : wall.length_source,
+    });
+  }, [walls, modifiedWalls, buildEditableWall]);
+  const draftingWalls = useMemo(() => (
+    [
+      ...activeWallGeometries,
+      ...newWalls,
+    ].map((wall) => buildEditableWall(wall)).filter(Boolean)
+  ), [activeWallGeometries, newWalls, buildEditableWall]);
+  const draftingWallMap = useMemo(() => (
+    new Map(draftingWalls.map((wall) => [wall.id, wall]))
+  ), [draftingWalls]);
+  const visibleWallBoundarySegments = useMemo(() => (
+    getVisibleWallBoundarySegments(draftingWalls, floorPlan?.scale_factor)
+  ), [draftingWalls, floorPlan?.scale_factor]);
+  const getWallOutline = useCallback((wallGeometry) => (
+    getWallOutlineGeometry(buildEditableWall(wallGeometry), floorPlan?.scale_factor)
+  ), [buildEditableWall, floorPlan?.scale_factor]);
+  const getWorkingWallsSnapshot = useCallback(() => draftingWalls.map((wall) => buildEditableWall(wall)), [draftingWalls, buildEditableWall]);
+  const persistWallWorkingSet = useCallback((workingWalls, options = {}) => {
+    const {
+      markUnsaved = true,
+    } = options;
+    const persistedMap = new Map(walls.map((wall) => [wall.id, wall]));
+    const existingNewWallMap = new Map(newWalls.map((wall) => [wall.id, wall]));
+    const nextModifiedWalls = {};
+    const nextNewWalls = [];
+
+    workingWalls.forEach((wall) => {
+      const normalizedWall = buildEditableWall(wall);
+      if (!normalizedWall) {
+        return;
+      }
+      if (persistedMap.has(normalizedWall.id)) {
+        const baseWall = persistedMap.get(normalizedWall.id);
+        const nextPatch = {};
+        const nextData = {
+          x1: normalizedWall.x1,
+          y1: normalizedWall.y1,
+          x2: normalizedWall.x2,
+          y2: normalizedWall.y2,
+          thickness: normalizedWall.thickness,
+          alignment: 'center',
+          length_m: normalizedWall.length_m,
+          length_source: normalizedWall.length_source,
+        };
+        Object.entries(nextData).forEach(([key, value]) => {
+          const baseValue = key === 'alignment'
+            ? (baseWall.alignment || 'center')
+            : baseWall[key];
+          if (baseValue !== value) {
+            nextPatch[key] = value;
+          }
+        });
+        if (Object.keys(nextPatch).length > 0) {
+          nextModifiedWalls[normalizedWall.id] = nextPatch;
+        }
+        return;
+      }
+      nextNewWalls.push({
+        ...(existingNewWallMap.get(normalizedWall.id) || {}),
+        ...normalizedWall,
+        alignment: 'center',
+      });
+    });
+
+    setModifiedWalls(nextModifiedWalls);
+    setNewWalls(nextNewWalls);
+    if (markUnsaved) {
+      setHasUnsavedChanges(true);
+    }
+    setHoverPanel((prev) => {
+      if (!prev || !['wall', 'new-wall'].includes(prev.type)) {
+        return prev;
+      }
+      const nextWall = workingWalls.find((wall) => wall.id === prev.id) || null;
+      return nextWall ? { ...prev, data: nextWall } : prev;
+    });
+    setSelectedElement((prev) => {
+      if (!prev || !['wall', 'new-wall'].includes(prev.type)) {
+        return prev;
+      }
+      const nextWall = workingWalls.find((wall) => wall.id === prev.id) || null;
+      return nextWall ? { ...prev, data: nextWall } : prev;
+    });
+  }, [walls, newWalls, buildEditableWall]);
+  const finalizeWallWorkingSet = useCallback((workingWalls, options = {}) => {
+    const {
+      autoNormalize = wallAutoSnapEnabled,
+      markUnsaved = true,
+    } = options;
+    const normalizedInput = workingWalls.map((wall) => buildEditableWall(wall)).filter(Boolean);
+    const nextWalls = autoNormalize
+      ? normalizeWallIntersections(normalizedInput, floorPlan?.scale_factor)
+      : normalizedInput;
+    persistWallWorkingSet(nextWalls, { markUnsaved });
+    return nextWalls;
+  }, [buildEditableWall, floorPlan?.scale_factor, persistWallWorkingSet, wallAutoSnapEnabled]);
+  const replaceWallInWorkingSet = useCallback((wallId, transformWall, options = {}) => {
+    const workingWalls = getWorkingWallsSnapshot();
+    if (!workingWalls.some((wall) => wall.id === wallId)) {
+      return [];
+    }
+    return finalizeWallWorkingSet(
+      workingWalls.map((wall) => (
+        wall.id === wallId ? buildEditableWall(transformWall(buildEditableWall(wall))) : wall
+      )),
+      options,
+    );
+  }, [buildEditableWall, finalizeWallWorkingSet, getWorkingWallsSnapshot]);
+  const resolveWallDraftEndpoint = useCallback((wallGeometry, movingPoint, movingEndpoint = 'end', options = {}) => (
+    wallAutoSnapEnabled
+      ? resolveWallEndpointSnap(
+        buildEditableWall(wallGeometry),
+        movingPoint,
+        draftingWalls,
+        floorPlan?.scale_factor,
+        {
+          movingEndpoint,
+          ...options,
+        },
+      )
+      : movingPoint
+  ), [wallAutoSnapEnabled, buildEditableWall, draftingWalls, floorPlan?.scale_factor]);
+  const getDraggedWallThicknessMm = useCallback((geometry, pointer) => {
+    const dx = geometry.x2 - geometry.x1;
+    const dy = geometry.y2 - geometry.y1;
+    const length = Math.sqrt(dx * dx + dy * dy);
+    if (length < 1e-6) {
+      return geometry.thickness || 20;
+    }
+    const nx = -dy / length;
+    const ny = dx / length;
+    const midX = (geometry.x1 + geometry.x2) / 2;
+    const midY = (geometry.y1 + geometry.y2) / 2;
+    const signedDistance = (pointer.x - midX) * nx + (pointer.y - midY) * ny;
+    const thicknessPx = Math.max(2, Math.abs(signedDistance) * 2);
+    const scale = floorPlan?.scale_factor && floorPlan.scale_factor > 0 ? floorPlan.scale_factor : 1;
+    return Math.max(20, thicknessPx * scale);
+  }, [floorPlan?.scale_factor]);
 
   const clearCanvasSelection = useCallback(() => {
     setSelectedElement(null);
@@ -710,13 +1650,14 @@ function FloorPlanEditor() {
         ? 'zkspc'
         : (pipelineState?.active_step || 'original')));
   const drawingToolActive = !['select', 'multi-select', 'room-zone'].includes(selectedTool);
+  const mergeModeActive = interactionViewStep === 'devices_cables' && mergeInstrumentId !== null;
 
   const isElementInteractionBlocked = useCallback((type, id) => (
     ((INTERACTIVE_TYPES_BY_STEP[interactionViewStep] || []).length > 0
       && !(INTERACTIVE_TYPES_BY_STEP[interactionViewStep] || []).includes(type))
-    || drawingToolActive
-    || (selectionLockActive && !isElementSelected(type, id))
-  ), [interactionViewStep, drawingToolActive, selectionLockActive, isElementSelected]);
+    || (!mergeModeActive && drawingToolActive)
+    || (!mergeModeActive && selectionLockActive && !isElementSelected(type, id))
+  ), [interactionViewStep, drawingToolActive, mergeModeActive, selectionLockActive, isElementSelected]);
 
   const applyOpeningGeometryUpdate = useCallback((kind, entityId, nextGeometry) => {
     if (kind === 'doors' || kind === 'windows') {
@@ -984,41 +1925,62 @@ function FloorPlanEditor() {
     }
   }, [hoverPanel?.id, hoverPanel?.type, floorPlan?.scale_factor, walls, newWalls, modifiedWalls, doors, windows, newDoors, newWindows, stairs, newStairs, getOpeningCurrentGeometry, getStairCurrentGeometry]);
 
-  // Update container size and scale on mount and resize
+  // Track the real editor viewport size so fit is recalculated when the stage area changes.
   useEffect(() => {
-    const updateSize = () => {
-      const container = document.getElementById('editor-stage-container');
-      if (container) {
-        const rect = container.getBoundingClientRect();
-        setContainerSize({ width: rect.width, height: rect.height });
+    const container = stageContainerNode;
+    if (!container) {
+      return undefined;
+    }
+
+    let frameId = null;
+    const scheduleMeasure = () => {
+      if (typeof window.requestAnimationFrame === 'function') {
+        if (frameId !== null) {
+          window.cancelAnimationFrame(frameId);
+        }
+        frameId = window.requestAnimationFrame(updateSize);
+        return;
       }
+      updateSize();
+    };
+    const updateSize = () => {
+      const rect = container.getBoundingClientRect();
+      setContainerSize((prev) => (
+        prev.width === rect.width && prev.height === rect.height
+          ? prev
+          : { width: rect.width, height: rect.height }
+      ));
     };
 
     updateSize();
+    scheduleMeasure();
+
+    if (typeof ResizeObserver !== 'undefined') {
+      const observer = new ResizeObserver(() => scheduleMeasure());
+      observer.observe(container);
+      return () => {
+        observer.disconnect();
+        if (frameId !== null && typeof window.cancelAnimationFrame === 'function') {
+          window.cancelAnimationFrame(frameId);
+        }
+      };
+    }
+
     window.addEventListener('resize', updateSize);
-    return () => window.removeEventListener('resize', updateSize);
-  }, [floorPlan]); // Add floorPlan dependency to recalculate when floor plan loads
-
-  // Calculate scale and offset when container size or floor plan changes
-  useEffect(() => {
-    if (floorPlan && containerSize.width && containerSize.height) {
-      const imageWidth = floorPlan.image_width || 800;
-      const imageHeight = floorPlan.image_height || 600;
-      const autoScale = Math.min(containerSize.width / imageWidth, containerSize.height / imageHeight) * 0.95;
-      const finalScale = autoScale * userZoom;
-      setStageScale(finalScale);
-      
-      const offsetX = (containerSize.width - imageWidth * finalScale) / 2;
-      const offsetY = (containerSize.height - imageHeight * finalScale) / 2;
-      setStageOffset({ x: offsetX, y: offsetY });
-    }
-  }, [floorPlan, containerSize, userZoom]);
+    return () => {
+      window.removeEventListener('resize', updateSize);
+      if (frameId !== null && typeof window.cancelAnimationFrame === 'function') {
+        window.cancelAnimationFrame(frameId);
+      }
+    };
+  }, [stageContainerNode]);
 
   useEffect(() => {
-    if (userZoom <= 1) {
-      setStagePanOffset({ x: 0, y: 0 });
-    }
-  }, [userZoom]);
+    setViewport((prev) => {
+      const next = clampViewportState(prev);
+      return areViewportStatesEqual(prev, next) ? prev : next;
+    });
+  }, [clampViewportState]);
 
   // Handle mouse wheel zoom
   useEffect(() => {
@@ -1026,16 +1988,20 @@ function FloorPlanEditor() {
       if (e.ctrlKey) {
         e.preventDefault();
         const delta = e.deltaY > 0 ? -ZOOM_STEP : ZOOM_STEP;
-        setUserZoom(prev => Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, prev + delta)));
+        updateViewport((prev) => ({
+          ...prev,
+          zoom: Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, prev.zoom + delta)),
+        }));
       }
     };
 
-    const container = document.getElementById('editor-stage-container');
+    const container = stageContainerRef.current;
     if (container) {
       container.addEventListener('wheel', handleWheel, { passive: false });
       return () => container.removeEventListener('wheel', handleWheel);
     }
-  }, []);
+    return undefined;
+  }, [MAX_ZOOM, MIN_ZOOM, ZOOM_STEP, updateViewport]);
 
   const saveToHistory = useCallback(() => {
     setUndoHistory(prev => [...prev, {
@@ -1065,6 +2031,25 @@ function FloorPlanEditor() {
     
     // Добавляем элемент в список удаленных
     setDeletedElements(prev => [...prev, { type, id }]);
+    if (type === 'walls') {
+      setModifiedWalls((prev) => {
+        if (prev[id] === undefined) {
+          return prev;
+        }
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+    }
+    setModifiedElements((prev) => {
+      const key = `${type}-${id}`;
+      if (!(key in prev)) {
+        return prev;
+      }
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
     setSelectedElement(null);
     setSelectedElements(prev => prev.filter(item => item.id !== id));
     setHasUnsavedChanges(true);
@@ -1082,18 +2067,20 @@ function FloorPlanEditor() {
         if (drawingWall) {
           e.preventDefault();
           setDrawingWall(null);
-          return;
         }
         if (placementDraft) {
           e.preventDefault();
           setPlacementDraft(null);
-          return;
         }
         if (calibrationDraft.start && !calibrationDraft.end) {
           e.preventDefault();
           setCalibrationDraft((prev) => ({ ...prev, start: null, end: null }));
-          return;
         }
+        if (selectedTool !== 'select') {
+          e.preventDefault();
+          setSelectedTool('select');
+        }
+        return;
       }
       
       // Delete для удаления выделенных элементов
@@ -1243,6 +2230,7 @@ function FloorPlanEditor() {
     drawingWall,
     placementDraft,
     calibrationDraft,
+    selectedTool,
   ]);
 
   // eslint-disable-next-line no-unused-vars
@@ -1295,9 +2283,18 @@ function FloorPlanEditor() {
   // Функция автоматического распознавания плана этажа
   const buildWallsPayload = useCallback(() => {
     const payload = createEmptyBatchPayload();
+    const deletedWallIds = new Set();
+    const deletedStairIds = new Set();
     payload.deleted = deletedElements
       .filter((element) => element.type === 'walls' || element.type === 'stairs')
-      .map((element) => ({ element_type: element.type, id: element.id }));
+      .map((element) => {
+        if (element.type === 'walls') {
+          deletedWallIds.add(element.id);
+        } else if (element.type === 'stairs') {
+          deletedStairIds.add(element.id);
+        }
+        return { element_type: element.type, id: element.id };
+      });
     payload.create_walls = newWalls.map((wall) => ({
       x1: wall.x1,
       y1: wall.y1,
@@ -1305,6 +2302,7 @@ function FloorPlanEditor() {
       y2: wall.y2,
       floor_plan_id: parseInt(floorPlanId, 10),
       thickness: wall.thickness || 200,
+      alignment: 'center',
       is_load_bearing: wall.is_load_bearing || false,
       material: wall.material || null,
       length_m: wall.length_m || null,
@@ -1321,6 +2319,7 @@ function FloorPlanEditor() {
       step_axis: stair.step_axis || (stair.width >= stair.height ? 'horizontal' : 'vertical'),
     }));
     payload.update_walls = Object.entries(modifiedWalls)
+      .filter(([wallId]) => !deletedWallIds.has(parseInt(wallId, 10)))
       .map(([wallId, modifications]) => {
         const wall = walls.find((item) => item.id === parseInt(wallId, 10));
         if (!wall) {
@@ -1335,6 +2334,7 @@ function FloorPlanEditor() {
             x2: modifications.x2 !== undefined ? modifications.x2 : wall.x2,
             y2: modifications.y2 !== undefined ? modifications.y2 : wall.y2,
             thickness: modifications.thickness !== undefined ? modifications.thickness : wall.thickness,
+            alignment: 'center',
             is_load_bearing: wall.is_load_bearing,
             material: wall.material,
             length_m: modifications.length_m !== undefined ? modifications.length_m : wall.length_m,
@@ -1347,16 +2347,26 @@ function FloorPlanEditor() {
       .filter(([key]) => key.startsWith('stairs-'))
       .map(([key, data]) => {
         const { id } = parseModifiedElementKey(key);
-        return { id, data };
-      });
+        return deletedStairIds.has(id) ? null : { id, data };
+      })
+      .filter(Boolean);
     return payload;
   }, [deletedElements, newWalls, newStairs, floorPlanId, modifiedWalls, walls, modifiedElements]);
 
   const buildOpeningsPayload = useCallback(() => {
     const payload = createEmptyBatchPayload();
+    const deletedDoorIds = new Set();
+    const deletedWindowIds = new Set();
     payload.deleted = deletedElements
       .filter((element) => element.type === 'doors' || element.type === 'windows')
-      .map((element) => ({ element_type: element.type, id: element.id }));
+      .map((element) => {
+        if (element.type === 'doors') {
+          deletedDoorIds.add(element.id);
+        } else if (element.type === 'windows') {
+          deletedWindowIds.add(element.id);
+        }
+        return { element_type: element.type, id: element.id };
+      });
     payload.create_doors = newDoors.map((door) => ({
       floor_plan_id: parseInt(floorPlanId, 10),
       x: door.x,
@@ -1377,9 +2387,9 @@ function FloorPlanEditor() {
     }));
     Object.entries(modifiedElements).forEach(([key, data]) => {
       const { type, id } = parseModifiedElementKey(key);
-      if (type === 'doors') {
+      if (type === 'doors' && !deletedDoorIds.has(id)) {
         payload.update_doors.push({ id, data });
-      } else if (type === 'windows') {
+      } else if (type === 'windows' && !deletedWindowIds.has(id)) {
         payload.update_windows.push({ id, data });
       }
     });
@@ -1408,9 +2418,13 @@ function FloorPlanEditor() {
   const buildFireAlarmsPayload = useCallback(() => {
     const payload = createEmptyBatchPayload();
     const activeBranchIds = new Set(branchFireAlarms.map((alarm) => alarm.id));
+    const deletedAlarmIds = new Set();
     payload.deleted = deletedElements
       .filter((element) => element.type === 'fire-alarms' && activeBranchIds.has(element.id))
-      .map((element) => ({ element_type: element.type, id: element.id }));
+      .map((element) => {
+        deletedAlarmIds.add(element.id);
+        return { element_type: element.type, id: element.id };
+      });
     payload.create_fire_alarms = newFireAlarms.map((alarm) => {
       const current = getFireAlarmCurrentGeometry('new-fire-alarms', alarm.id, alarm) || alarm;
       return {
@@ -1431,6 +2445,8 @@ function FloorPlanEditor() {
         room_id: current.room_id ?? null,
         offset_left_m: current.offset_left_m ?? null,
         offset_top_m: current.offset_top_m ?? null,
+        label_dx: current.label_dx ?? null,
+        label_dy: current.label_dy ?? null,
       };
     });
     payload.update_fire_alarms = Object.entries(modifiedElements)
@@ -1439,7 +2455,7 @@ function FloorPlanEditor() {
           return false;
         }
         const { id } = parseModifiedElementKey(key);
-        return activeBranchIds.has(id);
+        return activeBranchIds.has(id) && !deletedAlarmIds.has(id);
       })
       .map(([key, data]) => {
         const { id } = parseModifiedElementKey(key);
@@ -1622,8 +2638,17 @@ function FloorPlanEditor() {
       setPipelineActionLoading(true);
       let changes = createEmptyBatchPayload();
       let response = null;
+      const prospectiveScaleFactor = Number(buildPlanMetaPayload()?.scale_factor ?? floorPlan?.scale_factor ?? 0);
+      if (step === 'walls' && !(prospectiveScaleFactor > 1.000001)) {
+        alert('РџРµСЂРµРґ РїРѕРґС‚РІРµСЂР¶РґРµРЅРёРµРј СЃС‚РµРЅ Р·Р°РґР°Р№С‚Рµ РјР°СЃС€С‚Р°Р± РЅР° С€Р°РіРµ 1.');
+        setPipelineActionLoading(false);
+        return false;
+      }
+      if (floorPlan) {
+        await persistPlanMetaDraft();
+      }
       if (step === 'walls') {
-        if (floorPlan) {
+        if (false && floorPlan) { /*
           let nextScaleFactor;
           if (calibrationDraft.start && calibrationDraft.end && Number(calibrationDraft.distance_m) > 0) {
             const pixelDistance = Math.hypot(
@@ -1664,6 +2689,7 @@ function FloorPlanEditor() {
             }
           }
         }
+        */ }
         changes = buildWallsPayload();
         response = await pipelineApi.commitWalls(floorPlanId, {
           changes,
@@ -1745,9 +2771,25 @@ function FloorPlanEditor() {
       setFireAlarmActionLoading(true);
       const result = await floorPlansApi.batchSave(floorPlanId, buildFireAlarmsPayload());
       applyFloorPlanData(result.floor_plan);
+      await fetchPipelineState();
+      const branchAlarms = (result?.floor_plan?.fire_alarms || []).filter(
+        (alarm) => normalizeSignalSystemType(alarm.system_type) === currentSignalSystem,
+      );
+      /*
+        } catch (routingError) {
+          console.error('Error auto-recalculating cable routes after fire alarm save:', routingError);
+          alert('Извещатели сохранены, но трассировку кабеля не удалось пересчитать автоматически.');
+        }
+      }
       updateLocalSignalBranchState(currentSignalSystem, {
         fireAlarmsStatus: 'validated',
-        devicesCablesStatus: 'draft',
+        devicesCablesStatus,
+        activeStep: 'devices_cables',
+      });
+      */
+      updateLocalSignalBranchState(currentSignalSystem, {
+        fireAlarmsStatus: 'validated',
+        devicesCablesStatus: branchAlarms.length ? 'draft' : 'validated',
         activeStep: 'devices_cables',
       });
       clearDraftsForStep('fire_alarms');
@@ -1775,7 +2817,7 @@ function FloorPlanEditor() {
     } finally {
       setFireAlarmActionLoading(false);
     }
-  }, [draftStateByStep.fire_alarms, floorPlanId, buildFireAlarmsPayload, applyFloorPlanData, clearDraftsForStep, clearLocalDraftChanges, closeHoverPanel, updateLocalSignalBranchState, currentSignalSystem]);
+  }, [draftStateByStep.fire_alarms, floorPlanId, buildFireAlarmsPayload, applyFloorPlanData, clearDraftsForStep, clearLocalDraftChanges, closeHoverPanel, updateLocalSignalBranchState, currentSignalSystem, fetchPipelineState]);
 
   const handleSwitchSignalSystem = useCallback(async (systemType) => {
     const normalized = normalizeSignalSystemType(systemType);
@@ -1888,42 +2930,38 @@ function FloorPlanEditor() {
     setSelectedZkspcRooms([]);
   }, [selectedZkspcRooms, rooms]);
 
-  const refreshCableRoutes = useCallback(async (systemType, useSharedTrunk = false) => {
-    const routes = await elementsApi.recalculateCableRoutes(floorPlanId, {
-      system_type: normalizeSignalSystemType(systemType),
-      use_shared_trunk: useSharedTrunk,
+  const refreshCableRoutes = useCallback(async (systemType) => {
+    const normalizedSystem = normalizeSignalSystemType(systemType);
+    await elementsApi.recalculateCableRoutes(floorPlanId, {
+      system_type: normalizedSystem,
+      use_shared_trunk: false,
     });
-    setCableRoutes((prev) => {
-      const retained = prev.filter((route) => normalizeSignalSystemType(route.system_type) !== normalizeSignalSystemType(systemType));
-      return [...retained, ...routes];
-    });
-    updateLocalSignalBranchState(systemType, {
+    const data = await floorPlansApi.get(floorPlanId, true);
+    applyFloorPlanData(data);
+    updateLocalSignalBranchState(normalizedSystem, {
       devicesCablesStatus: 'validated',
       activeStep: 'devices_cables',
     });
-    return routes;
-  }, [floorPlanId, updateLocalSignalBranchState]);
+    return (data.cable_routes || []).filter((route) => normalizeSignalSystemType(route.system_type) === normalizedSystem);
+  }, [applyFloorPlanData, floorPlanId, updateLocalSignalBranchState]);
 
   const handleCreateSignalInstrumentAt = useCallback(async (instrumentType, x, y) => {
     try {
       setSignalBranchActionLoading(true);
       const definition = getSignalInstrumentDefinition(instrumentType);
+      const placement = resolveInstrumentPlacement({ x, y });
       const instrument = await elementsApi.createSignalInstrument({
         floor_plan_id: parseInt(floorPlanId, 10),
         system_type: currentSignalSystem,
         instrument_type: instrumentType,
-        x,
-        y,
+        x: placement.x,
+        y: placement.y,
         name: definition.label,
         supports_cable_merge: definition.supportsMerge,
       });
-      setSignalInstruments((prev) => {
-        const retained = prev.filter((item) => !(item.floor_plan_id === instrument.floor_plan_id && normalizeSignalSystemType(item.system_type) === normalizeSignalSystemType(instrument.system_type)));
-        return [...retained, instrument];
-      });
-      await refreshCableRoutes(currentSignalSystem, false);
+      setSignalInstruments((prev) => [...prev, instrument]);
       updateLocalSignalBranchState(currentSignalSystem, {
-        devicesCablesStatus: 'validated',
+        devicesCablesStatus: 'draft',
         activeStep: 'devices_cables',
       });
       setSelectedElement({ type: 'signal-instrument', id: instrument.id, data: instrument });
@@ -1934,14 +2972,40 @@ function FloorPlanEditor() {
     } finally {
       setSignalBranchActionLoading(false);
     }
-  }, [currentSignalSystem, floorPlanId, refreshCableRoutes, updateLocalSignalBranchState]);
+  }, [currentSignalSystem, floorPlanId, resolveInstrumentPlacement, updateLocalSignalBranchState]);
+
+  const handleInstrumentDragMove = useCallback((instrument, event) => {
+    const placement = resolveInstrumentPlacement(
+      { x: event.target.x(), y: event.target.y() },
+      { excludeInstrumentId: instrument.id, instrument },
+    );
+    event.target.position(placement);
+  }, [resolveInstrumentPlacement]);
 
   const handleInstrumentDragEnd = useCallback(async (instrumentId, event) => {
-    const position = event.target.position();
+    const instrument = signalInstruments.find((item) => item.id === instrumentId) || null;
+    const position = resolveInstrumentPlacement(
+      event.target.position(),
+      { excludeInstrumentId: instrumentId, instrument },
+    );
+    event.target.position(position);
     try {
       const updated = await elementsApi.updateSignalInstrument(instrumentId, { x: position.x, y: position.y });
       setSignalInstruments((prev) => prev.map((item) => (item.id === updated.id ? updated : item)));
-      await refreshCableRoutes(updated.system_type, false);
+      const relatedRoutes = cableRoutes.filter((route) => route.instrument_id === instrumentId);
+      if (instrument && relatedRoutes.length) {
+        const updatedRoutes = await Promise.all(relatedRoutes.map((route) => elementsApi.updateCableRoute(route.id, {
+          polyline_points: translateInstrumentRouteStart(
+            route.polyline_points || [],
+            { x: instrument.x, y: instrument.y },
+            position,
+          ),
+          is_manual: route.is_manual ?? true,
+          zc_label_dx: route.zc_label_dx ?? null,
+          zc_label_dy: route.zc_label_dy ?? null,
+        })));
+        setCableRoutes((prev) => prev.map((route) => updatedRoutes.find((item) => item.id === route.id) || route));
+      }
       updateLocalSignalBranchState(updated.system_type, {
         devicesCablesStatus: 'validated',
         activeStep: 'devices_cables',
@@ -1950,9 +3014,18 @@ function FloorPlanEditor() {
       console.error('Error moving instrument:', error);
       alert('Не удалось переместить прибор.');
     }
-  }, [refreshCableRoutes, updateLocalSignalBranchState]);
+  }, [cableRoutes, resolveInstrumentPlacement, signalInstruments, updateLocalSignalBranchState]);
 
-  const handleMergeCableRoutes = useCallback(async (instrument) => {
+  const handleStartMergeCableRoutes = useCallback((instrument) => {
+    if (!instrument?.id) {
+      return;
+    }
+    setMergeInstrumentId(instrument.id);
+    setSelectedTool('multi-select');
+    setSelectedElement({ type: 'signal-instrument', id: instrument.id, data: instrument });
+    setSelectedElements([]);
+    return;
+    /*
     try {
       setSignalBranchActionLoading(true);
       await refreshCableRoutes(instrument.system_type, true);
@@ -1963,6 +3036,42 @@ function FloorPlanEditor() {
       setSignalBranchActionLoading(false);
     }
   }, [refreshCableRoutes]);
+
+    */
+  }, []);
+
+  const handleCancelMergeCableRoutes = useCallback(() => {
+    setMergeInstrumentId(null);
+    setSelectedTool('select');
+    clearCanvasSelection();
+  }, [clearCanvasSelection]);
+
+  const handleMergeCableRoutes = useCallback(async () => {
+    if (!mergeInstrumentId) {
+      return;
+    }
+    const deviceIds = selectedElements
+      .filter((item) => item.type === 'fire-alarm' || item.type === 'new-fire-alarm')
+      .map((item) => Number(item.id))
+      .filter((id) => Number.isInteger(id) && id > 0);
+    if (!deviceIds.length) {
+      alert('Выберите хотя бы один сохранённый датчик для сведения.');
+      return;
+    }
+    try {
+      setSignalBranchActionLoading(true);
+      await elementsApi.mergeRoutesForInstrument(mergeInstrumentId, { device_ids: deviceIds });
+      await fetchFloorPlan();
+      setMergeInstrumentId(null);
+      setSelectedTool('select');
+      setSelectedElements([]);
+    } catch (error) {
+      console.error('Error merging cable routes:', error);
+      alert('РќРµ СѓРґР°Р»РѕСЃСЊ СЃРІРµСЃС‚Рё РєР°Р±РµР»Рё.');
+    } finally {
+      setSignalBranchActionLoading(false);
+    }
+  }, [fetchFloorPlan, mergeInstrumentId, selectedElements]);
 
   const handleSaveSignalInstrumentMeta = useCallback(async () => {
     if (!hoverPanel || hoverPanel.type !== 'signal-instrument' || !hoverPanel.id) {
@@ -1977,10 +3086,9 @@ function FloorPlanEditor() {
         supports_cable_merge: definition.supportsMerge,
       });
       setSignalInstruments((prev) => prev.map((item) => (item.id === updated.id ? updated : item)));
-      await refreshCableRoutes(updated.system_type, false);
       setHoverPanel((prev) => (prev ? { ...prev, data: updated } : prev));
       updateLocalSignalBranchState(updated.system_type, {
-        devicesCablesStatus: 'validated',
+        devicesCablesStatus: 'draft',
         activeStep: 'devices_cables',
       });
     } catch (error) {
@@ -1989,17 +3097,17 @@ function FloorPlanEditor() {
     } finally {
       setSignalBranchActionLoading(false);
     }
-  }, [hoverPanel, signalInstrumentDraft, refreshCableRoutes, updateLocalSignalBranchState]);
+  }, [hoverPanel, signalInstrumentDraft, updateLocalSignalBranchState]);
 
   const handleDeleteSignalInstrument = useCallback(async (instrumentId, systemType) => {
     try {
       setSignalBranchActionLoading(true);
       await elementsApi.deleteSignalInstrument(instrumentId);
-      setSignalInstruments((prev) => prev.filter((item) => item.id !== instrumentId));
-      setCableRoutes((prev) => prev.filter((item) => item.instrument_id !== instrumentId));
+      await fetchFloorPlan();
+      setMergeInstrumentId((prev) => (prev === instrumentId ? null : prev));
       updateLocalSignalBranchState(systemType, {
         devicesCablesStatus: 'draft',
-        activeStep: 'fire_alarms',
+        activeStep: 'devices_cables',
       });
       closeHoverPanel();
       clearCanvasSelection();
@@ -2009,15 +3117,19 @@ function FloorPlanEditor() {
     } finally {
       setSignalBranchActionLoading(false);
     }
-  }, [clearCanvasSelection, closeHoverPanel, updateLocalSignalBranchState]);
+  }, [clearCanvasSelection, closeHoverPanel, fetchFloorPlan, updateLocalSignalBranchState]);
 
   const handleCableRouteSegmentDragEnd = useCallback(async (route, insertIndex, event) => {
-    const nextPoints = [...(route.polyline_points || [])];
-    nextPoints.splice(insertIndex, 0, [event.target.x(), event.target.y()]);
+    const nextPoints = insertOrthogonalDogleg(route.polyline_points || [], insertIndex, {
+      x: event.target.x(),
+      y: event.target.y(),
+    });
     try {
       const updated = await elementsApi.updateCableRoute(route.id, {
-        polyline_points: nextPoints,
+        polyline_points: normalizeOrthogonalPolyline(nextPoints),
         is_manual: true,
+        zc_label_dx: route.zc_label_dx ?? null,
+        zc_label_dy: route.zc_label_dy ?? null,
       });
       setCableRoutes((prev) => prev.map((item) => (item.id === updated.id ? updated : item)));
       updateLocalSignalBranchState(route.system_type, {
@@ -2032,13 +3144,16 @@ function FloorPlanEditor() {
   }, [updateLocalSignalBranchState]);
 
   const handleCableRouteHandleDragEnd = useCallback(async (route, pointIndex, event) => {
-    const nextPoints = (route.polyline_points || []).map((point, index) => (
-      index === pointIndex ? [event.target.x(), event.target.y()] : point
-    ));
+    const nextPoints = updateOrthogonalHandlePoint(route.polyline_points || [], pointIndex, {
+      x: event.target.x(),
+      y: event.target.y(),
+    });
     try {
       const updated = await elementsApi.updateCableRoute(route.id, {
-        polyline_points: nextPoints,
+        polyline_points: normalizeOrthogonalPolyline(nextPoints),
         is_manual: true,
+        zc_label_dx: route.zc_label_dx ?? null,
+        zc_label_dy: route.zc_label_dy ?? null,
       });
       setCableRoutes((prev) => prev.map((item) => (item.id === updated.id ? updated : item)));
       updateLocalSignalBranchState(route.system_type, {
@@ -2052,31 +3167,59 @@ function FloorPlanEditor() {
     }
   }, [updateLocalSignalBranchState]);
 
+  const applyWallLengthDraft = useCallback((wallGeometry) => {
+    if (!wallGeometry || wallLengthDraft === '' || Number.isNaN(Number(wallLengthDraft))) {
+      return wallGeometry;
+    }
+    const targetLengthPx = metersToPx(Number(wallLengthDraft), floorPlan?.scale_factor);
+    const axis = getWallAxisData(wallGeometry);
+    if (!axis || !(targetLengthPx > 0)) {
+      return wallGeometry;
+    }
+    return {
+      ...wallGeometry,
+      x2: wallGeometry.x1 + (axis.ux * targetLengthPx),
+      y2: wallGeometry.y1 + (axis.uy * targetLengthPx),
+    };
+  }, [wallLengthDraft, floorPlan?.scale_factor]);
+
   const handleSaveWallMeta = useCallback(async () => {
     if (!hoverPanel || !['wall', 'new-wall'].includes(hoverPanel.type) || !hoverPanel.id) {
       return;
     }
-
-    const applyWallLengthDraft = (wallGeometry) => {
-      if (!wallGeometry || wallLengthDraft === '' || Number.isNaN(Number(wallLengthDraft))) {
-        return wallGeometry;
-      }
-      const targetLengthPx = metersToPx(Number(wallLengthDraft), floorPlan?.scale_factor);
-      const dx = wallGeometry.x2 - wallGeometry.x1;
-      const dy = wallGeometry.y2 - wallGeometry.y1;
-      const currentLengthPx = Math.sqrt(dx * dx + dy * dy);
-      if (!(targetLengthPx > 0) || currentLengthPx <= 1e-6) {
-        return wallGeometry;
-      }
-      const ux = dx / currentLengthPx;
-      const uy = dy / currentLengthPx;
-      return {
-        ...wallGeometry,
-        x2: wallGeometry.x1 + ux * targetLengthPx,
-        y2: wallGeometry.y1 + uy * targetLengthPx,
-      };
+    const workingWalls = getWorkingWallsSnapshot();
+    const existingGeometry = workingWalls.find((wall) => wall.id === hoverPanel.id);
+    if (!existingGeometry) {
+      return;
+    }
+    let nextGeometry = {
+      ...existingGeometry,
+      alignment: 'center',
+      thickness: wallThicknessDraft !== '' && !Number.isNaN(Number(wallThicknessDraft))
+        ? Math.max(10, Number(wallThicknessDraft) * 1000)
+        : existingGeometry.thickness,
     };
-
+    if (wallLengthDraft !== '' && !Number.isNaN(Number(wallLengthDraft))) {
+      const axis = getWallAxisData(existingGeometry);
+      const targetLengthPx = metersToPx(Number(wallLengthDraft), floorPlan?.scale_factor);
+      if (axis && targetLengthPx > 0) {
+        nextGeometry = {
+          ...nextGeometry,
+          x2: existingGeometry.x1 + (axis.ux * targetLengthPx),
+          y2: existingGeometry.y1 + (axis.uy * targetLengthPx),
+          length_m: Number(wallLengthDraft),
+          length_source: 'manual',
+        };
+      }
+    }
+    const nextWalls = replaceWallInWorkingSet(hoverPanel.id, () => nextGeometry);
+    const persistedWall = nextWalls.find((wall) => wall.id === hoverPanel.id) || nextGeometry;
+    setSelectedElement((prev) => (
+      prev && ['wall', 'new-wall'].includes(prev.type) && prev.id === hoverPanel.id
+        ? { ...prev, data: persistedWall }
+        : prev
+    ));
+    return;
     try {
       if (hoverPanel.type === 'new-wall') {
         const sourceWall = newWalls.find((wall) => wall.id === hoverPanel.id);
@@ -2092,6 +3235,7 @@ function FloorPlanEditor() {
                 y2: nextGeometry.y2,
               } : {}),
               thickness: wallThicknessDraft !== '' ? Number(wallThicknessDraft) * 1000 : wall.thickness,
+              alignment: normalizeWallAlignment(wallAlignmentDraft),
               ...(wallLengthDraft !== '' && !Number.isNaN(Number(wallLengthDraft))
                 ? {
                   length_m: Number(wallLengthDraft),
@@ -2112,6 +3256,7 @@ function FloorPlanEditor() {
               y2: nextGeometry.y2,
             } : {}),
             thickness: wallThicknessDraft !== '' ? Number(wallThicknessDraft) * 1000 : prev.data?.thickness,
+            alignment: normalizeWallAlignment(wallAlignmentDraft),
             ...(wallLengthDraft !== '' && !Number.isNaN(Number(wallLengthDraft))
               ? {
                 length_m: Number(wallLengthDraft),
@@ -2132,6 +3277,7 @@ function FloorPlanEditor() {
                 y2: nextGeometry.y2,
               } : {}),
               thickness: wallThicknessDraft !== '' ? Number(wallThicknessDraft) * 1000 : prev.data?.thickness,
+              alignment: normalizeWallAlignment(wallAlignmentDraft),
               ...(wallLengthDraft !== '' && !Number.isNaN(Number(wallLengthDraft))
                 ? {
                   length_m: Number(wallLengthDraft),
@@ -2152,6 +3298,7 @@ function FloorPlanEditor() {
         x2: currentGeometry?.x2,
         y2: currentGeometry?.y2,
         thickness: wallThicknessDraft !== '' ? Number(wallThicknessDraft) * 1000 : undefined,
+        alignment: normalizeWallAlignment(wallAlignmentDraft),
         length_m: wallLengthDraft !== '' ? Number(wallLengthDraft) : undefined,
         length_source: wallLengthDraft !== '' ? 'manual' : undefined,
       };
@@ -2171,7 +3318,7 @@ function FloorPlanEditor() {
       console.error('Error saving wall metadata:', error);
       alert('Не удалось сохранить параметры стены.');
     }
-  }, [hoverPanel, floorPlanId, wallThicknessDraft, wallLengthDraft, fetchPipelineState, getWallCurrentGeometry, floorPlan?.scale_factor, newWalls]);
+  }, [fetchPipelineState, floorPlan?.scale_factor, floorPlanId, getWallCurrentGeometry, getWorkingWallsSnapshot, hoverPanel, newWalls, replaceWallInWorkingSet, wallAlignmentDraft, wallLengthDraft, wallThicknessDraft]);
 
   const handleSaveOpeningMeta = useCallback(() => {
     if (!hoverPanel || !['door', 'window', 'new-door', 'new-window'].includes(hoverPanel.type) || !hoverPanel.id) {
@@ -2311,8 +3458,6 @@ function FloorPlanEditor() {
         floor_plan_id: parseInt(floorPlanId, 10),
         name: roomDraft.name || null,
         room_type: unserviceableRoomIds.has(hoverPanel.id) ? 'необслуживаемое' : (roomDraft.type || 'базовое'),
-        length_m: roomDraft.length !== '' ? Number(roomDraft.length) : undefined,
-        width_m: roomDraft.width !== '' ? Number(roomDraft.width) : undefined,
       };
       Object.keys(payload).forEach((key) => payload[key] === undefined && delete payload[key]);
       const updated = await elementsApi.updateRoom(hoverPanel.id, payload);
@@ -2360,6 +3505,75 @@ function FloorPlanEditor() {
     ));
     setHasUnsavedChanges(true);
   }, [hoverPanel, fireAlarmDraft, setNewFireAlarms]);
+
+  const handleFireAlarmLabelDragEnd = useCallback((kind, alarmId, alarm, event) => {
+    const current = getFireAlarmCurrentGeometry(kind, alarmId, alarm);
+    if (!current) {
+      return;
+    }
+    const patch = {
+      label_dx: event.target.x() - current.x,
+      label_dy: event.target.y() - current.y,
+    };
+    if (kind === 'new-fire-alarms') {
+      setNewFireAlarms((prev) => prev.map((item) => (
+        item.id === alarmId ? { ...item, ...patch } : item
+      )));
+    } else {
+      setModifiedElements((prev) => ({
+        ...prev,
+        [`fire-alarms-${alarmId}`]: {
+          ...(prev[`fire-alarms-${alarmId}`] || {}),
+          ...patch,
+        },
+      }));
+    }
+    setHasUnsavedChanges(true);
+  }, [getFireAlarmCurrentGeometry, setNewFireAlarms]);
+
+  const handleSignalInstrumentLabelDragEnd = useCallback(async (instrument, event) => {
+    if (!instrument?.id) {
+      return;
+    }
+    try {
+      const updated = await elementsApi.updateSignalInstrument(instrument.id, {
+        label_dx: event.target.x() - instrument.x,
+        label_dy: event.target.y() - instrument.y,
+      });
+      setSignalInstruments((prev) => prev.map((item) => (item.id === updated.id ? updated : item)));
+      setHoverPanel((prev) => (
+        prev?.type === 'signal-instrument' && prev.id === updated.id
+          ? { ...prev, data: updated }
+          : prev
+      ));
+    } catch (error) {
+      console.error('Error moving instrument label:', error);
+      alert('Не удалось переместить подпись прибора.');
+    }
+  }, []);
+
+  const handleZcLabelDragEnd = useCallback(async (route, displayPolyline, event) => {
+    const anchorPoint = Array.isArray(displayPolyline) ? displayPolyline[displayPolyline.length - 1] : null;
+    if (!route?.id || !anchorPoint) {
+      return;
+    }
+    try {
+      const updated = await elementsApi.updateCableRoute(route.id, {
+        polyline_points: normalizeOrthogonalPolyline(route.polyline_points || []),
+        is_manual: route.is_manual ?? true,
+        zc_label_dx: event.target.x() - anchorPoint[0],
+        zc_label_dy: event.target.y() - anchorPoint[1],
+      });
+      setCableRoutes((prev) => prev.map((item) => (item.id === updated.id ? updated : item)));
+      updateLocalSignalBranchState(route.system_type, {
+        devicesCablesStatus: 'validated',
+        activeStep: 'devices_cables',
+      });
+    } catch (error) {
+      console.error('Error moving ZC label:', error);
+      alert('Не удалось переместить подпись ZC.');
+    }
+  }, [updateLocalSignalBranchState]);
 
   const buildPlanMetaPayload = useCallback(() => {
     if (!floorPlan) {
@@ -2508,7 +3722,8 @@ function FloorPlanEditor() {
   }, [floorPlanId, saveToHistory]);
 
   const handleCreateDraftFireAlarm = useCallback((deviceType, x, y, overrides = {}) => {
-    const metadata = getRoomMetadataForPoint({ x, y }, rooms, floorPlan?.scale_factor);
+    const placement = resolveFireAlarmPlacement(deviceType, { x, y });
+    const metadata = getRoomMetadataForPoint(placement, rooms, floorPlan?.scale_factor);
     if (metadata.roomId && unserviceableRoomIds.has(metadata.roomId)) {
       alert('В необслуживаемом помещении нельзя размещать элементы сигнализации.');
       return;
@@ -2540,7 +3755,7 @@ function FloorPlanEditor() {
     setSelectedElement({ type: 'new-fire-alarm', id: created.id, data: created });
     setSelectedElements([{ type: 'new-fire-alarm', id: created.id }]);
     setHasUnsavedChanges(true);
-  }, [floorPlanId, saveToHistory, rooms, floorPlan?.scale_factor, floorPlan?.ceiling_height_mm, branchFireAlarms, deletedElements, newFireAlarms.length, currentSignalSystem, roomZoneMap, setNewFireAlarms, unserviceableRoomIds]);
+  }, [floorPlanId, saveToHistory, rooms, floorPlan?.scale_factor, floorPlan?.ceiling_height_mm, branchFireAlarms, deletedElements, newFireAlarms.length, currentSignalSystem, roomZoneMap, setNewFireAlarms, unserviceableRoomIds, resolveFireAlarmPlacement]);
 
   const handleAutoLayoutFireAlarms = useCallback(async () => {
     const visiblePersisted = branchFireAlarms.filter((alarm) => !deletedElements.some((del) => del.type === 'fire-alarms' && del.id === alarm.id));
@@ -2589,10 +3804,13 @@ function FloorPlanEditor() {
   const handleRecognize = async (debug = false) => {
     try {
       setRecognizing(true);
+      setRecognitionFeedbackStatus('idle');
+      setRecognitionFeedbackError('');
       setDebugImages([]);
       setSelectedDebugImagePath(null);
       await recognitionApi.process(floorPlanId, debug);
       const recognitionData = await recognitionApi.get(floorPlanId, debug);
+      setRecognitionMeta(recognitionData);
       setRecognition(recognitionData.recognition_result);
 
       if (debug && recognitionData.debug_images) {
@@ -2629,11 +3847,8 @@ function FloorPlanEditor() {
   const getScaledPointer = useCallback((e) => {
     const stage = e.target.getStage();
     const point = stage.getPointerPosition();
-    return {
-      x: (point.x - effectiveStageOffset.x) / stageScale,
-      y: (point.y - effectiveStageOffset.y) / stageScale,
-    };
-  }, [effectiveStageOffset.x, effectiveStageOffset.y, stageScale]);
+    return viewportPointToPlan(point, viewTransform);
+  }, [viewTransform]);
 
   const handleStageClick = (e) => {
     if (stagePanMovedRef.current) {
@@ -2670,13 +3885,29 @@ function FloorPlanEditor() {
           y2 = snapped.y;
         }
         
+        const resolvedEnd = resolveWallDraftEndpoint(
+          {
+            x1: drawingWall.x1,
+            y1: drawingWall.y1,
+            x2,
+            y2,
+            thickness: currentWallDraftThicknessMm,
+            alignment: 'center',
+          },
+          { x: x2, y: y2 },
+          'end',
+        );
+        x2 = resolvedEnd.x;
+        y2 = resolvedEnd.y;
+
         const newWall = {
           id: `temp_${Date.now()}`, // Временный ID
           x1: drawingWall.x1,
           y1: drawingWall.y1,
           x2: x2,
           y2: y2,
-          thickness: 200,
+          thickness: currentWallDraftThicknessMm,
+          alignment: 'center',
           length_m: getDerivedWallLengthMeters({
             x1: drawingWall.x1,
             y1: drawingWall.y1,
@@ -2686,12 +3917,12 @@ function FloorPlanEditor() {
           length_source: 'derived',
         };
 
-        setNewWalls(prev => [...prev, newWall]);
-        setSelectedElement({ type: 'new-wall', id: newWall.id, data: newWall });
+        const nextWalls = finalizeWallWorkingSet([...getWorkingWallsSnapshot(), newWall]);
+        const persistedWall = nextWalls.find((wall) => wall.id === newWall.id) || newWall;
+        setSelectedElement({ type: 'new-wall', id: newWall.id, data: persistedWall });
         setSelectedElements([{ type: 'new-wall', id: newWall.id }]);
         setDrawingWall(null);
         setSelectedTool('select');
-        setHasUnsavedChanges(true);
       }
     } else if ((selectedTool === 'door' || selectedTool === 'window') && activeEditorStep === 'openings') {
       if (!placementDraft || placementDraft.type !== selectedTool) {
@@ -2733,6 +3964,22 @@ function FloorPlanEditor() {
     }
   };
 
+  const handleSubmitRecognitionFeedback = useCallback(async () => {
+    try {
+      setRecognitionFeedbackSubmitting(true);
+      setRecognitionFeedbackStatus('idle');
+      setRecognitionFeedbackError('');
+      await recognitionApi.submitFeedback(floorPlanId);
+      setRecognitionFeedbackStatus('success');
+    } catch (error) {
+      console.error('Recognition feedback submission failed:', error);
+      setRecognitionFeedbackStatus('error');
+      setRecognitionFeedbackError('Не удалось отправить исправленный результат для обучения.');
+    } finally {
+      setRecognitionFeedbackSubmitting(false);
+    }
+  }, [floorPlanId]);
+
   const handleElementDragStart = useCallback((type, id, e) => {
     closeHoverPanel();
     dragStartRef.current[`${type}-${id}`] = { x: e.target.x(), y: e.target.y() };
@@ -2741,7 +3988,14 @@ function FloorPlanEditor() {
 
   const handleElementDragMove = useCallback((type, id, entity, e) => {
     if (type === 'fire-alarms' || type === 'new-fire-alarms') {
-      setActiveDrag({ type, id, x: e.target.x(), y: e.target.y() });
+      const current = getFireAlarmCurrentGeometry(type, id, entity);
+      const placement = resolveFireAlarmPlacement(
+        current?.device_type || entity?.device_type || 'smoke_detector',
+        { x: e.target.x(), y: e.target.y() },
+        { excludeFireAlarmId: id },
+      );
+      e.target.position(placement);
+      setActiveDrag({ type, id, x: placement.x, y: placement.y });
       return;
     }
     if (!['doors', 'windows', 'new-doors', 'new-windows'].includes(type)) {
@@ -2764,7 +4018,7 @@ function FloorPlanEditor() {
     if (normalized) {
       e.target.position({ x: normalized.x + normalized.width / 2, y: normalized.y + normalized.height / 2 });
     }
-  }, [activeWallGeometries, floorPlan?.scale_factor, getOpeningCurrentGeometry]);
+  }, [activeWallGeometries, floorPlan?.scale_factor, getFireAlarmCurrentGeometry, getOpeningCurrentGeometry, resolveFireAlarmPlacement]);
 
   const handleElementDragEnd = (type, id, e) => {
     saveToHistory();
@@ -2809,6 +4063,16 @@ function FloorPlanEditor() {
         newPos.rotation_deg = normalized.rotation_deg;
         newPos.wall_id = normalized.wall_id;
       }
+    } else if (type === 'fire-alarms' || type === 'new-fire-alarms') {
+      const current = getFireAlarmCurrentGeometry(type, id);
+      const placement = resolveFireAlarmPlacement(
+        current?.device_type || 'smoke_detector',
+        newPos,
+        { excludeFireAlarmId: id },
+      );
+      newPos.x = placement.x;
+      newPos.y = placement.y;
+      node.position(placement);
     }
 
     // Сохраняем изменения локально
@@ -2850,6 +4114,16 @@ function FloorPlanEditor() {
     const node = e.target;
     const dx = node.x();
     const dy = node.y();
+    replaceWallInWorkingSet(wallId, (wall) => ({
+      ...wall,
+      x1: wall.x1 + dx,
+      y1: wall.y1 + dy,
+      x2: wall.x2 + dx,
+      y2: wall.y2 + dy,
+    }));
+    node.position({ x: 0, y: 0 });
+    setEditingWall(null);
+    return;
 
     // Вычисляем текущие координаты с учетом уже сохраненных изменений
     let currentX1 = originalWall.x1;
@@ -2906,6 +4180,16 @@ function FloorPlanEditor() {
     const node = e.target;
     const dx = node.x();
     const dy = node.y();
+    replaceWallInWorkingSet(wallId, (wall) => ({
+      ...wall,
+      x1: wall.x1 + dx,
+      y1: wall.y1 + dy,
+      x2: wall.x2 + dx,
+      y2: wall.y2 + dy,
+    }));
+    node.position({ x: 0, y: 0 });
+    setEditingWall(null);
+    return;
     const nextWall = {
       ...originalWall,
       x1: originalWall.x1 + dx,
@@ -2920,21 +4204,16 @@ function FloorPlanEditor() {
     node.position({ x: 0, y: 0 });
     setHasUnsavedChanges(true);
     setEditingWall(null);
-  }, [editingWall, saveToHistory]);
+  }, [editingWall, replaceWallInWorkingSet, saveToHistory]);
 
   const handleWallPointDrag = (wallId, point, e) => {
     closeHoverPanel();
-    const stage = e.target.getStage();
-    let pos = stage.getPointerPosition();
-    // Convert to scaled coordinates
-    const scaledPos = {
-      x: (pos.x - effectiveStageOffset.x) / stageScale,
-      y: (pos.y - effectiveStageOffset.y) / stageScale
-    };
+    const scaledPos = getScaledPointer(e);
+    let previewPoint = scaledPos;
     
     // Если зажат Shift, привязываем к углам кратных 45°
     if (shiftPressed) {
-      const wall = walls.find(w => w.id === wallId);
+      const wall = walls.find((item) => item.id === wallId);
       if (wall) {
         const modifications = modifiedWalls[wallId] || {};
         const x1 = point === 'start' ? scaledPos.x : (modifications.x1 !== undefined ? modifications.x1 : wall.x1);
@@ -2943,30 +4222,21 @@ function FloorPlanEditor() {
         const y2 = point === 'end' ? scaledPos.y : (modifications.y2 !== undefined ? modifications.y2 : wall.y2);
         
         if (point === 'start') {
-          const snapped = snapTo45Degrees(x2, y2, x1, y1);
-          pos = { x: snapped.x * stageScale + effectiveStageOffset.x, y: snapped.y * stageScale + effectiveStageOffset.y };
+          previewPoint = snapTo45Degrees(x2, y2, x1, y1);
         } else {
-          const snapped = snapTo45Degrees(x1, y1, x2, y2);
-          pos = { x: snapped.x * stageScale + effectiveStageOffset.x, y: snapped.y * stageScale + effectiveStageOffset.y };
+          previewPoint = snapTo45Degrees(x1, y1, x2, y2);
         }
       }
-    } else {
-      pos = { x: scaledPos.x * stageScale + effectiveStageOffset.x, y: scaledPos.y * stageScale + effectiveStageOffset.y };
     }
-    
-    setEditingWall({ id: wallId, point, x: scaledPos.x, y: scaledPos.y });
+    e.target.position(previewPoint);
+    setEditingWall({ id: wallId, point, x: previewPoint.x, y: previewPoint.y });
   };
 
   const handleWallPointDragEnd = async (wallId, point, e) => {
     saveToHistory();
-    
-    const stage = e.target.getStage();
-    let pos = stage.getPointerPosition();
-    // Convert to scaled coordinates
-    const scaledPos = {
-      x: (pos.x - effectiveStageOffset.x) / stageScale,
-      y: (pos.y - effectiveStageOffset.y) / stageScale
-    };
+
+    let pos = getScaledPointer(e);
+    const scaledPos = pos;
     
     // Если зажат Shift, привязываем к углам кратных 45°
     if (shiftPressed) {
@@ -2989,6 +4259,36 @@ function FloorPlanEditor() {
     } else {
       pos = scaledPos;
     }
+    const wall = walls.find((item) => item.id === wallId);
+    if (wall) {
+      const modifications = modifiedWalls[wallId] || {};
+      pos = resolveWallDraftEndpoint(
+        {
+          ...wall,
+          x1: modifications.x1 !== undefined ? modifications.x1 : wall.x1,
+          y1: modifications.y1 !== undefined ? modifications.y1 : wall.y1,
+          x2: modifications.x2 !== undefined ? modifications.x2 : wall.x2,
+          y2: modifications.y2 !== undefined ? modifications.y2 : wall.y2,
+          thickness: modifications.thickness !== undefined ? modifications.thickness : wall.thickness,
+          alignment: modifications.alignment !== undefined ? modifications.alignment : (wall.alignment || 'center'),
+        },
+        pos,
+        point,
+        { excludeWallId: wallId },
+      );
+    }
+    replaceWallInWorkingSet(wallId, (currentWall) => {
+      const nextWall = point === 'start'
+        ? { ...currentWall, x1: pos.x, y1: pos.y }
+        : { ...currentWall, x2: pos.x, y2: pos.y };
+      return {
+        ...nextWall,
+        length_m: getDerivedWallLengthMeters(nextWall, floorPlan?.scale_factor),
+        length_source: 'derived',
+      };
+    });
+    setEditingWall(null);
+    return;
     
     const updates = point === 'start' 
       ? { x1: pos.x, y1: pos.y }
@@ -3009,12 +4309,7 @@ function FloorPlanEditor() {
 
   const handleNewWallPointDrag = useCallback((wallId, point, e) => {
     closeHoverPanel();
-    const stage = e.target.getStage();
-    const pointer = stage.getPointerPosition();
-    const scaledPos = {
-      x: (pointer.x - effectiveStageOffset.x) / stageScale,
-      y: (pointer.y - effectiveStageOffset.y) / stageScale,
-    };
+    const scaledPos = getScaledPointer(e);
     const wall = newWalls.find((item) => item.id === wallId);
     if (!wall) {
       return;
@@ -3044,7 +4339,52 @@ function FloorPlanEditor() {
         : item
     )));
     setHasUnsavedChanges(true);
-  }, [closeHoverPanel, newWalls, shiftPressed, effectiveStageOffset.x, effectiveStageOffset.y, stageScale, floorPlan?.scale_factor]);
+  }, [closeHoverPanel, floorPlan?.scale_factor, getScaledPointer, newWalls, shiftPressed]);
+
+  const handleNewWallPointDragEnd = useCallback((wallId, point, e) => {
+    const scaledPos = getScaledPointer(e);
+    const wall = newWalls.find((item) => item.id === wallId);
+    if (!wall) {
+      return;
+    }
+    let nextPoint = scaledPos;
+    if (shiftPressed) {
+      const anchor = point === 'start'
+        ? { x: wall.x2, y: wall.y2 }
+        : { x: wall.x1, y: wall.y1 };
+      const snapped = snapTo45Degrees(anchor.x, anchor.y, scaledPos.x, scaledPos.y);
+      nextPoint = { x: snapped.x, y: snapped.y };
+    }
+    nextPoint = resolveWallDraftEndpoint(wall, nextPoint, point, { excludeWallId: wallId });
+    replaceWallInWorkingSet(wallId, (currentWall) => {
+      const nextWall = point === 'start'
+        ? { ...currentWall, x1: nextPoint.x, y1: nextPoint.y }
+        : { ...currentWall, x2: nextPoint.x, y2: nextPoint.y };
+      return {
+        ...nextWall,
+        length_m: getDerivedWallLengthMeters(nextWall, floorPlan?.scale_factor),
+        length_source: 'derived',
+      };
+    });
+    return;
+    setNewWalls((prev) => prev.map((item) => (
+      item.id === wallId
+        ? {
+          ...item,
+          ...(point === 'start'
+            ? { x1: nextPoint.x, y1: nextPoint.y }
+            : { x2: nextPoint.x, y2: nextPoint.y }),
+          length_m: getDerivedWallLengthMeters({
+            ...(point === 'start'
+              ? { x1: nextPoint.x, y1: nextPoint.y, x2: item.x2, y2: item.y2 }
+              : { x1: item.x1, y1: item.y1, x2: nextPoint.x, y2: nextPoint.y }),
+          }, floorPlan?.scale_factor),
+          length_source: item.length_source === 'manual' ? 'manual' : 'derived',
+        }
+        : item
+    )));
+    setHasUnsavedChanges(true);
+  }, [floorPlan?.scale_factor, getScaledPointer, newWalls, replaceWallInWorkingSet, resolveWallDraftEndpoint, shiftPressed]);
 
   const handleNewWallThicknessDrag = useCallback((wallId, e) => {
     closeHoverPanel();
@@ -3053,33 +4393,23 @@ function FloorPlanEditor() {
       return;
     }
     const pointer = getScaledPointer(e);
-    const dx = wall.x2 - wall.x1;
-    const dy = wall.y2 - wall.y1;
-    const length = Math.sqrt(dx * dx + dy * dy);
-    if (length < 1e-6) {
-      return;
-    }
-    const nx = -dy / length;
-    const ny = dx / length;
-    const midX = (wall.x1 + wall.x2) / 2;
-    const midY = (wall.y1 + wall.y2) / 2;
-    const signedDistance = (pointer.x - midX) * nx + (pointer.y - midY) * ny;
-    const thicknessPx = Math.max(2, Math.abs(signedDistance) * 2);
-    const scale = floorPlan?.scale_factor && floorPlan.scale_factor > 0 ? floorPlan.scale_factor : 1;
-    const thicknessMm = Math.max(20, thicknessPx * scale);
+    const thicknessMm = getDraggedWallThicknessMm(wall, pointer);
 
     setEditingWall((prev) => ({ ...(prev || {}), id: wallId, adjustingThickness: true }));
     setNewWalls((prev) => prev.map((item) => (
       item.id === wallId ? { ...item, thickness: thicknessMm } : item
     )));
-  }, [closeHoverPanel, newWalls, floorPlan?.scale_factor, getScaledPointer]);
+  }, [closeHoverPanel, getDraggedWallThicknessMm, getScaledPointer, newWalls]);
 
   const handleNewWallThicknessDragEnd = useCallback((wallId, e) => {
     saveToHistory();
-    handleNewWallThicknessDrag(wallId, e);
+    const pointer = getScaledPointer(e);
+    replaceWallInWorkingSet(wallId, (wall) => ({
+      ...wall,
+      thickness: getDraggedWallThicknessMm(wall, pointer),
+    }));
     setEditingWall(null);
-    setHasUnsavedChanges(true);
-  }, [handleNewWallThicknessDrag, saveToHistory]);
+  }, [getDraggedWallThicknessMm, getScaledPointer, replaceWallInWorkingSet, saveToHistory]);
 
   useEffect(() => {
     if (!activeWallGeometries.length) {
@@ -3220,12 +4550,7 @@ function FloorPlanEditor() {
     if (!wallAxis) {
       return;
     }
-    const stage = e.target.getStage();
-    const pointer = stage.getPointerPosition();
-    const scaledPointer = {
-      x: (pointer.x - effectiveStageOffset.x) / stageScale,
-      y: (pointer.y - effectiveStageOffset.y) / stageScale,
-    };
+    const scaledPointer = getScaledPointer(e);
     const centerProjection = projectPointToWall({
       x: current.x + current.width / 2,
       y: current.y + current.height / 2,
@@ -3270,7 +4595,7 @@ function FloorPlanEditor() {
     };
 
     applyOpeningGeometryUpdate(kind, entity.id, nextGeometry);
-  }, [closeHoverPanel, activeWallGeometries, floorPlan?.scale_factor, getOpeningCurrentGeometry, effectiveStageOffset.x, effectiveStageOffset.y, stageScale, applyOpeningGeometryUpdate]);
+  }, [closeHoverPanel, activeWallGeometries, floorPlan?.scale_factor, getOpeningCurrentGeometry, getScaledPointer, applyOpeningGeometryUpdate]);
 
   const handleWallThicknessDrag = useCallback((wallId, e) => {
     closeHoverPanel();
@@ -3279,20 +4604,7 @@ function FloorPlanEditor() {
       return;
     }
     const pointer = getScaledPointer(e);
-    const dx = geometry.x2 - geometry.x1;
-    const dy = geometry.y2 - geometry.y1;
-    const length = Math.sqrt(dx * dx + dy * dy);
-    if (length < 1e-6) {
-      return;
-    }
-    const nx = -dy / length;
-    const ny = dx / length;
-    const midX = (geometry.x1 + geometry.x2) / 2;
-    const midY = (geometry.y1 + geometry.y2) / 2;
-    const signedDistance = (pointer.x - midX) * nx + (pointer.y - midY) * ny;
-    const thicknessPx = Math.max(2, Math.abs(signedDistance) * 2);
-    const scale = floorPlan?.scale_factor && floorPlan.scale_factor > 0 ? floorPlan.scale_factor : 1;
-    const thicknessMm = Math.max(20, thicknessPx * scale);
+    const thicknessMm = getDraggedWallThicknessMm(geometry, pointer);
 
     setEditingWall((prev) => ({ ...(prev || {}), id: wallId, adjustingThickness: true }));
     setModifiedWalls((prev) => ({
@@ -3302,14 +4614,17 @@ function FloorPlanEditor() {
         thickness: thicknessMm,
       },
     }));
-  }, [closeHoverPanel, floorPlan?.scale_factor, getScaledPointer, getWallCurrentGeometry]);
+  }, [closeHoverPanel, getDraggedWallThicknessMm, getScaledPointer, getWallCurrentGeometry]);
 
   const handleWallThicknessDragEnd = useCallback((wallId, e) => {
     saveToHistory();
-    handleWallThicknessDrag(wallId, e);
+    const pointer = getScaledPointer(e);
+    replaceWallInWorkingSet(wallId, (wall) => ({
+      ...wall,
+      thickness: getDraggedWallThicknessMm(wall, pointer),
+    }));
     setEditingWall(null);
-    setHasUnsavedChanges(true);
-  }, [handleWallThicknessDrag, saveToHistory]);
+  }, [getDraggedWallThicknessMm, getScaledPointer, replaceWallInWorkingSet, saveToHistory]);
 
   const updateRoomBoundary = useCallback(async (roomId, boundaryPoints) => {
     try {
@@ -3364,13 +4679,7 @@ function FloorPlanEditor() {
       if (!wall) {
         return null;
       }
-      const thicknessPx = getWallThicknessPx(wall, floorPlan?.scale_factor);
-      return {
-        x: Math.min(wall.x1, wall.x2) - thicknessPx / 2,
-        y: Math.min(wall.y1, wall.y2) - thicknessPx / 2,
-        width: Math.abs(wall.x2 - wall.x1) + thicknessPx,
-        height: Math.abs(wall.y2 - wall.y1) + thicknessPx,
-      };
+      return getWallBounds(wall, floorPlan?.scale_factor);
     }
     if (element.type === 'wall') {
       const wall = walls.find((item) => item.id === element.id);
@@ -3383,13 +4692,14 @@ function FloorPlanEditor() {
       const x2 = modifications.x2 !== undefined ? modifications.x2 : wall.x2;
       const y2 = modifications.y2 !== undefined ? modifications.y2 : wall.y2;
       const thicknessMm = modifications.thickness !== undefined ? modifications.thickness : wall.thickness;
-      const thicknessPx = getWallThicknessPx({ thickness: thicknessMm }, floorPlan?.scale_factor);
-      return {
-        x: Math.min(x1, x2) - thicknessPx / 2,
-        y: Math.min(y1, y2) - thicknessPx / 2,
-        width: Math.abs(x2 - x1) + thicknessPx,
-        height: Math.abs(y2 - y1) + thicknessPx,
-      };
+      return getWallBounds({
+        x1,
+        y1,
+        x2,
+        y2,
+        thickness: thicknessMm,
+        alignment: modifications.alignment !== undefined ? modifications.alignment : (wall.alignment || 'center'),
+      }, floorPlan?.scale_factor);
     }
     if (element.type === 'door') {
       const door = doors.find((item) => item.id === element.id);
@@ -3456,6 +4766,10 @@ function FloorPlanEditor() {
       }
       return { x: alarm.x - 12, y: alarm.y - 12, width: 24, height: 24 };
     }
+    if (element.type === 'signal-instrument') {
+      const instrument = visibleSignalInstruments.find((item) => item.id === element.id);
+      return getSignalInstrumentBounds(instrument);
+    }
     if (element.type === 'room') {
       const room = rooms.find((item) => item.id === element.id);
       if (!room?.boundary_points?.length) {
@@ -3464,7 +4778,7 @@ function FloorPlanEditor() {
       return getBoundingBox(room.boundary_points);
     }
     return null;
-  }, [newWalls, walls, modifiedWalls, floorPlan?.scale_factor, doors, windows, newDoors, newWindows, stairs, newStairs, rooms, getOpeningCurrentGeometry, getStairCurrentGeometry, getFireAlarmCurrentGeometry]);
+  }, [newWalls, walls, modifiedWalls, floorPlan?.scale_factor, doors, windows, newDoors, newWindows, stairs, newStairs, rooms, getOpeningCurrentGeometry, getStairCurrentGeometry, getFireAlarmCurrentGeometry, visibleSignalInstruments]);
 
   const selectionViewStep = interactionViewStep;
 
@@ -3506,15 +4820,18 @@ function FloorPlanEditor() {
         .filter((room) => !deletedElements.some((del) => del.type === 'rooms' && del.id === room.id))
         .map((room) => ({ type: 'room', id: room.id }))
       : []),
-    ...(selectionViewStep === 'fire_alarms'
+    ...((selectionViewStep === 'fire_alarms' || selectionViewStep === 'devices_cables')
       ? fireAlarms
         .filter((alarm) => !deletedElements.some((del) => del.type === 'fire-alarms' && del.id === alarm.id))
         .map((alarm) => ({ type: 'fire-alarm', id: alarm.id }))
       : []),
-    ...(selectionViewStep === 'fire_alarms'
+    ...((selectionViewStep === 'fire_alarms' || selectionViewStep === 'devices_cables')
       ? newFireAlarms.map((alarm) => ({ type: 'new-fire-alarm', id: alarm.id }))
       : []),
-  ]), [selectionViewStep, newWalls, walls, newStairs, stairs, newDoors, doors, newWindows, windows, rooms, fireAlarms, newFireAlarms, deletedElements]);
+    ...(selectionViewStep === 'devices_cables'
+      ? visibleSignalInstruments.map((instrument) => ({ type: 'signal-instrument', id: instrument.id }))
+      : []),
+  ]), [selectionViewStep, newWalls, walls, newStairs, stairs, newDoors, doors, newWindows, windows, rooms, fireAlarms, newFireAlarms, deletedElements, visibleSignalInstruments]);
 
   const selectedGroupBounds = useMemo(() => {
     if (!selectedElements.length) {
@@ -3752,6 +5069,28 @@ function FloorPlanEditor() {
     applyTransformToSelected({ dx: 0, dy: 0, scale, centerX, centerY });
   }, [selectedGroupBounds, getScaledPointer, applyTransformToSelected]);
 
+  const endStagePan = useCallback(() => {
+    stagePanStartRef.current = null;
+    setIsStagePanning(false);
+  }, []);
+
+  useEffect(() => {
+    if (!isStagePanning) {
+      return undefined;
+    }
+    const handlePointerRelease = () => {
+      endStagePan();
+    };
+    window.addEventListener('mouseup', handlePointerRelease);
+    window.addEventListener('pointerup', handlePointerRelease);
+    window.addEventListener('blur', handlePointerRelease);
+    return () => {
+      window.removeEventListener('mouseup', handlePointerRelease);
+      window.removeEventListener('pointerup', handlePointerRelease);
+      window.removeEventListener('blur', handlePointerRelease);
+    };
+  }, [endStagePan, isStagePanning]);
+
   const handleStageMouseDown = useCallback((e) => {
     const isBackground = e.target === e.target.getStage()
       || e.target === e.target.getLayer()
@@ -3760,13 +5099,16 @@ function FloorPlanEditor() {
     if (!isBackground) {
       return;
     }
-    if (selectionLockActive) {
+    if (selectionLockActive && !(mergeModeActive && selectedTool === 'multi-select')) {
       clearCanvasSelection();
       closeHoverPanel();
       return;
     }
     const point = getScaledPointer(e);
     const pointer = e.target.getStage().getPointerPosition();
+    if (!pointer) {
+      return;
+    }
     if (selectedTool === 'select' && userZoom > 1) {
       setIsStagePanning(true);
       stagePanStartRef.current = {
@@ -3786,22 +5128,31 @@ function FloorPlanEditor() {
       setIsRoomZoneDrawing(true);
       setRoomZoneRect({ x: point.x, y: point.y, width: 0, height: 0 });
     }
-  }, [getScaledPointer, selectedTool, selectedElement, viewStep, selectionLockActive, clearCanvasSelection, closeHoverPanel, userZoom, stagePanOffset.x, stagePanOffset.y]);
+  }, [getScaledPointer, selectedTool, selectedElement, viewStep, selectionLockActive, mergeModeActive, clearCanvasSelection, closeHoverPanel, userZoom, stagePanOffset.x, stagePanOffset.y]);
 
   const handleStageMouseUp = useCallback(async () => {
     if (isStagePanning) {
-      setIsStagePanning(false);
-      stagePanStartRef.current = null;
+      endStagePan();
       return;
     }
     if (isSelecting && selectionRect) {
       const normalized = normalizeRect(selectionRect);
-      const selected = allSelectableElements
+      const selectionSource = mergeModeActive
+        ? allSelectableElements.filter((element) => element.type === 'fire-alarm' || element.type === 'new-fire-alarm')
+        : allSelectableElements;
+      const selected = selectionSource
         .filter((element) => rectsIntersect(normalized, getCurrentElementBounds(element)))
         .map((element) => ({ type: element.type, id: element.id }));
-      setSelectedElements(selected);
-      if (selected.length === 1) {
-        const only = selected[0];
+      const nextSelected = mergeModeActive && shiftPressed
+        ? [
+          ...selectedElements.filter((existing) => !selected.some((item) => item.type === existing.type && item.id === existing.id)),
+          ...selectedElements.filter((existing) => selected.some((item) => item.type === existing.type && item.id === existing.id)),
+          ...selected.filter((item) => !selectedElements.some((existing) => existing.type === item.type && existing.id === item.id)),
+        ]
+        : selected;
+      setSelectedElements(nextSelected);
+      if (!mergeModeActive && nextSelected.length === 1) {
+        const only = nextSelected[0];
         const source = only.type === 'new-wall' ? newWalls
           : only.type === 'wall' ? walls
           : only.type === 'new-door' ? newDoors
@@ -3816,7 +5167,15 @@ function FloorPlanEditor() {
         const data = source.find((item) => item.id === only.id);
         setSelectedElement({ type: only.type, id: only.id, data: data || null });
       } else {
-        setSelectedElement(null);
+        setSelectedElement(mergeModeActive && mergeInstrumentId
+          ? visibleSignalInstruments.find((item) => item.id === mergeInstrumentId)
+            ? {
+              type: 'signal-instrument',
+              id: mergeInstrumentId,
+              data: visibleSignalInstruments.find((item) => item.id === mergeInstrumentId) || null,
+            }
+            : null
+          : null);
       }
       setSelectionRect(null);
       setIsSelecting(false);
@@ -3851,6 +5210,8 @@ function FloorPlanEditor() {
     selectionRect,
     allSelectableElements,
     getCurrentElementBounds,
+    mergeInstrumentId,
+    mergeModeActive,
     newWalls,
     walls,
     newDoors,
@@ -3862,19 +5223,28 @@ function FloorPlanEditor() {
     rooms,
     fireAlarms,
     newFireAlarms,
+    selectedElements,
+    shiftPressed,
+    visibleSignalInstruments,
     isRoomZoneDrawing,
     roomZoneRect,
     selectedElement,
     updateRoomBoundary,
+    endStagePan,
   ]);
 
-  const imageUrl = floorPlan?.original_image_path 
-    ? `http://localhost:8000/${floorPlan.original_image_path.replace(/\\/g, '/')}`
-    : null;
-  const selectedDebugImage = debugImages.find((debugImg) => debugImg.path === selectedDebugImagePath) || null;
-  const displayedImageUrl = selectedDebugImage
-    ? `http://localhost:8000/${selectedDebugImage.path.replace(/\\/g, '/')}`
-    : imageUrl;
+  const handleRenderedImageLoad = useCallback((nextImageSize) => {
+    const nextWidth = Number(nextImageSize?.width || 0);
+    const nextHeight = Number(nextImageSize?.height || 0);
+    if (!nextWidth || !nextHeight) {
+      return;
+    }
+    setRenderedImageSize((prev) => (
+      prev?.url === displayedImageUrl && prev?.width === nextWidth && prev?.height === nextHeight
+        ? prev
+        : { url: displayedImageUrl, width: nextWidth, height: nextHeight }
+    ));
+  }, [displayedImageUrl]);
   const visibleDimensions = dimensions.filter(dim => !deletedElements.some(del => del.type === 'dimensions' && del.id === dim.id));
   const roomDimensionsMap = visibleDimensions.reduce((acc, dim) => {
     if (dim.room_id === null || dim.room_id === undefined) {
@@ -3898,6 +5268,7 @@ function FloorPlanEditor() {
   const openingsValidated = getStepStatus('openings') === 'validated';
   const roomsValidated = getStepStatus('rooms') === 'validated';
   const zkspcValidated = getStepStatus('zkspc') === 'validated';
+  const canSubmitRecognitionFeedback = Boolean(recognitionMeta?.id) && recognitionMeta?.status === 'completed';
   const currentBranchState = pipelineState?.branches?.[currentSignalSystem] || { active_step: 'fire_alarms', steps: {} };
   const fireAlarmStepUnlocked = zkspcValidated;
   const devicesCablesStepUnlocked = zkspcValidated;
@@ -3912,13 +5283,22 @@ function FloorPlanEditor() {
       ? 'zkspc'
       : (pipelineState?.active_step || 'walls');
   const currentViewStep = viewStep || activePipelineStep || 'original';
+  useEffect(() => {
+    if (currentViewStep !== 'devices_cables' && mergeInstrumentId !== null) {
+      setMergeInstrumentId(null);
+      setSelectedElements([]);
+    }
+  }, [currentViewStep, mergeInstrumentId]);
+  const useArchitectBlack = ['rooms', 'zkspc', 'fire_alarms', 'devices_cables'].includes(currentViewStep);
+  const isPostZkspcView = currentViewStep === 'fire_alarms' || currentViewStep === 'devices_cables';
   const showBackgroundImage = ['original', 'walls', 'openings', 'rooms'].includes(currentViewStep);
   const showWallsOnCanvas = currentViewStep !== 'original' && (currentViewStep === 'walls' || wallsValidated);
   const wallsInteractive = currentViewStep === 'walls';
   const showStairsOnCanvas = currentViewStep === 'walls' || currentViewStep === 'fire_alarms' || currentViewStep === 'devices_cables';
   const showOpeningsOnCanvas = (currentViewStep === 'openings' || currentViewStep === 'rooms' || currentViewStep === 'zkspc' || currentViewStep === 'fire_alarms' || currentViewStep === 'devices_cables')
     && (currentViewStep === 'openings' || openingsValidated);
-  const showRoomsOnCanvas = currentViewStep === 'rooms' || currentViewStep === 'zkspc' || currentViewStep === 'devices_cables';
+  const showRoomsOnCanvas = currentViewStep === 'rooms' || currentViewStep === 'zkspc';
+  const showZkspcOverlayOnCanvas = currentViewStep === 'zkspc';
   const showDimensionsOnCanvas = currentViewStep === 'walls';
   const showFireAlarmsOnCanvas = currentViewStep === 'fire_alarms' || currentViewStep === 'devices_cables';
   const showCableRoutesOnCanvas = currentViewStep === 'devices_cables';
@@ -3932,6 +5312,29 @@ function FloorPlanEditor() {
   const visibleDoors = doors.filter((door) => !deletedElements.some((del) => del.type === 'doors' && del.id === door.id));
   const visibleWindows = windows.filter((windowItem) => !deletedElements.some((del) => del.type === 'windows' && del.id === windowItem.id));
   const visibleRooms = rooms.filter((room) => !deletedElements.some((del) => del.type === 'rooms' && del.id === room.id));
+  const zkspcStyleMap = useMemo(
+    () => buildZkspcStyleMap(currentZkspcZones, visibleRooms, floorPlan?.id),
+    [currentZkspcZones, visibleRooms, floorPlan?.id],
+  );
+  const zoneLabelAnchors = useMemo(() => (
+    currentZkspcZones.reduce((acc, zone) => {
+      const zoneRooms = visibleRooms.filter((room) => (zone.room_ids || []).includes(room.id));
+      if (!zoneRooms.length) {
+        return acc;
+      }
+      const centers = zoneRooms
+        .map((room) => getRoomDisplayCenter(room))
+        .filter(Boolean);
+      if (!centers.length) {
+        return acc;
+      }
+      acc[zone.id || zone.zone_number] = {
+        x: centers.reduce((sum, point) => sum + point.x, 0) / centers.length,
+        y: centers.reduce((sum, point) => sum + point.y, 0) / centers.length,
+      };
+      return acc;
+    }, {})
+  ), [currentZkspcZones, visibleRooms]);
   const wallDisplayNumberMap = buildDisplayNumberMap([...visibleWalls, ...newWalls]);
   const stairDisplayNumberMap = buildDisplayNumberMap([...visibleStairs, ...newStairs]);
   const doorDisplayNumberMap = buildDisplayNumberMap([...visibleDoors, ...newDoors]);
@@ -3964,6 +5367,12 @@ function FloorPlanEditor() {
     () => getBranchCableRoutes(cableRoutes, currentSignalSystem),
     [cableRoutes, currentSignalSystem],
   );
+  useEffect(() => {
+    if (mergeInstrumentId && !visibleSignalInstruments.some((instrument) => instrument.id === mergeInstrumentId)) {
+      setMergeInstrumentId(null);
+      setSelectedElements([]);
+    }
+  }, [mergeInstrumentId, visibleSignalInstruments]);
   const signalBranchSummary = useMemo(
     () => getSignalBranchSummary({
       fireAlarms: visibleFireAlarmItems.map((entry) => entry.alarm),
@@ -4063,6 +5472,176 @@ function FloorPlanEditor() {
     return '#8e877d';
   };
   const stageRect = stageContainerRef.current?.getBoundingClientRect();
+  const stagePlanBounds = useMemo(() => {
+    if (!containerSize.width || !containerSize.height) {
+      return null;
+    }
+    const corners = [
+      viewportPointToPlan({ x: 0, y: 0 }, viewTransform),
+      viewportPointToPlan({ x: containerSize.width, y: 0 }, viewTransform),
+      viewportPointToPlan({ x: containerSize.width, y: containerSize.height }, viewTransform),
+      viewportPointToPlan({ x: 0, y: containerSize.height }, viewTransform),
+    ];
+    return getBoundingBox(corners.map(({ x, y }) => [x, y]));
+  }, [containerSize.height, containerSize.width, viewTransform]);
+  const drawingLabelBaseObstacles = useMemo(() => {
+    if (!showFireAlarmsOnCanvas && !showCableRoutesOnCanvas && !showSignalInstrumentsOnCanvas) {
+      return [];
+    }
+    const obstacles = [];
+    [...visibleWalls, ...newWalls].forEach((wall) => {
+      const current = wall.id && !String(wall.id).startsWith('temp_')
+        ? getWallCurrentGeometry(wall.id)
+        : wall;
+      if (!current) {
+        return;
+      }
+      const thicknessPx = getWallThicknessPx(current, floorPlan?.scale_factor);
+      obstacles.push(padRect({
+        x: Math.min(current.x1, current.x2),
+        y: Math.min(current.y1, current.y2),
+        width: Math.abs(current.x2 - current.x1) || 1,
+        height: Math.abs(current.y2 - current.y1) || 1,
+      }, Math.max(4, thicknessPx / 2)));
+    });
+    [...visibleDoors, ...newDoors].forEach((door) => {
+      const current = getOpeningCurrentGeometry(
+        String(door.id).startsWith('temp_') ? 'new-doors' : 'doors',
+        door.id,
+        door,
+      );
+      const bounds = getRotatedBounds(current);
+      if (bounds) {
+        obstacles.push(padRect(bounds, 4));
+      }
+    });
+    [...visibleWindows, ...newWindows].forEach((windowItem) => {
+      const current = getOpeningCurrentGeometry(
+        String(windowItem.id).startsWith('temp_') ? 'new-windows' : 'windows',
+        windowItem.id,
+        windowItem,
+      );
+      const bounds = getRotatedBounds(current);
+      if (bounds) {
+        obstacles.push(padRect(bounds, 4));
+      }
+    });
+    currentStairGeometries.forEach((stair) => {
+      const bounds = getRotatedBounds(stair);
+      if (bounds) {
+        obstacles.push(padRect(bounds, 6));
+      }
+    });
+    visibleSignalInstruments.forEach((instrument) => {
+      const bounds = getSignalInstrumentBounds(instrument);
+      if (bounds) {
+        obstacles.push(bounds);
+      }
+    });
+    visibleFireAlarmItems.forEach(({ kind, alarm }) => {
+      const current = getFireAlarmCurrentGeometry(kind, alarm.id, alarm);
+      if (!current) {
+        return;
+      }
+      obstacles.push(getFireAlarmBounds(current));
+    });
+    return obstacles.filter(Boolean);
+  }, [
+    currentStairGeometries,
+    floorPlan?.scale_factor,
+    getFireAlarmCurrentGeometry,
+    getOpeningCurrentGeometry,
+    getWallCurrentGeometry,
+    newDoors,
+    newWalls,
+    newWindows,
+    showCableRoutesOnCanvas,
+    showFireAlarmsOnCanvas,
+    showSignalInstrumentsOnCanvas,
+    visibleDoors,
+    visibleFireAlarmItems,
+    visibleSignalInstruments,
+    visibleWalls,
+    visibleWindows,
+  ]);
+  const fireAlarmLabelLayouts = useMemo(() => {
+    const layouts = {};
+    const placed = [];
+    visibleFireAlarmItems.forEach(({ kind, alarm }) => {
+      const current = getFireAlarmCurrentGeometry(kind, alarm.id, alarm);
+      if (!current) {
+        return;
+      }
+      const label = getFireAlarmCode(current);
+      const savedRect = getLabelRectFromOffset(current.x, current.y, label, 10, current.label_dx, current.label_dy);
+      const rect = savedRect || chooseSymbolLabelRect({
+        anchorX: current.x,
+        anchorY: current.y,
+        text: label,
+        fontSize: 10,
+        symbolHalfWidth: 14,
+        symbolHalfHeight: 14,
+        obstacles: [...drawingLabelBaseObstacles, ...placed],
+        bounds: stagePlanBounds,
+      });
+      layouts[current.id] = rect;
+      placed.push(rect);
+    });
+    return layouts;
+  }, [
+    drawingLabelBaseObstacles,
+    getFireAlarmCode,
+    getFireAlarmCurrentGeometry,
+    stagePlanBounds,
+    visibleFireAlarmItems,
+  ]);
+  const signalInstrumentLabelLayouts = useMemo(() => {
+    const layouts = {};
+    const placed = [];
+    visibleSignalInstruments.forEach((instrument) => {
+      const label = getInstrumentLabelText(instrument);
+      if (!label) {
+        return;
+      }
+      const bounds = getSignalInstrumentBounds(instrument);
+      const savedRect = getLabelRectFromOffset(
+        instrument.x,
+        instrument.y,
+        label,
+        11,
+        instrument.label_dx,
+        instrument.label_dy,
+      );
+      const rect = savedRect || chooseSymbolLabelRect({
+        anchorX: instrument.x,
+        anchorY: instrument.y,
+        text: label,
+        fontSize: 11,
+        symbolHalfWidth: bounds.width / 2,
+        symbolHalfHeight: bounds.height / 2,
+        obstacles: [...drawingLabelBaseObstacles, ...Object.values(fireAlarmLabelLayouts), ...placed],
+        bounds: stagePlanBounds,
+      });
+      layouts[instrument.id] = rect;
+      placed.push(rect);
+    });
+    return layouts;
+  }, [drawingLabelBaseObstacles, fireAlarmLabelLayouts, stagePlanBounds, visibleSignalInstruments]);
+  const cableLabelObstacles = useMemo(() => {
+    if (!showCableRoutesOnCanvas) {
+      return [];
+    }
+    return [
+      ...drawingLabelBaseObstacles,
+      ...Object.values(fireAlarmLabelLayouts),
+      ...Object.values(signalInstrumentLabelLayouts),
+    ];
+  }, [
+    drawingLabelBaseObstacles,
+    fireAlarmLabelLayouts,
+    showCableRoutesOnCanvas,
+    signalInstrumentLabelLayouts,
+  ]);
   const hoverPanelStyle = (() => {
     if (!hoverPanel || !stageRect) {
       return null;
@@ -4084,15 +5663,12 @@ function FloorPlanEditor() {
       border: '1px solid #d9d2c8',
       borderRadius: '14px',
       boxShadow: '0 18px 32px rgba(84,69,45,0.16)',
-      padding: '10px',
+      padding: '14px',
       fontSize: '12px',
       pointerEvents: 'auto',
-      overflowY: 'auto',
+      overflow: 'hidden',
     };
   })();
-  const hoverRoomAreaDraft = roomDraft.length !== '' && roomDraft.width !== ''
-    ? Number(roomDraft.length) * Number(roomDraft.width)
-    : null;
   const hoverFireAlarmTitle = (hoverPanel?.type === 'fire-alarm' || hoverPanel?.type === 'new-fire-alarm') && hoverPanel?.data
     ? getFireAlarmCode(hoverPanel.data, {
       zone: fireAlarmDraft.zone || hoverPanel.data.zone,
@@ -4210,7 +5786,7 @@ function FloorPlanEditor() {
                     </button>
                   </div>
                 )}
-                {step.key === 'devices_cables' && canOpen && (
+                {false && step.key === 'devices_cables' && canOpen && (
                   <div style={{ display: 'flex', gap: '6px' }} onClick={(e) => e.stopPropagation()}>
                     <button
                       className="tool-button"
@@ -4242,6 +5818,32 @@ function FloorPlanEditor() {
             {selectedDebugImage && (
               <p><strong>Debug шаг:</strong> {selectedDebugImage.step}</p>
             )}
+            {canSubmitRecognitionFeedback && (
+              <div style={{ display: 'grid', gap: '8px', marginTop: '10px' }}>
+                <button
+                  className="tool-button"
+                  onClick={handleSubmitRecognitionFeedback}
+                  disabled={!wallsValidated || !openingsValidated || !roomsValidated || recognitionFeedbackSubmitting}
+                >
+                  {recognitionFeedbackSubmitting ? 'Отправка...' : 'Отправить исправленный результат для обучения'}
+                </button>
+                {recognitionFeedbackStatus === 'success' && (
+                  <div style={{ fontSize: '12px', color: '#0f766e' }}>
+                    Исправленный результат добавлен в обучающую выборку.
+                  </div>
+                )}
+                {recognitionFeedbackStatus === 'error' && (
+                  <div style={{ fontSize: '12px', color: '#b42318' }}>
+                    {recognitionFeedbackError}
+                  </div>
+                )}
+                {(!wallsValidated || !openingsValidated || !roomsValidated) && (
+                  <div style={{ fontSize: '12px', color: '#6c757d' }}>
+                    Для отправки примера подтвердите шаги стен, проемов и помещений.
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
 
@@ -4253,7 +5855,7 @@ function FloorPlanEditor() {
           />
         )}
 
-        {false && ((showFireAlarmSidebar || showDevicesCablesSidebar) && (
+        {/* Legacy sidebar branch selector kept out of render.
           <div className="sidebar-section">
             <h3>Тип сигнализации</h3>
             <div style={{ display: 'grid', gap: '8px' }}>
@@ -4275,7 +5877,7 @@ function FloorPlanEditor() {
               <div>Кабеля: {formatCableMeters(signalBranchSummary.cableLengthM)}</div>
             </div>
           </div>
-        ))}
+        */}
 
         {showZkspcSidebar && (
           <ZkspcSidebarSection
@@ -4295,7 +5897,7 @@ function FloorPlanEditor() {
           />
         )}
 
-        {false && (showZkspcSidebar && (
+        {/* Legacy ZKSPC sidebar kept out of render.
           <div className="sidebar-section">
             <h3>ЗКСПС ({currentZkspcZones.length})</h3>
             <div style={{ display: 'flex', gap: '6px', marginBottom: '8px', flexWrap: 'wrap' }}>
@@ -4314,7 +5916,7 @@ function FloorPlanEditor() {
                 <li key={`zkspc-${zone.id ?? zone.zone_number}`} className="element-item" style={{ alignItems: 'flex-start' }}>
                   <div style={{ width: '100%' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                      <span style={{ width: '12px', height: '12px', borderRadius: '50%', background: getZkspcColor(zone.zone_number), display: 'inline-block' }} />
+                      <span style={{ width: '12px', height: '12px', borderRadius: '50%', background: zkspcStyleMap[Number(zone.zone_number || 1)]?.color || getZkspcStyle(zone, floorPlan?.id).color, display: 'inline-block' }} />
                       <strong>{zone.name || `ЗКСПС ${zone.zone_number}`}</strong>
                     </div>
                     <div style={{ fontSize: '11px', color: '#6c757d' }}>
@@ -4361,7 +5963,7 @@ function FloorPlanEditor() {
               ))}
             </ul>
           </div>
-        ))}
+        */}
 
         {showRoomsSidebar && (
           <div className="sidebar-section">
@@ -4395,7 +5997,7 @@ function FloorPlanEditor() {
                     }}
                   >
                     ×
-                  </button>
+                  </button>}
                 </li>
               ))}
             </ul>
@@ -4432,7 +6034,7 @@ function FloorPlanEditor() {
         {showFireAlarmSidebar && (
         <div className="sidebar-section">
           <h3>Пожарные извещатели ({visibleFireAlarmItems.length})</h3>
-          {false && (
+          {/* Legacy fire alarm action list kept out of render.
             <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginBottom: '10px' }}>
               <button className="tool-button" onClick={handleAutoLayoutFireAlarms} disabled={!fireAlarmStepUnlocked || fireAlarmActionLoading}>
                 {fireAlarmActionLoading ? 'Расстановка...' : 'Расставить'}
@@ -4444,7 +6046,7 @@ function FloorPlanEditor() {
                 Добавить ручной извещатель
               </button>
             </div>
-          )}
+          */}
           {fireAlarmWarnings.length > 0 && (
             <div style={{ marginBottom: '10px', padding: '8px', borderRadius: '6px', background: '#fff3cd', color: '#664d03', fontSize: '12px' }}>
               {fireAlarmWarnings.map((warning, index) => (
@@ -4502,17 +6104,21 @@ function FloorPlanEditor() {
           visibleSignalInstruments={visibleSignalInstruments}
           visibleCableRoutes={visibleCableRoutes}
           selectedElement={selectedElement}
+          mergeInstrumentId={mergeInstrumentId}
+          mergeSelectionCount={selectedElements.filter((item) => item.type === 'fire-alarm' || item.type === 'new-fire-alarm').length}
           onSelectTool={setSelectedTool}
           onSelectInstrument={(instrument) => {
             setSelectedElement({ type: 'signal-instrument', id: instrument.id, data: instrument });
             setSelectedElements([{ type: 'signal-instrument', id: instrument.id }]);
           }}
-          onMergeCableRoutes={handleMergeCableRoutes}
+          onStartMerge={handleStartMergeCableRoutes}
+          onApplyMerge={handleMergeCableRoutes}
+          onCancelMerge={handleCancelMergeCableRoutes}
           onDeleteSignalInstrument={handleDeleteSignalInstrument}
         />
       )}
 
-      {false && (showDevicesCablesSidebar && (
+      {/* Legacy devices/cables sidebar kept out of render.
         <div className="editor-sidebar" style={{ borderLeft: '1px solid #dee2e6' }}>
           <div className="sidebar-section">
             <h3>Приборы и кабели</h3>
@@ -4553,6 +6159,22 @@ function FloorPlanEditor() {
                       Свести
                     </button>
                   )}
+                  {getSignalInstrumentDefinition(signalInstrumentDraft.instrumentType || hoverPanel.data?.instrument_type).supportsMerge && (
+                    mergeInstrumentId === hoverPanel.id ? (
+                      <>
+                        <button className="tool-button" onClick={handleMergeCableRoutes}>
+                          РџСЂРёРјРµРЅРёС‚СЊ СЃРІРµРґРµРЅРёРµ
+                        </button>
+                        <button className="tool-button" onClick={handleCancelMergeCableRoutes}>
+                          РћС‚РјРµРЅР°
+                        </button>
+                      </>
+                    ) : (
+                      <button className="tool-button" onClick={() => handleStartMergeCableRoutes(hoverPanel.data)}>
+                        РЎРІРµСЃС‚Рё РґР°С‚С‡РёРєРё
+                      </button>
+                    )
+                  )}
                   <button
                     className="element-delete"
                     onClick={(e) => {
@@ -4574,94 +6196,7 @@ function FloorPlanEditor() {
             </div>
           </div>
         </div>
-      ))}
-
-      {/* Debug Images Panel */}
-      {debugImages.length > 0 && (
-        <div className="debug-panel" style={{
-          width: '300px',
-          borderRight: '1px solid #dee2e6',
-          padding: '1rem',
-          overflowY: 'auto',
-          backgroundColor: '#f8f9fa',
-          maxHeight: 'calc(100vh - 120px)'
-        }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
-            <h3 style={{ margin: 0 }}>Debug изображения</h3>
-            <button
-              onClick={() => setShowDebugPanel(!showDebugPanel)}
-              style={{ background: 'none', border: 'none', fontSize: '18px', cursor: 'pointer' }}
-            >
-              {showDebugPanel ? '−' : '+'}
-            </button>
-          </div>
-          
-          {showDebugPanel && (
-            <div>
-              {selectedDebugImage && (
-                <button
-                  onClick={() => setSelectedDebugImagePath(null)}
-                  style={{
-                    width: '100%',
-                    marginBottom: '1rem',
-                    padding: '0.5rem',
-                    border: '1px solid #6c757d',
-                    borderRadius: '4px',
-                    backgroundColor: '#6c757d',
-                    color: 'white',
-                    cursor: 'pointer'
-                  }}
-                >
-                  Показать авто-распознавание
-                </button>
-              )}
-              {debugImages.map((debugImg, index) => (
-                <div
-                  key={index}
-                  onClick={() => setSelectedDebugImagePath(debugImg.path)}
-                  style={{
-                    marginBottom: '1rem',
-                    border: selectedDebugImagePath === debugImg.path ? '2px solid #007bff' : '1px solid #dee2e6',
-                    borderRadius: '4px',
-                    overflow: 'hidden',
-                    cursor: 'pointer'
-                  }}
-                >
-                  <div style={{ padding: '0.5rem', backgroundColor: '#e9ecef', fontSize: '12px', fontWeight: 'bold' }}>
-                    {debugImg.step}
-                  </div>
-                  <img
-                    src={`http://localhost:8000/${debugImg.path}`}
-                    alt={debugImg.step}
-                    style={{ width: '100%', height: 'auto', display: 'block' }}
-                  />
-                  <div style={{ padding: '0.5rem', textAlign: 'center' }}>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setSelectedDebugImagePath(debugImg.path);
-                      }}
-                      style={{ padding: '0.25rem 0.5rem', fontSize: '12px', marginRight: '0.5rem' }}
-                    >
-                      Открыть
-                    </button>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        downloadImage(`http://localhost:8000/${debugImg.path}`, `${debugImg.step.replace(/\s+/g, '_')}.png`);
-                      }}
-                      style={{ padding: '0.25rem 0.5rem', fontSize: '12px' }}
-                    >
-                      Скачать
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
-
+      */}
       <div className="editor-canvas">
         <div className="editor-toolbar">
           <button
@@ -4691,6 +6226,77 @@ function FloorPlanEditor() {
             >
               Добавить лестницу
             </button>
+          )}
+          {currentViewStep === 'walls' && (
+            <>
+              <select
+                value={wallDraftPreset}
+                onChange={(e) => setWallDraftPreset(e.target.value)}
+                style={{ display: 'none' }}
+                aria-hidden="true"
+              >
+                <option value="outer">Наружная стена</option>
+                <option value="inner">Внутренняя стена</option>
+                <option value="manual">Ручная толщина</option>
+              </select>
+              <select
+                value={newWallAlignment}
+                onChange={(e) => setNewWallAlignment(normalizeWallAlignment(e.target.value))}
+                style={{ display: 'none' }}
+                aria-hidden="true"
+              >
+                {WALL_ALIGNMENT_OPTIONS.map((option) => (
+                  <option key={`new-wall-align-${option.value}`} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+              <button
+                className="tool-button"
+                type="button"
+                onClick={() => setNewWallAlignment((prev) => flipWallAlignment(prev))}
+                style={{ display: 'none' }}
+                aria-hidden="true"
+              >
+                Flip стены
+              </button>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#4f4131' }}>
+                <span style={{ fontSize: '12px', fontWeight: 600 }}>Толщина, м</span>
+                <input
+                  type="number"
+                  min="0.01"
+                  step="0.01"
+                  value={newWallThicknessDraft}
+                  onChange={(e) => setNewWallThicknessDraft(e.target.value)}
+                  style={{ width: '92px' }}
+                  aria-label="Толщина новой стены, м"
+                />
+              </label>
+              <div style={{ display: 'flex', gap: '6px' }}>
+                <button
+                  className={`tool-button ${!wallAutoSnapEnabled ? 'active' : ''}`}
+                  type="button"
+                  onClick={() => setWallAutoSnapEnabled(false)}
+                >
+                  Свободно
+                </button>
+                <button
+                  className={`tool-button ${wallAutoSnapEnabled ? 'active' : ''}`}
+                  type="button"
+                  onClick={() => setWallAutoSnapEnabled(true)}
+                >
+                  Прилипание
+                </button>
+              </div>
+              <button
+                className="tool-button"
+                type="button"
+                onClick={() => {
+                  saveToHistory();
+                  finalizeWallWorkingSet(getWorkingWallsSnapshot(), { autoNormalize: true });
+                }}
+              >
+                Приклеить все стены
+              </button>
+            </>
           )}
           {currentViewStep === 'openings' && (
             <>
@@ -4753,7 +6359,7 @@ function FloorPlanEditor() {
               Калибровка
             </button>
           )}
-          {selectedElements.length > 1 && selectedGroupBounds && (
+          {currentViewStep !== 'devices_cables' && selectedElements.length > 1 && selectedGroupBounds && (
             <>
               <button className="tool-button" onClick={handleDeleteSelectedElements}>Удалить группу</button>
               <button
@@ -4801,6 +6407,19 @@ function FloorPlanEditor() {
             <span style={{ fontSize: '12px', minWidth: '40px', textAlign: 'center' }}>
               {Math.round(userZoom * 100)}%
             </span>
+            <input
+              type="range"
+              min={Math.round(MIN_ZOOM * 100)}
+              max={Math.round(MAX_ZOOM * 100)}
+              step={Math.round(ZOOM_STEP * 100)}
+              value={Math.round(userZoom * 100)}
+              aria-label="Масштаб отображения"
+              onChange={(e) => {
+                const nextZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, Number(e.target.value) / 100));
+                updateViewport((prev) => ({ ...prev, zoom: nextZoom }));
+              }}
+              style={{ width: '140px' }}
+            />
             <button
               className="tool-button"
               onClick={handleZoomIn}
@@ -4816,11 +6435,17 @@ function FloorPlanEditor() {
             >
               100%
             </button>
+            <button
+              className="tool-button"
+              onClick={handleRotateViewport}
+              title="Повернуть изображение и план на 90°"
+            >
+              ↻ 90°
+            </button>
           </div>
-          
         </div>
 
-        <div className="editor-stage" id="editor-stage-container" ref={stageContainerRef}>
+        <div className="editor-stage" id="editor-stage-container" ref={setStageContainerNodeRef}>
           {selectedDebugImage && (
             <div style={{
               position: 'absolute',
@@ -4908,9 +6533,9 @@ function FloorPlanEditor() {
               </div>
 
               {['wall', 'new-wall'].includes(hoverPanel.type) && (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                  <label style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
-                    <span>Длина (м)</span>
+                <div style={HOVER_PANEL_SECTION_STYLE}>
+                  <label style={HOVER_PANEL_FIELD_ROW_STYLE}>
+                    <span style={HOVER_PANEL_LABEL_STYLE}>Длина, м</span>
                     <input
                       type="number"
                       step="0.01"
@@ -4919,10 +6544,11 @@ function FloorPlanEditor() {
                       onChange={(e) => {
                         setWallLengthDraft(e.target.value);
                       }}
+                      style={HOVER_PANEL_INPUT_STYLE}
                     />
                   </label>
-                  <label style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
-                    <span>Толщина (м)</span>
+                  <label style={HOVER_PANEL_FIELD_ROW_STYLE}>
+                    <span style={HOVER_PANEL_LABEL_STYLE}>Толщина, м</span>
                     <input
                       type="number"
                       step="0.01"
@@ -4931,17 +6557,40 @@ function FloorPlanEditor() {
                       onChange={(e) => {
                         setWallThicknessDraft(e.target.value);
                       }}
+                      style={HOVER_PANEL_INPUT_STYLE}
                     />
                   </label>
-                  <button className="tool-button" onClick={handleSaveWallMeta}>Сохранить</button>
+                  <label style={{ ...HOVER_PANEL_FIELD_ROW_STYLE, display: 'none' }} aria-hidden="true">
+                    <span style={HOVER_PANEL_LABEL_STYLE}>Смещение</span>
+                    <select
+                      value={wallAlignmentDraft}
+                      onChange={(e) => setWallAlignmentDraft(normalizeWallAlignment(e.target.value))}
+                      style={HOVER_PANEL_INPUT_STYLE}
+                    >
+                      {WALL_ALIGNMENT_OPTIONS.map((option) => (
+                        <option key={`wall-alignment-${option.value}`} value={option.value}>{option.label}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <div style={{ display: 'flex', gap: '8px' }}>
+                    <button
+                      className="tool-button"
+                      type="button"
+                      style={{ flex: '1 1 auto', display: 'none' }}
+                      onClick={() => setWallAlignmentDraft((prev) => flipWallAlignment(prev))}
+                      aria-hidden="true"
+                    >
+                      Flip
+                    </button>
+                    <button className="tool-button" style={{ flex: '1 1 auto' }} onClick={handleSaveWallMeta}>Сохранить</button>
+                  </div>
                 </div>
               )}
 
               {(['door', 'window', 'new-door', 'new-window'].includes(hoverPanel.type)) && (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                  <div>ID стены: {hoverPanel.data?.wall_id ?? '—'}</div>
-                  <label style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
-                    <span>Ширина (м)</span>
+                <div style={HOVER_PANEL_SECTION_STYLE}>
+                  <label style={HOVER_PANEL_FIELD_ROW_STYLE}>
+                    <span style={HOVER_PANEL_LABEL_STYLE}>Ширина, м</span>
                     <input
                       type="number"
                       step="0.01"
@@ -4951,10 +6600,11 @@ function FloorPlanEditor() {
                         const nextDraft = { ...openingSizeDraft, width: e.target.value };
                         setOpeningSizeDraft(nextDraft);
                       }}
+                      style={HOVER_PANEL_INPUT_STYLE}
                     />
                   </label>
-                  <label style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
-                    <span>Толщина (м)</span>
+                  <label style={HOVER_PANEL_FIELD_ROW_STYLE}>
+                    <span style={HOVER_PANEL_LABEL_STYLE}>Толщина, м</span>
                     <input
                       type="number"
                       step="0.01"
@@ -4964,44 +6614,17 @@ function FloorPlanEditor() {
                         const nextDraft = { ...openingSizeDraft, height: e.target.value };
                         setOpeningSizeDraft(nextDraft);
                       }}
+                      style={HOVER_PANEL_INPUT_STYLE}
                     />
                   </label>
-                  <div style={{ color: '#6c757d' }}>
-                    Второе поле трактуется как толщина проема в метрах.
-                  </div>
-                  <label style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
-                    <span>wall_id</span>
-                    <input
-                      type="number"
-                      step="1"
-                      min="1"
-                      value={openingSizeDraft.wallId}
-                      onChange={(e) => {
-                        const nextDraft = { ...openingSizeDraft, wallId: e.target.value };
-                        setOpeningSizeDraft(nextDraft);
-                      }}
-                    />
-                  </label>
-                  <div style={{ color: '#6c757d' }}>
-                    Реальный размер: {formatMetersValue(pxToMeters(hoverPanel.data?.width, floorPlan?.scale_factor), 2)}
-                    {' × '}
-                    {formatMetersValue(pxToMeters(hoverPanel.data?.height, floorPlan?.scale_factor), 2)}
-                  </div>
-                  <div style={{ color: '#6c757d' }}>
-                    В px: {openingSizeDraft.width ? Number(metersToPx(Number(openingSizeDraft.width), floorPlan?.scale_factor)).toFixed(1) : '—'}
-                    {' × '}
-                    {openingSizeDraft.height ? Number(metersToPx(Number(openingSizeDraft.height), floorPlan?.scale_factor)).toFixed(1) : '—'}
-                  </div>
-                  <div style={{ display: 'flex', gap: '6px' }}>
-                    <button className="tool-button" onClick={handleSaveOpeningMeta}>Применить</button>
-                  </div>
+                  <button className="tool-button" onClick={handleSaveOpeningMeta}>Сохранить</button>
                 </div>
               )}
 
               {(hoverPanel.type === 'stair' || hoverPanel.type === 'new-stair') && (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                  <label style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
-                    <span>Ширина (м)</span>
+                <div style={HOVER_PANEL_SECTION_STYLE}>
+                  <label style={HOVER_PANEL_FIELD_ROW_STYLE}>
+                    <span style={HOVER_PANEL_LABEL_STYLE}>Ширина, м</span>
                     <input
                       type="number"
                       step="0.01"
@@ -5011,10 +6634,11 @@ function FloorPlanEditor() {
                         const nextDraft = { ...stairDraft, width: e.target.value };
                         setStairDraft(nextDraft);
                       }}
+                      style={HOVER_PANEL_INPUT_STYLE}
                     />
                   </label>
-                  <label style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
-                    <span>Высота (м)</span>
+                  <label style={HOVER_PANEL_FIELD_ROW_STYLE}>
+                    <span style={HOVER_PANEL_LABEL_STYLE}>Высота, м</span>
                     <input
                       type="number"
                       step="0.01"
@@ -5024,9 +6648,10 @@ function FloorPlanEditor() {
                         const nextDraft = { ...stairDraft, height: e.target.value };
                         setStairDraft(nextDraft);
                       }}
+                      style={HOVER_PANEL_INPUT_STYLE}
                     />
                   </label>
-                  <div style={{ color: '#6c757d' }}>
+                  <div style={{ fontSize: '12px', color: '#6c757d' }}>
                     Количество линий определяется автоматически по размеру лестницы.
                   </div>
                   <button className="tool-button" onClick={handleSaveStairMeta}>Сохранить</button>
@@ -5034,47 +6659,42 @@ function FloorPlanEditor() {
               )}
 
               {hoverPanel.type === 'room' && (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                  <label style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
-                    <span>Имя</span>
+                <div style={HOVER_PANEL_SECTION_STYLE}>
+                  <label style={HOVER_PANEL_FIELD_ROW_STYLE}>
+                    <span style={HOVER_PANEL_LABEL_STYLE}>Имя</span>
                     <input
                       type="text"
                       value={roomDraft.name}
                       onChange={(e) => setRoomDraft(prev => ({ ...prev, name: e.target.value }))}
+                      style={HOVER_PANEL_INPUT_STYLE}
                     />
                   </label>
-                  <label style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
-                    <span>Тип</span>
+                  <label style={HOVER_PANEL_FIELD_ROW_STYLE}>
+                    <span style={HOVER_PANEL_LABEL_STYLE}>Тип</span>
                     <select
                       value={roomDraft.type}
                       onChange={(e) => setRoomDraft(prev => ({ ...prev, type: e.target.value }))}
+                      style={HOVER_PANEL_INPUT_STYLE}
                     >
                       <option value="базовое">базовое</option>
                       <option value="необслуживаемое">необслуживаемое</option>
                     </select>
                   </label>
-                  <label style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
-                    <span>Длина (м)</span>
-                    <input
-                      type="number"
-                      step="0.01"
-                      min="0"
-                      value={roomDraft.length}
-                      onChange={(e) => setRoomDraft(prev => ({ ...prev, length: e.target.value }))}
-                    />
-                  </label>
-                  <label style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
-                    <span>Ширина (м)</span>
-                    <input
-                      type="number"
-                      step="0.01"
-                      min="0"
-                      value={roomDraft.width}
-                      onChange={(e) => setRoomDraft(prev => ({ ...prev, width: e.target.value }))}
-                    />
-                  </label>
-                  <div style={{ color: '#6c757d' }}>
-                    Площадь (авто): {hoverRoomAreaDraft !== null && Number.isFinite(hoverRoomAreaDraft) ? `${hoverRoomAreaDraft.toFixed(2)} м²` : '—'}
+                  <div style={HOVER_PANEL_INFO_ROW_STYLE}>
+                    <span>Длина</span>
+                    <strong>{formatMetersValue(hoverPanel.data?.length_m, 2)}</strong>
+                  </div>
+                  <div style={HOVER_PANEL_INFO_ROW_STYLE}>
+                    <span>Ширина</span>
+                    <strong>{formatMetersValue(hoverPanel.data?.width_m, 2)}</strong>
+                  </div>
+                  <div style={HOVER_PANEL_INFO_ROW_STYLE}>
+                    <span>Площадь</span>
+                    <strong>
+                      {hoverPanel.data?.area_sqm !== null && hoverPanel.data?.area_sqm !== undefined
+                        ? `${Number(hoverPanel.data.area_sqm).toFixed(2)} м²`
+                        : '—'}
+                    </strong>
                   </div>
                   <button className="tool-button" onClick={handleSaveRoomMeta}>Сохранить</button>
                 </div>
@@ -5162,7 +6782,7 @@ function FloorPlanEditor() {
                   <div>x: {Number(hoverPanel.data?.x || 0).toFixed(1)} px</div>
                   <div>y: {Number(hoverPanel.data?.y || 0).toFixed(1)} px</div>
                   <button className="tool-button" onClick={handleSaveSignalInstrumentMeta}>Сохранить</button>
-                  {getSignalInstrumentDefinition(signalInstrumentDraft.instrumentType || hoverPanel.data?.instrument_type).supportsMerge && (
+                  {false && getSignalInstrumentDefinition(signalInstrumentDraft.instrumentType || hoverPanel.data?.instrument_type).supportsMerge && (
                     <button className="tool-button" onClick={() => handleMergeCableRoutes(hoverPanel.data)}>
                       Свести кабели
                     </button>
@@ -5182,13 +6802,14 @@ function FloorPlanEditor() {
                   <div>Длина: {formatCableMeters(hoverPanel.data?.length_m)}</div>
                   <div>Устройств: {(hoverPanel.data?.device_ids || []).length}</div>
                   <div>Режим: {hoverPanel.data?.is_manual ? 'ручной' : 'авто'}</div>
-                  <button className="tool-button" onClick={() => refreshCableRoutes(currentSignalSystem, false)}>
+                  {false && <button className="tool-button" onClick={() => refreshCableRoutes(currentSignalSystem, false)}>
                     Пересчитать
                   </button>
                 </div>
               )}
             </div>
           )}
+          {containerSize.width > 0 && containerSize.height > 0 && (
           <Stage
             width={containerSize.width}
             height={containerSize.height}
@@ -5196,26 +6817,40 @@ function FloorPlanEditor() {
             onClick={handleStageClick}
             onMouseDown={handleStageMouseDown}
             onMouseUp={handleStageMouseUp}
+            onMouseLeave={() => {
+              if (isStagePanning) {
+                endStagePan();
+              }
+            }}
             onMouseMove={(e) => {
               const stage = e.target.getStage();
               const point = stage.getPointerPosition();
-              if (isStagePanning && stagePanStartRef.current) {
-                const dx = point.x - stagePanStartRef.current.pointerX;
-                const dy = point.y - stagePanStartRef.current.pointerY;
+              if (!point) {
+                return;
+              }
+              const panStart = stagePanStartRef.current;
+              if (isStagePanning && panStart) {
+                const {
+                  pointerX,
+                  pointerY,
+                  startX,
+                  startY,
+                } = panStart;
+                const dx = point.x - pointerX;
+                const dy = point.y - pointerY;
                 if (Math.abs(dx) > 2 || Math.abs(dy) > 2) {
                   stagePanMovedRef.current = true;
                 }
-                setStagePanOffset({
-                  x: stagePanStartRef.current.startX + dx,
-                  y: stagePanStartRef.current.startY + dy,
-                });
+                updateViewport((prev) => ({
+                  ...prev,
+                  pan: {
+                    x: startX + dx,
+                    y: startY + dy,
+                  },
+                }));
                 return;
               }
-              // Convert to scaled coordinates
-              const scaledPoint = {
-                x: (point.x - effectiveStageOffset.x) / stageScale,
-                y: (point.y - effectiveStageOffset.y) / stageScale
-              };
+              const scaledPoint = viewportPointToPlan(point, viewTransform);
               setMousePos(scaledPoint);
               if (isSelecting && selectionRect) {
                 setSelectionRect((prev) => (prev ? { ...prev, width: scaledPoint.x - prev.x, height: scaledPoint.y - prev.y } : prev));
@@ -5226,9 +6861,23 @@ function FloorPlanEditor() {
             }}
           >
             <Layer id="editor-layer" onClick={handleStageClick}>
-              <Group x={effectiveStageOffset.x} y={effectiveStageOffset.y} scaleX={stageScale} scaleY={stageScale}>
+              <Group
+                x={viewTransform.centerX}
+                y={viewTransform.centerY}
+                scaleX={viewTransform.scale}
+                scaleY={viewTransform.scale}
+                rotation={viewTransform.rotationDeg}
+                offsetX={viewTransform.imageCenterX}
+                offsetY={viewTransform.imageCenterY}
+              >
               {/* Background Image */}
-              {showBackgroundImage && displayedImageUrl && <BackgroundImage src={displayedImageUrl} grayscale={!selectedDebugImage} />}
+              {showBackgroundImage && displayedImageUrl && (
+                <BackgroundImage
+                  src={displayedImageUrl}
+                  grayscale={!selectedDebugImage}
+                  onImageLoad={handleRenderedImageLoad}
+                />
+              )}
 
               {/* Drawing Wall Preview */}
               {!selectedDebugImage && showWallsOnCanvas && drawingWall && (() => {
@@ -5241,15 +6890,14 @@ function FloorPlanEditor() {
                   x2 = snapped.x;
                   y2 = snapped.y;
                 }
-
-                const previewThicknessPx = getWallThicknessPx({ thickness: 200 }, floorPlan?.scale_factor);
-                const previewSegments = getWallBoundarySegments(
-                  drawingWall.x1,
-                  drawingWall.y1,
+                const previewSegments = getWallOutline({
+                  x1: drawingWall.x1,
+                  y1: drawingWall.y1,
                   x2,
                   y2,
-                  previewThicknessPx,
-                );
+                  thickness: currentWallDraftThicknessMm,
+                  alignment: 'center',
+                });
 
                 return (
                   <>
@@ -5378,6 +7026,32 @@ function FloorPlanEditor() {
                 />
               )}
 
+              {!selectedDebugImage && showWallsOnCanvas && visibleWallBoundarySegments.map((segment, index) => {
+                const wall = draftingWallMap.get(segment.wallId);
+                if (!wall || suppressedWallIds.has(segment.wallId)) {
+                  return null;
+                }
+                const isSelected = (selectedElement?.id === segment.wallId && ['wall', 'new-wall'].includes(selectedElement?.type))
+                  || selectedElements.some((item) => ['wall', 'new-wall'].includes(item.type) && item.id === segment.wallId);
+                const isHovered = hoveredElement?.id === segment.wallId && ['wall', 'new-wall'].includes(hoveredElement?.type);
+                const isMissingDimension = missingWallIds.includes(segment.wallId);
+                const stroke = useArchitectBlack
+                  ? '#111111'
+                  : (isMissingDimension ? '#dc3545' : (isSelected ? 'blue' : (isHovered ? 'orange' : WALL_COLOR)));
+                const thicknessPx = getWallThicknessPx(wall, floorPlan?.scale_factor);
+                return (
+                  <Line
+                    key={`wall-boundary-${segment.wallId}-${segment.kind}-${segment.side}-${index}`}
+                    points={segment.points}
+                    stroke={stroke}
+                    strokeWidth={Math.max(1.5, Math.min(3, thicknessPx * 0.16))}
+                    lineCap="round"
+                    opacity={editingWall?.id === segment.wallId ? 0.45 : 1}
+                    listening={false}
+                  />
+                );
+              })}
+
               {/* Render Walls */}
               {!selectedDebugImage && showWallsOnCanvas && walls
                 .filter(wall => !deletedElements.some(del => del.type === 'walls' && del.id === wall.id))
@@ -5423,15 +7097,23 @@ function FloorPlanEditor() {
                   { thickness: modifications.thickness !== undefined ? modifications.thickness : wall.thickness },
                   floorPlan?.scale_factor,
                 );
+                const wallGeometry = {
+                  x1,
+                  y1,
+                  x2,
+                  y2,
+                  thickness: modifications.thickness !== undefined ? modifications.thickness : wall.thickness,
+                  alignment: modifications.alignment !== undefined ? modifications.alignment : (wall.alignment || 'center'),
+                };
                 const isMissingDimension = missingWallIds.includes(wall.id);
-                const wallStrokeColor = currentViewStep === 'fire_alarms'
+                const wallStrokeColor = useArchitectBlack
                   ? '#111111'
                   : (isMissingDimension
                     ? '#dc3545'
                     : (isSelected ? 'blue' : (isHovered ? 'orange' : WALL_COLOR)));
                 const wallPreviewOpacity = editingWall?.id === wall.id ? 0.45 : 1;
-                const wallSegments = getWallBoundarySegments(x1, y1, x2, y2, thicknessPx);
-                const wallOutlineStrokeWidth = Math.max(1.5, Math.min(3, thicknessPx * 0.16));
+                const wallSegments = getWallOutline(wallGeometry);
+                const wallOutlineStrokeWidth = 0;
                 const topMid = {
                   x: (wallSegments.top[0] + wallSegments.top[2]) / 2,
                   y: (wallSegments.top[1] + wallSegments.top[3]) / 2,
@@ -5595,11 +7277,11 @@ function FloorPlanEditor() {
                 const isBlocked = isElementInteractionBlocked('new-wall', wall.id);
                 const isHovered = hoveredElement?.type === 'new-wall' && hoveredElement?.id === wall.id;
                 const thicknessPx = getWallThicknessPx(wall, floorPlan?.scale_factor);
-                const wallStrokeColor = currentViewStep === 'fire_alarms'
+                const wallStrokeColor = useArchitectBlack
                   ? '#111111'
                   : (isSelected ? 'blue' : (isHovered ? 'orange' : WALL_COLOR));
-                const wallSegments = getWallBoundarySegments(wall.x1, wall.y1, wall.x2, wall.y2, thicknessPx);
-                const wallOutlineStrokeWidth = Math.max(1.5, Math.min(3, thicknessPx * 0.16));
+                const wallSegments = getWallOutline(wall);
+                const wallOutlineStrokeWidth = 0;
                 const topMid = {
                   x: (wallSegments.top[0] + wallSegments.top[2]) / 2,
                   y: (wallSegments.top[1] + wallSegments.top[3]) / 2,
@@ -5682,7 +7364,7 @@ function FloorPlanEditor() {
                           draggable
                           onDragStart={() => saveToHistory()}
                           onDragMove={(e) => handleNewWallPointDrag(wall.id, 'start', e)}
-                          onDragEnd={(e) => handleNewWallPointDrag(wall.id, 'start', e)}
+                          onDragEnd={(e) => handleNewWallPointDragEnd(wall.id, 'start', e)}
                         />
                         <Circle
                           x={wall.x2}
@@ -5694,7 +7376,7 @@ function FloorPlanEditor() {
                           draggable
                           onDragStart={() => saveToHistory()}
                           onDragMove={(e) => handleNewWallPointDrag(wall.id, 'end', e)}
-                          onDragEnd={(e) => handleNewWallPointDrag(wall.id, 'end', e)}
+                          onDragEnd={(e) => handleNewWallPointDragEnd(wall.id, 'end', e)}
                         />
                         <Circle
                           x={topMid.x}
@@ -5745,7 +7427,7 @@ function FloorPlanEditor() {
                 const isBlocked = isElementInteractionBlocked('new-stair', stair.id);
                 const isHovered = hoveredElement?.type === 'new-stair' && hoveredElement?.id === stair.id;
                 const isDragging = activeDrag?.type === 'new-stairs' && activeDrag?.id === stair.id;
-                const stairColor = currentViewStep === 'fire_alarms'
+                const stairColor = isPostZkspcView
                   ? '#111111'
                   : (isSelected ? '#5b21b6' : (isHovered ? '#7c3aed' : '#8b5cf6'));
                 return (
@@ -5797,7 +7479,7 @@ function FloorPlanEditor() {
                         stroke={stairColor}
                         strokeWidth={2}
                         dash={[8, 4]}
-                        fill={currentViewStep === 'fire_alarms' ? 'rgba(0,0,0,0)' : 'rgba(139,92,246,0.06)'}
+                        fill={isPostZkspcView ? 'rgba(0,0,0,0)' : 'rgba(139,92,246,0.06)'}
                         onClick={(e) => {
                           e.cancelBubble = true;
                           setSelectedElement({ type: 'new-stair', id: stair.id, data: stair });
@@ -5841,7 +7523,7 @@ function FloorPlanEditor() {
                   const isBlocked = isElementInteractionBlocked('stair', stair.id);
                   const isHovered = hoveredElement?.type === 'stair' && hoveredElement?.id === stair.id;
                   const isDragging = activeDrag?.type === 'stairs' && activeDrag?.id === stair.id;
-                  const stairColor = currentViewStep === 'fire_alarms'
+                  const stairColor = isPostZkspcView
                     ? '#111111'
                     : (isSelected ? '#5b21b6' : (isHovered ? '#7c3aed' : '#8b5cf6'));
                   return (
@@ -5870,7 +7552,7 @@ function FloorPlanEditor() {
                           height={current.height}
                           stroke={stairColor}
                           strokeWidth={2}
-                          fill={currentViewStep === 'fire_alarms'
+                          fill={isPostZkspcView
                             ? 'rgba(0,0,0,0)'
                             : (isSelected ? 'rgba(139,92,246,0.14)' : 'rgba(139,92,246,0.06)')}
                         />
@@ -5905,11 +7587,12 @@ function FloorPlanEditor() {
                 const isBlocked = isElementInteractionBlocked('new-door', door.id);
                 const isHovered = hoveredElement?.type === 'new-door' && hoveredElement?.id === door.id;
                 const isDragging = activeDrag?.type === 'new-doors' && activeDrag?.id === door.id;
-                const doorColor = currentViewStep === 'fire_alarms'
+                const doorColor = useArchitectBlack
                   ? '#111111'
                   : (isSelected ? '#D92D20' : (isHovered ? '#F04438' : '#FF0000'));
                 const halfWidth = current.width / 2;
                 const halfHeight = current.height / 2;
+                const doorSegments = getDoorSymbolSegmentsForOpening(current);
                 const edgeHandles = getOpeningEdgeHandles(current);
                 return (
                   <React.Fragment key={`new-door-modern-${door.id}`}>
@@ -5932,30 +7615,9 @@ function FloorPlanEditor() {
                       onMouseMove={!isBlocked ? ((e) => handleCanvasElementMove('new-door', door.id, e)) : undefined}
                       onMouseLeave={!isBlocked ? handleCanvasElementLeave : undefined}
                     >
-                      <Line
-                        points={[-halfWidth, 0, halfWidth, 0]}
-                        stroke={doorColor}
-                        strokeWidth={2}
-                        listening={false}
-                      />
-                      <Line
-                        points={[-halfWidth, 0, 0, -halfWidth]}
-                        stroke={doorColor}
-                        strokeWidth={2}
-                        listening={false}
-                      />
-                      <Arc
-                        x={-halfWidth}
-                        y={0}
-                        innerRadius={0}
-                        outerRadius={Math.max(8, current.width)}
-                        angle={90}
-                        rotation={-90}
-                        stroke={doorColor}
-                        strokeWidth={2}
-                        fillEnabled={false}
-                        listening={false}
-                      />
+                      <Line points={doorSegments.start} stroke={doorColor} strokeWidth={2} listening={false} />
+                      <Line points={doorSegments.center} stroke={doorColor} strokeWidth={2} listening={false} />
+                      <Line points={doorSegments.end} stroke={doorColor} strokeWidth={2} listening={false} />
                       <Rect
                         x={-halfWidth}
                         y={-halfHeight}
@@ -6024,11 +7686,12 @@ function FloorPlanEditor() {
                   const isBlocked = isElementInteractionBlocked('door', door.id);
                   const isHovered = hoveredElement?.type === 'door' && hoveredElement?.id === door.id;
                   const isDragging = activeDrag?.type === 'doors' && activeDrag?.id === door.id;
-                  const doorColor = currentViewStep === 'fire_alarms'
+                  const doorColor = useArchitectBlack
                     ? '#111111'
                     : (isSelected ? '#D92D20' : (isHovered ? '#F04438' : '#FF0000'));
                   const halfWidth = current.width / 2;
                   const halfHeight = current.height / 2;
+                  const doorSegments = getDoorSymbolSegmentsForOpening(current);
                   const edgeHandles = getOpeningEdgeHandles(current);
                   return (
                     <React.Fragment key={`door-modern-${door.id}`}>
@@ -6051,30 +7714,9 @@ function FloorPlanEditor() {
                         onMouseMove={!isBlocked ? ((e) => handleCanvasElementMove('door', door.id, e)) : undefined}
                         onMouseLeave={!isBlocked ? handleCanvasElementLeave : undefined}
                       >
-                        <Line
-                          points={[-halfWidth, 0, halfWidth, 0]}
-                          stroke={doorColor}
-                          strokeWidth={2}
-                          listening={false}
-                        />
-                        <Line
-                          points={[-halfWidth, 0, 0, -halfWidth]}
-                          stroke={doorColor}
-                          strokeWidth={2}
-                          listening={false}
-                        />
-                        <Arc
-                          x={-halfWidth}
-                          y={0}
-                          innerRadius={0}
-                          outerRadius={Math.max(8, current.width)}
-                          angle={90}
-                          rotation={-90}
-                          stroke={doorColor}
-                          strokeWidth={2}
-                          fillEnabled={false}
-                          listening={false}
-                        />
+                        <Line points={doorSegments.start} stroke={doorColor} strokeWidth={2} listening={false} />
+                        <Line points={doorSegments.center} stroke={doorColor} strokeWidth={2} listening={false} />
+                        <Line points={doorSegments.end} stroke={doorColor} strokeWidth={2} listening={false} />
                         <Rect
                           x={-halfWidth}
                           y={-halfHeight}
@@ -6133,7 +7775,7 @@ function FloorPlanEditor() {
                 const width = doorMod.width ?? door.width;
                 const height = doorMod.height ?? door.height;
                 const isHorizontal = width >= height;
-                const doorColor = currentViewStep === 'fire_alarms'
+                const doorColor = isPostZkspcView
                   ? '#111111'
                   : (isSelected ? '#ff1e1e' : (isHovered ? '#ff3b30' : '#ff0000'));
                 const hingeX = isHorizontal ? x : x + width / 2;
@@ -6231,7 +7873,7 @@ function FloorPlanEditor() {
                 const isBlocked = isElementInteractionBlocked('new-window', windowItem.id);
                 const isHovered = hoveredElement?.type === 'new-window' && hoveredElement?.id === windowItem.id;
                 const isDragging = activeDrag?.type === 'new-windows' && activeDrag?.id === windowItem.id;
-                const windowColor = currentViewStep === 'fire_alarms'
+                const windowColor = useArchitectBlack
                   ? '#111111'
                   : (isSelected ? '#003FB3' : (isHovered ? '#2F74FF' : '#0057D9'));
                 const halfWidth = current.width / 2;
@@ -6348,7 +7990,7 @@ function FloorPlanEditor() {
                   const isBlocked = isElementInteractionBlocked('window', windowItem.id);
                   const isHovered = hoveredElement?.type === 'window' && hoveredElement?.id === windowItem.id;
                   const isDragging = activeDrag?.type === 'windows' && activeDrag?.id === windowItem.id;
-                  const windowColor = currentViewStep === 'fire_alarms'
+                  const windowColor = useArchitectBlack
                     ? '#111111'
                     : (isSelected ? '#003FB3' : (isHovered ? '#2F74FF' : '#0057D9'));
                   const halfWidth = current.width / 2;
@@ -6455,7 +8097,7 @@ function FloorPlanEditor() {
                 const width = windowMod.width ?? window.width;
                 const height = windowMod.height ?? window.height;
                 const isHorizontal = width >= height;
-                const windowColor = currentViewStep === 'fire_alarms'
+                const windowColor = isPostZkspcView
                   ? '#111111'
                   : (isSelected ? '#0d6efd' : (isHovered ? '#3d8bfd' : '#0b5ed7'));
                 
@@ -6554,13 +8196,15 @@ function FloorPlanEditor() {
                 const isUnserviceable = unserviceableRoomIds.has(room.id);
                 const zkspcRoomBlocked = currentViewStep === 'zkspc' && isUnserviceable;
                 const zone = roomZoneMap[room.id] || null;
-                const zoneColor = zone ? getZkspcColor(zone.zone_number) : '#7c3aed';
-                const roomStrokeColor = currentViewStep === 'fire_alarms'
+                const zoneColor = zone
+                  ? (zkspcStyleMap[Number(zone.zone_number || 1)]?.color || getZkspcStyle(zone, floorPlan?.id).color)
+                  : '#7c3aed';
+                const roomStrokeColor = isPostZkspcView
                   ? '#111111'
                   : (currentViewStep === 'zkspc' || currentViewStep === 'devices_cables')
                     ? zoneColor
                   : (isSelected ? 'blue' : (isHovered ? 'darkmagenta' : 'purple'));
-                const roomFillColor = currentViewStep === 'fire_alarms'
+                const roomFillColor = isPostZkspcView
                   ? 'rgba(0,0,0,0)'
                   : (currentViewStep === 'zkspc' || currentViewStep === 'devices_cables')
                     ? `${zoneColor}33`
@@ -6666,6 +8310,110 @@ function FloorPlanEditor() {
                 );
               })}
 
+              {showZkspcOverlayOnCanvas && currentZkspcZones.map((zone) => {
+                const zoneStyle = zkspcStyleMap[Number(zone.zone_number || 1)] || getZkspcStyle(zone, floorPlan?.id);
+                const anchor = zoneLabelAnchors[zone.id || zone.zone_number];
+                const zoneRooms = visibleRooms.filter((room) => (
+                  (zone.room_ids || []).includes(room.id)
+                  && room.boundary_points?.length >= 3
+                  && !unserviceableRoomIds.has(room.id)
+                ));
+
+                if (!zoneRooms.length) {
+                  return null;
+                }
+
+                return (
+                  <React.Fragment key={`zkspc-overlay-${zone.id || zone.zone_number}`}>
+                    {zoneRooms.map((room) => {
+                      const flatPoints = room.boundary_points.flat();
+                      const roomBounds = getPolygonBounds(flatPoints);
+                      if (!roomBounds) {
+                        return null;
+                      }
+                      const hatchLines = buildZkspcHatchLines(roomBounds, zoneStyle.hatchSpacing);
+                      return (
+                        <Group key={`zkspc-room-overlay-${zone.id || zone.zone_number}-${room.id}`} listening={false}>
+                          <Group
+                            clipFunc={(ctx) => {
+                              ctx.beginPath();
+                              ctx.moveTo(flatPoints[0], flatPoints[1]);
+                              for (let index = 2; index < flatPoints.length; index += 2) {
+                                ctx.lineTo(flatPoints[index], flatPoints[index + 1]);
+                              }
+                              ctx.closePath();
+                            }}
+                          >
+                            <Rect
+                              x={roomBounds.x}
+                              y={roomBounds.y}
+                              width={roomBounds.width}
+                              height={roomBounds.height}
+                              fill={zoneStyle.fillColor}
+                              listening={false}
+                            />
+                            {hatchLines.map((linePoints, lineIndex) => (
+                              <Line
+                                key={`zkspc-hatch-${zone.id || zone.zone_number}-${room.id}-${lineIndex}`}
+                                points={linePoints}
+                                stroke={zoneStyle.hatchColor}
+                                strokeWidth={1.4}
+                                listening={false}
+                              />
+                            ))}
+                          </Group>
+                          {currentViewStep === 'zkspc' && (
+                            <Line
+                              points={flatPoints}
+                              stroke={zoneStyle.outlineColor}
+                              strokeWidth={2}
+                              closed
+                              listening={false}
+                            />
+                          )}
+                        </Group>
+                      );
+                    })}
+                    {anchor && (
+                      <Text
+                        x={anchor.x - 120}
+                        y={anchor.y - 10}
+                        width={240}
+                        align="center"
+                        text={zoneStyle.label}
+                        fontSize={16}
+                        fontFamily="GOST A"
+                        fill={zoneStyle.labelColor}
+                        listening={false}
+                      />
+                    )}
+                  </React.Fragment>
+                );
+              })}
+
+              {isPostZkspcView && visibleRooms.map((room) => {
+                const roomBounds = getBoundingBox(room.boundary_points || []);
+                if (!unserviceableRoomIds.has(room.id) || !roomBounds) {
+                  return null;
+                }
+                return (
+                  <React.Fragment key={`post-zkspc-room-cross-${room.id}`}>
+                    <Line
+                      points={[roomBounds.x, roomBounds.y, roomBounds.x + roomBounds.width, roomBounds.y + roomBounds.height]}
+                      stroke="#111111"
+                      strokeWidth={2}
+                      listening={false}
+                    />
+                    <Line
+                      points={[roomBounds.x + roomBounds.width, roomBounds.y, roomBounds.x, roomBounds.y + roomBounds.height]}
+                      stroke="#111111"
+                      strokeWidth={2}
+                      listening={false}
+                    />
+                  </React.Fragment>
+                );
+              })}
+
               {/* Render Dimensions */}
               {showDimensionsOnCanvas && visibleDimensions.map((dim) => (
                 <Text
@@ -6674,6 +8422,7 @@ function FloorPlanEditor() {
                   y={dim.y}
                   text={dim.text || formatDimensionMeters(dim.value)}
                   fontSize={12}
+                  fontFamily={CANVAS_FONT_FAMILY}
                   fill="red"
                 />
               ))}
@@ -6699,6 +8448,9 @@ function FloorPlanEditor() {
                   onHandleDragEnd={handleCableRouteHandleDragEnd}
                   onSegmentDragStart={(routeId, insertIndex) => setActiveCableHandle({ routeId, insertIndex })}
                   onSegmentDragEnd={handleCableRouteSegmentDragEnd}
+                  onZcLabelDragEnd={handleZcLabelDragEnd}
+                  labelObstacles={cableLabelObstacles}
+                  stageBounds={stagePlanBounds}
                 />
               )}
 
@@ -6766,7 +8518,6 @@ function FloorPlanEditor() {
                 const isSelected = selectedElement?.type === 'signal-instrument' && selectedElement?.id === instrument.id;
                 const isHovered = hoveredElement?.type === 'signal-instrument' && hoveredElement?.id === instrument.id;
                 const isBlocked = drawingToolActive || (selectionLockActive && !isElementSelected('signal-instrument', instrument.id));
-                const stroke = isSelected ? '#0d6efd' : (isHovered ? '#1d4ed8' : '#0f172a');
                 return (
                   <Group
                     key={`signal-instrument-${instrument.id}`}
@@ -6774,6 +8525,7 @@ function FloorPlanEditor() {
                     y={instrument.y}
                     listening={!isBlocked}
                     draggable={!isBlocked && selectedTool === 'select'}
+                    onDragMove={!isBlocked ? ((e) => handleInstrumentDragMove(instrument, e)) : undefined}
                     onDragEnd={!isBlocked ? ((e) => handleInstrumentDragEnd(instrument.id, e)) : undefined}
                     onClick={!isBlocked ? ((e) => {
                       e.cancelBubble = true;
@@ -6788,8 +8540,32 @@ function FloorPlanEditor() {
                     }) : undefined}
                     onMouseLeave={!isBlocked ? handleCanvasElementLeave : undefined}
                   >
-                    <Rect x={-14} y={-14} width={28} height={28} fill="#ffffff" stroke={stroke} strokeWidth={2} cornerRadius={4} />
-                    <Text text="П" x={-4} y={-8} fontSize={14} fill={stroke} />
+                    <SignalInstrumentSymbol
+                      x={0}
+                      y={0}
+                      instrumentType={instrument.instrument_type}
+                      isSelected={isSelected}
+                      isHovered={isHovered}
+                      listening={false}
+                    />
+                    {signalInstrumentLabelLayouts[instrument.id] && (
+                      <Text
+                        x={signalInstrumentLabelLayouts[instrument.id].x - instrument.x}
+                        y={signalInstrumentLabelLayouts[instrument.id].y - instrument.y}
+                        width={signalInstrumentLabelLayouts[instrument.id].width}
+                        align="center"
+                        text={getInstrumentLabelText(instrument)}
+                        fontSize={11}
+                        fontFamily={CANVAS_FONT_FAMILY}
+                        fill="#111111"
+                        listening={!isBlocked}
+                        draggable={!isBlocked && selectedTool === 'select'}
+                        onClick={(e) => {
+                          e.cancelBubble = true;
+                        }}
+                        onDragEnd={(e) => handleSignalInstrumentLabelDragEnd(instrument, e)}
+                      />
+                    )}
                   </Group>
                 );
               })}
@@ -6832,7 +8608,7 @@ function FloorPlanEditor() {
                         listening={false}
                       />
                     )}
-                    {isDragging && roomBounds && (
+                    {(isDragging || isSelected) && roomBounds && (
                       <>
                         <Line
                           points={[roomBounds.x, current.y, current.x, current.y]}
@@ -6854,6 +8630,7 @@ function FloorPlanEditor() {
                             y={current.y - 18}
                             text={`${current.offset_left_m.toFixed(2)} м`}
                             fontSize={11}
+                            fontFamily={CANVAS_FONT_FAMILY}
                             fill="#9f1239"
                           />
                         )}
@@ -6863,6 +8640,7 @@ function FloorPlanEditor() {
                             y={roomBounds.y + 4}
                             text={`${current.offset_top_m.toFixed(2)} м`}
                             fontSize={11}
+                            fontFamily={CANVAS_FONT_FAMILY}
                             fill="#9f1239"
                           />
                         )}
@@ -6882,6 +8660,27 @@ function FloorPlanEditor() {
                       onDragEnd={!isBlocked ? ((e) => handleElementDragEnd(kind, alarm.id, e)) : undefined}
                       onClick={!isBlocked ? ((e) => {
                         e.cancelBubble = true;
+                        if (mergeModeActive) {
+                          setSelectedElement(
+                            mergeInstrumentId && visibleSignalInstruments.find((item) => item.id === mergeInstrumentId)
+                              ? {
+                                type: 'signal-instrument',
+                                id: mergeInstrumentId,
+                                data: visibleSignalInstruments.find((item) => item.id === mergeInstrumentId) || null,
+                              }
+                              : null,
+                          );
+                          setSelectedElements((prev) => {
+                            const alreadySelected = prev.some((item) => item.type === itemType && item.id === alarm.id);
+                            if (e.evt?.shiftKey) {
+                              return alreadySelected
+                                ? prev.filter((item) => !(item.type === itemType && item.id === alarm.id))
+                                : [...prev, { type: itemType, id: alarm.id }];
+                            }
+                            return [{ type: itemType, id: alarm.id }];
+                          });
+                          return;
+                        }
                         setSelectedElement({ type: itemType, id: alarm.id, data: current });
                         setSelectedElements([{ type: itemType, id: alarm.id }]);
                       }) : undefined}
@@ -6894,11 +8693,20 @@ function FloorPlanEditor() {
                       onMouseLeave={!isBlocked ? handleCanvasElementLeave : undefined}
                     />
                     <Text
-                      x={current.x + 12}
-                      y={current.y - 18}
+                      x={(fireAlarmLabelLayouts[current.id] || estimateTextRect(label, current.x + 12, current.y - 18, 10)).x}
+                      y={(fireAlarmLabelLayouts[current.id] || estimateTextRect(label, current.x + 12, current.y - 18, 10)).y}
+                      width={(fireAlarmLabelLayouts[current.id] || estimateTextRect(label, current.x + 12, current.y - 18, 10)).width}
+                      align="center"
                       text={label}
                       fontSize={10}
+                      fontFamily={CANVAS_FONT_FAMILY}
                       fill={labelColor}
+                      listening={!isBlocked}
+                      draggable={!isBlocked && selectedTool === 'select'}
+                      onClick={(e) => {
+                        e.cancelBubble = true;
+                      }}
+                      onDragEnd={(e) => handleFireAlarmLabelDragEnd(kind, alarm.id, alarm, e)}
                     />
                     {isSelected && (
                       <DeleteButton
@@ -6945,7 +8753,7 @@ function FloorPlanEditor() {
                   listening={false}
                 />
               )}
-              {selectedElements.length > 1 && selectedGroupBounds && (
+              {currentViewStep !== 'devices_cables' && selectedElements.length > 1 && selectedGroupBounds && (
                 <>
                   <Rect
                     x={selectedGroupBounds.x}
@@ -6983,6 +8791,7 @@ function FloorPlanEditor() {
               </Group>
             </Layer>
           </Stage>
+          )}
         </div>
       </div>
 

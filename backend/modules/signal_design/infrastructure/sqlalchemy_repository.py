@@ -96,6 +96,12 @@ class SqlAlchemySignalDesignRepository(SignalDesignRepository):
     def delete_routes_for_instrument(self, instrument_id: int) -> None:
         self.session.query(CableRouteModel).filter(CableRouteModel.instrument_id == instrument_id).delete(synchronize_session=False)
 
+    def delete_routes_for_branch(self, floor_plan_id: int, system_type: str) -> None:
+        self.session.query(CableRouteModel).filter(
+            CableRouteModel.floor_plan_id == floor_plan_id,
+            CableRouteModel.system_type == system_type,
+        ).delete(synchronize_session=False)
+
     def delete_zones_for_floor_plan(self, floor_plan_id: int) -> None:
         existing_zone_ids = [zone.id for zone in self.list_zones(floor_plan_id)]
         if existing_zone_ids:

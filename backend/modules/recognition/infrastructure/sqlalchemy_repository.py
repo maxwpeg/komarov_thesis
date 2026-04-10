@@ -9,6 +9,7 @@ from backend.modules.shared.infrastructure.persistence.models import (
     Dimension as DimensionModel,
     Door as DoorModel,
     FloorPlan as FloorPlanModel,
+    RecognitionFeedbackSample as RecognitionFeedbackSampleModel,
     FloorplanRecognition as FloorplanRecognitionModel,
     Room as RoomModel,
     Wall as WallModel,
@@ -37,6 +38,27 @@ class SqlAlchemyRecognitionRepository:
 
     def create_recognition(self, data: dict) -> FloorplanRecognitionModel:
         return FloorplanRecognitionModel(**data)
+
+    def get_feedback_sample(self, recognition_id: int) -> RecognitionFeedbackSampleModel | None:
+        return (
+            self.session.query(RecognitionFeedbackSampleModel)
+            .filter(RecognitionFeedbackSampleModel.recognition_id == recognition_id)
+            .first()
+        )
+
+    def list_feedback_samples_for_export(self) -> list[RecognitionFeedbackSampleModel]:
+        return (
+            self.session.query(RecognitionFeedbackSampleModel)
+            .filter(
+                RecognitionFeedbackSampleModel.status == "approved",
+                RecognitionFeedbackSampleModel.exported_at.is_(None),
+            )
+            .order_by(RecognitionFeedbackSampleModel.submitted_at.asc(), RecognitionFeedbackSampleModel.id.asc())
+            .all()
+        )
+
+    def create_feedback_sample(self, data: dict) -> RecognitionFeedbackSampleModel:
+        return RecognitionFeedbackSampleModel(**data)
 
     def list_existing_rooms(self, floor_plan_id: int) -> list[RoomModel]:
         return self.session.query(RoomModel).filter(RoomModel.floor_plan_id == floor_plan_id).all()

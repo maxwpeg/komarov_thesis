@@ -68,7 +68,18 @@ class Project:
         floor_plan_data: dict | None = None,
         pagesize: tuple[float, float] = PAGESIZE_A3_LANDSCAPE,
         title: str = "",
+        sheet_kind: str = "generic",
     ):
+        resolved_sheet_kind = sheet_kind
+        normalized_title = title.lower()
+        if resolved_sheet_kind == "generic":
+            if "\u0437\u043a\u0441\u043f\u0441" in normalized_title:
+                resolved_sheet_kind = "zkspc"
+            elif "\u0441\u043f\u0441" in normalized_title:
+                resolved_sheet_kind = "sps"
+            elif "\u0441\u043e\u0443\u044d" in normalized_title:
+                resolved_sheet_kind = "soue"
+
         page = DrawingPage(
             page_format=pagesize,
             page_number=self.number_of_pages + 1,
@@ -76,6 +87,7 @@ class Project:
             main_title_box_type="1",
             floor_plan_data=floor_plan_data,
             title=title,
+            sheet_kind=resolved_sheet_kind,
         )
         page.draw(self._c)
         self.number_of_pages += 1
@@ -95,16 +107,19 @@ class Project:
                 floor_plan_data=floor_plan,
                 pagesize=PAGESIZE_A3_LANDSCAPE,
                 title=f"ЗКСПС - {floor_name}",
+                sheet_kind="zkspc",
             )
             self.add_drawing_page_with_image(
                 floor_plan_data=floor_plan,
                 pagesize=PAGESIZE_A3_LANDSCAPE,
                 title=f"СПС - {floor_name}",
+                sheet_kind="sps",
             )
             self.add_drawing_page_with_image(
                 floor_plan_data=floor_plan,
                 pagesize=PAGESIZE_A3_LANDSCAPE,
                 title=f"СОУЭ - {floor_name}",
+                sheet_kind="soue",
             )
 
         self.add_page(PAGESIZE_A3_LANDSCAPE, mtbox_type="1")

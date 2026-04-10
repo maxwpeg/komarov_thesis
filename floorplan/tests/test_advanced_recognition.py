@@ -11,6 +11,31 @@ from floorplan.openings import classify_opening
 from floorplan.rooms import detect_rooms
 
 
+def _wall(
+    wall_id: int,
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    thickness_px: float = 20,
+) -> Wall:
+    angle = float(np.degrees(np.arctan2(y2 - y1, x2 - x1)) % 180.0)
+    return Wall(
+        id=wall_id,
+        midline=LineSegment(
+            x1=x1,
+            y1=y1,
+            x2=x2,
+            y2=y2,
+            length=float(np.hypot(x2 - x1, y2 - y1)),
+            angle=angle,
+        ),
+        thickness_px=thickness_px,
+        angle_deg=angle,
+        confidence=0.95,
+    )
+
+
 def _horizontal_wall() -> Wall:
     return Wall(
         id=1,
@@ -19,6 +44,53 @@ def _horizontal_wall() -> Wall:
         angle_deg=0.0,
         confidence=0.95,
     )
+
+
+def _shifted_parallel_outer_seam_walls(
+    *,
+    thickness_px: float = 8,
+    lateral_shift_px: float = 10,
+    axis_gap_px: float = 12,
+) -> list[Wall]:
+    return [
+        _wall(1, 40, 40, 280, 40, thickness_px=thickness_px),
+        _wall(2, 40, 40, 40, 280, thickness_px=thickness_px),
+        _wall(3, 40, 150, 280, 150, thickness_px=thickness_px),
+        _wall(4, 40, 280, 180, 280, thickness_px=thickness_px),
+        _wall(5, 180, 150, 180, 280, thickness_px=thickness_px),
+        _wall(6, 280, 40, 280, 90, thickness_px=thickness_px),
+        _wall(
+            7,
+            280 - lateral_shift_px,
+            90 + axis_gap_px,
+            280 - lateral_shift_px,
+            150,
+            thickness_px=thickness_px,
+        ),
+    ]
+
+
+def _slanted_parallel_outer_seam_walls(
+    *,
+    thickness_px: float = 8,
+    lateral_shift_px: float = 8,
+    axis_gap_px: float = 12,
+    slope_dx_px: float = 2,
+) -> list[Wall]:
+    return [
+        _wall(1, 40, 40, 240, 40, thickness_px=thickness_px),
+        _wall(2, 40, 40, 40, 220, thickness_px=thickness_px),
+        _wall(3, 40, 220, 240, 220, thickness_px=thickness_px),
+        _wall(4, 240, 40, 240 + slope_dx_px, 100, thickness_px=thickness_px),
+        _wall(
+            5,
+            240 - lateral_shift_px,
+            100 + axis_gap_px,
+            240 - lateral_shift_px + slope_dx_px,
+            220,
+            thickness_px=thickness_px,
+        ),
+    ]
 
 
 def _gap_for_wall() -> Gap:
@@ -93,6 +165,101 @@ def test_detect_rooms_returns_closed_region():
     assert 80 <= first.center[1] <= 140
 
 
+def test_detect_rooms_keeps_perimeter_room_when_outer_gap_is_within_adaptive_threshold():
+    image = np.zeros((260, 260), dtype=np.uint8)
+    walls = [
+        _wall(1, 30, 30, 116, 30, thickness_px=20),
+        _wall(2, 144, 30, 230, 30, thickness_px=20),
+        _wall(3, 30, 230, 230, 230, thickness_px=20),
+        _wall(4, 30, 30, 30, 230, thickness_px=20),
+        _wall(5, 230, 30, 230, 230, thickness_px=20),
+        _wall(6, 30, 130, 230, 130, thickness_px=20),
+        _wall(7, 130, 130, 130, 230, thickness_px=20),
+    ]
+
+    rooms = detect_rooms(image, walls)
+
+    assert len(rooms) == 3
+    assert any(room.center[1] < 120 for room in rooms)
+
+
+def test_detect_rooms_does_not_close_large_outer_gap():
+    image = np.zeros((260, 260), dtype=np.uint8)
+    walls = [
+        _wall(1, 30, 30, 110, 30, thickness_px=20),
+        _wall(2, 150, 30, 230, 30, thickness_px=20),
+        _wall(3, 30, 230, 230, 230, thickness_px=20),
+        _wall(4, 30, 30, 30, 230, thickness_px=20),
+        _wall(5, 230, 30, 230, 230, thickness_px=20),
+        _wall(6, 30, 130, 230, 130, thickness_px=20),
+        _wall(7, 130, 130, 130, 230, thickness_px=20),
+    ]
+
+    rooms = detect_rooms(image, walls)
+
+    assert len(rooms) == 2
+    assert all(room.center[1] > 120 for room in rooms)
+
+
+def test_detect_rooms_handles_slightly_slanted_outer_wall():
+    image = np.zeros((240, 240), dtype=np.uint8)
+    walls = [
+        _wall(1, 40, 42, 200, 28, thickness_px=16),
+        _wall(2, 40, 42, 40, 200, thickness_px=16),
+        _wall(3, 200, 28, 200, 200, thickness_px=16),
+        _wall(4, 40, 200, 200, 200, thickness_px=16),
+    ]
+
+    rooms = detect_rooms(image, walls)
+
+    assert len(rooms) == 1
+    assert 90 <= rooms[0].center[0] <= 150
+    assert 90 <= rooms[0].center[1] <= 150
+
+
+def test_detect_rooms_keeps_perimeter_room_with_shifted_parallel_outer_seam():
+    image = np.zeros((360, 360), dtype=np.uint8)
+
+    rooms = detect_rooms(image, _shifted_parallel_outer_seam_walls())
+
+    assert len(rooms) == 2
+    assert any(room.center[1] < 140 for room in rooms)
+
+
+def test_detect_rooms_does_not_stitch_parallel_seam_when_lateral_shift_is_too_large():
+    image = np.zeros((360, 360), dtype=np.uint8)
+
+    rooms = detect_rooms(
+        image,
+        _shifted_parallel_outer_seam_walls(lateral_shift_px=16, axis_gap_px=12),
+    )
+
+    assert len(rooms) == 1
+    assert all(room.center[1] > 160 for room in rooms)
+
+
+def test_detect_rooms_does_not_stitch_parallel_seam_when_axis_gap_is_too_large():
+    image = np.zeros((360, 360), dtype=np.uint8)
+
+    rooms = detect_rooms(
+        image,
+        _shifted_parallel_outer_seam_walls(lateral_shift_px=10, axis_gap_px=14),
+    )
+
+    assert len(rooms) == 1
+    assert all(room.center[1] > 160 for room in rooms)
+
+
+def test_detect_rooms_handles_slightly_slanted_parallel_outer_seam():
+    image = np.zeros((320, 320), dtype=np.uint8)
+
+    rooms = detect_rooms(image, _slanted_parallel_outer_seam_walls())
+
+    assert len(rooms) == 1
+    assert 100 <= rooms[0].center[0] <= 180
+    assert 90 <= rooms[0].center[1] <= 170
+
+
 def test_detect_text_dimensions_normalizes_to_meters(monkeypatch):
     class _DummyOutput:
         DICT = "DICT"
@@ -139,4 +306,3 @@ def test_assign_dimensions_links_to_wall_and_room():
     assigned = assign_dimensions(dimensions, walls, rooms)
     assert assigned[0].wall_id == 1
     assert assigned[0].room_id == 7
-

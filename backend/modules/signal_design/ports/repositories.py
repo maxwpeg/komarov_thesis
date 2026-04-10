@@ -55,3 +55,9 @@ class SignalDesignRepository(Protocol):
 
     def refresh(self, entity) -> None:
         """Refresh an entity from persistence."""
+
+    def delete_routes_for_instrument(self, instrument_id: int) -> None:
+        """Delete persisted routes for one instrument."""
+
+    def delete_routes_for_branch(self, floor_plan_id: int, system_type: str) -> None:
+        """Delete persisted routes for one branch."""

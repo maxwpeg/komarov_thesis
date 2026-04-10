@@ -53,6 +53,9 @@ class ElementsRepository(Protocol):
     def list_fire_alarms(self, floor_plan_id: int) -> list:
         """List fire alarms for a floor plan."""
 
+    def list_signal_instruments(self, floor_plan_id: int, system_type: str | None = None) -> list:
+        """List signal instruments for a floor plan branch."""
+
     def list_zkspc_zones(self, floor_plan_id: int) -> list:
         """List ZKSPC zones for a floor plan."""
 
@@ -77,6 +80,9 @@ class ElementsRepository(Protocol):
     def create_fire_alarm(self, data: dict):
         """Create a fire alarm persistence entity."""
 
+    def create_cable_route(self, data: dict):
+        """Create a cable route persistence entity."""
+
     def get_optional_by_type(self, element_type: str, entity_id: int):
         """Return an optional persistence entity for the requested element type."""
 
@@ -91,3 +97,9 @@ class ElementsRepository(Protocol):
 
     def refresh(self, entity) -> None:
         """Refresh an entity from persistence."""
+
+    def delete_routes_for_instrument(self, instrument_id: int) -> None:
+        """Delete persisted routes for the instrument."""
+
+    def delete_routes_for_branch(self, floor_plan_id: int, system_type: str) -> None:
+        """Delete persisted routes for the branch."""

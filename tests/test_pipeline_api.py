@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import math
+from pathlib import Path
 
 import requests
+from PIL import Image
 
 
 def create_project(base_url: str) -> dict:
@@ -29,29 +31,55 @@ def create_project(base_url: str) -> dict:
     return response.json()
 
 
-def create_floor_plan(base_url: str, project_id: int, scale_factor: float = 10.0) -> dict:
-    response = requests.post(
-        f"{base_url}/api/floor-plans",
-        data={
-            "project_id": str(project_id),
-            "floor_number": "1",
-            "name": "Floor 1",
-            "scale_factor": str(scale_factor),
-        },
-        timeout=10,
-    )
+def create_floor_plan(
+    base_url: str,
+    project_id: int,
+    scale_factor: float = 10.0,
+    image_path: Path | None = None,
+) -> dict:
+    data = {
+        "project_id": str(project_id),
+        "floor_number": "1",
+        "name": "Floor 1",
+        "scale_factor": str(scale_factor),
+    }
+    if image_path is None:
+        response = requests.post(
+            f"{base_url}/api/floor-plans",
+            data=data,
+            timeout=10,
+        )
+    else:
+        with image_path.open("rb") as image_file:
+            response = requests.post(
+                f"{base_url}/api/floor-plans",
+                data=data,
+                files={"file": ("floor.png", image_file, "image/png")},
+                timeout=10,
+            )
     assert response.status_code == 200
     return response.json()
 
 
-def create_wall(base_url: str, floor_plan_id: int, *, length_m: float | None = None, length_source: str | None = None) -> dict:
+def create_wall(
+    base_url: str,
+    floor_plan_id: int,
+    *,
+    x1: float = 0,
+    y1: float = 0,
+    x2: float = 100,
+    y2: float = 0,
+    thickness: float = 200,
+    length_m: float | None = None,
+    length_source: str | None = None,
+) -> dict:
     payload = {
         "floor_plan_id": floor_plan_id,
-        "x1": 0,
-        "y1": 0,
-        "x2": 100,
-        "y2": 0,
-        "thickness": 200,
+        "x1": x1,
+        "y1": y1,
+        "x2": x2,
+        "y2": y2,
+        "thickness": thickness,
         "is_load_bearing": False,
         "material": None,
     }
@@ -166,6 +194,35 @@ def test_walls_commit_recalculates_scale_and_room_metrics(api_server: str):
     assert math.isclose(persisted_room["area_sqm"], 2.0, rel_tol=1e-4)
 
 
+def test_walls_commit_preserves_manual_scale_factor(api_server: str):
+    project = create_project(api_server)
+    floor_plan = create_floor_plan(api_server, project["id"], scale_factor=10.0)
+    wall = create_wall(api_server, floor_plan["id"])
+
+    manual_scale_response = requests.patch(
+        f"{api_server}/api/floor-plans/{floor_plan['id']}",
+        json={"scale_factor": 15.0},
+        timeout=10,
+    )
+    assert manual_scale_response.status_code == 200
+    assert math.isclose(manual_scale_response.json()["scale_factor"], 15.0, rel_tol=1e-4)
+
+    commit_response = requests.post(
+        f"{api_server}/api/floor-plans/{floor_plan['id']}/pipeline/walls/commit",
+        json={
+            "changes": {},
+            "wall_lengths": [
+                {"wall_id": wall["id"], "length_m": 2.0, "length_source": "manual"},
+            ],
+        },
+        timeout=10,
+    )
+
+    assert commit_response.status_code == 200
+    payload = commit_response.json()
+    assert math.isclose(payload["floor_plan"]["scale_factor"], 15.0, rel_tol=1e-4)
+
+
 def test_revalidating_walls_marks_downstream_stale_without_data_loss(api_server: str):
     project = create_project(api_server)
     floor_plan = create_floor_plan(api_server, project["id"], scale_factor=10.0)
@@ -244,6 +301,155 @@ def test_revalidating_walls_marks_downstream_stale_without_data_loss(api_server:
     updated_plan = walls_recommit.json()["floor_plan"]
     assert len(updated_plan["doors"]) == 1
     assert len(updated_plan["rooms"]) == 1
+
+
+def test_pipeline_room_detection_keeps_perimeter_room_with_small_outer_gap(api_server: str, tmp_path: Path):
+    image_path = tmp_path / "rooms-gap.png"
+    Image.new("RGB", (260, 260), color="white").save(image_path)
+
+    project = create_project(api_server)
+    floor_plan = create_floor_plan(api_server, project["id"], scale_factor=10.0, image_path=image_path)
+
+    manual_scale_response = requests.patch(
+        f"{api_server}/api/floor-plans/{floor_plan['id']}",
+        json={"scale_factor": 10.0},
+        timeout=10,
+    )
+    assert manual_scale_response.status_code == 200
+
+    wall_specs = [
+        (30, 30, 116, 30),
+        (144, 30, 230, 30),
+        (30, 230, 230, 230),
+        (30, 30, 30, 230),
+        (230, 30, 230, 230),
+        (30, 130, 230, 130),
+        (130, 130, 130, 230),
+    ]
+    walls = [
+        create_wall(
+            api_server,
+            floor_plan["id"],
+            x1=x1,
+            y1=y1,
+            x2=x2,
+            y2=y2,
+            thickness=200,
+        )
+        for x1, y1, x2, y2 in wall_specs
+    ]
+
+    walls_commit = requests.post(
+        f"{api_server}/api/floor-plans/{floor_plan['id']}/pipeline/walls/commit",
+        json={
+            "changes": {},
+            "wall_lengths": [
+                {
+                    "wall_id": wall["id"],
+                    "length_m": round(math.hypot(wall["x2"] - wall["x1"], wall["y2"] - wall["y1"]) * 10.0 / 1000.0, 3),
+                    "length_source": "manual",
+                }
+                for wall in walls
+            ],
+        },
+        timeout=10,
+    )
+    assert walls_commit.status_code == 200
+
+    openings_commit = requests.post(
+        f"{api_server}/api/floor-plans/{floor_plan['id']}/pipeline/openings/commit",
+        json={"changes": {}},
+        timeout=10,
+    )
+    assert openings_commit.status_code == 200
+
+    rooms_detect = requests.post(
+        f"{api_server}/api/floor-plans/{floor_plan['id']}/pipeline/rooms/detect",
+        timeout=10,
+    )
+
+    assert rooms_detect.status_code == 200
+    payload = rooms_detect.json()
+    rooms = payload["floor_plan"]["rooms"]
+    assert payload["pipeline_state"]["steps"]["rooms"]["status"] == "draft"
+    assert len(rooms) == 3
+    assert any(float(room["center_y"]) < 120 for room in rooms)
+
+
+def test_pipeline_room_detection_keeps_perimeter_room_with_shifted_parallel_outer_seam(
+    api_server: str,
+    tmp_path: Path,
+):
+    image_path = tmp_path / "rooms-shifted-seam.png"
+    Image.new("RGB", (360, 360), color="white").save(image_path)
+
+    project = create_project(api_server)
+    floor_plan = create_floor_plan(api_server, project["id"], scale_factor=10.0, image_path=image_path)
+
+    manual_scale_response = requests.patch(
+        f"{api_server}/api/floor-plans/{floor_plan['id']}",
+        json={"scale_factor": 10.0},
+        timeout=10,
+    )
+    assert manual_scale_response.status_code == 200
+
+    wall_specs = [
+        (40, 40, 280, 40),
+        (40, 40, 40, 280),
+        (40, 150, 280, 150),
+        (40, 280, 180, 280),
+        (180, 150, 180, 280),
+        (280, 40, 280, 90),
+        (270, 102, 270, 150),
+    ]
+    walls = [
+        create_wall(
+            api_server,
+            floor_plan["id"],
+            x1=x1,
+            y1=y1,
+            x2=x2,
+            y2=y2,
+            thickness=80,
+        )
+        for x1, y1, x2, y2 in wall_specs
+    ]
+
+    walls_commit = requests.post(
+        f"{api_server}/api/floor-plans/{floor_plan['id']}/pipeline/walls/commit",
+        json={
+            "changes": {},
+            "wall_lengths": [
+                {
+                    "wall_id": wall["id"],
+                    "length_m": round(math.hypot(wall["x2"] - wall["x1"], wall["y2"] - wall["y1"]) * 10.0 / 1000.0, 3),
+                    "length_source": "manual",
+                }
+                for wall in walls
+            ],
+        },
+        timeout=10,
+    )
+    assert walls_commit.status_code == 200
+
+    openings_commit = requests.post(
+        f"{api_server}/api/floor-plans/{floor_plan['id']}/pipeline/openings/commit",
+        json={"changes": {}},
+        timeout=10,
+    )
+    assert openings_commit.status_code == 200
+
+    rooms_detect = requests.post(
+        f"{api_server}/api/floor-plans/{floor_plan['id']}/pipeline/rooms/detect",
+        timeout=10,
+    )
+
+    assert rooms_detect.status_code == 200
+    payload = rooms_detect.json()
+    rooms = payload["floor_plan"]["rooms"]
+    assert payload["pipeline_state"]["steps"]["rooms"]["status"] == "draft"
+    assert len(rooms) == 2
+    assert any(float(room["center_y"]) < 140 for room in rooms)
 
 
 def test_walls_commit_relinks_openings_when_wall_ids_change(api_server: str):
@@ -399,6 +605,55 @@ def test_openings_commit_rejects_opening_outside_wall(api_server: str):
     assert invalid_commit.json()["code"] == "opening_outside_wall"
 
 
+def test_openings_commit_prioritizes_deleted_openings_over_local_updates(api_server: str):
+    project = create_project(api_server)
+    floor_plan = create_floor_plan(api_server, project["id"])
+    wall = create_wall(api_server, floor_plan["id"], length_m=1.0, length_source="manual")
+
+    walls_commit = requests.post(
+        f"{api_server}/api/floor-plans/{floor_plan['id']}/pipeline/walls/commit",
+        json={
+            "changes": {},
+            "wall_lengths": [{"wall_id": wall["id"], "length_m": 1.0, "length_source": "manual"}],
+        },
+        timeout=10,
+    )
+    assert walls_commit.status_code == 200
+
+    door_response = requests.post(
+        f"{api_server}/api/doors",
+        json={
+            "floor_plan_id": floor_plan["id"],
+            "x": 20,
+            "y": -5,
+            "width": 30,
+            "height": 10,
+            "wall_id": wall["id"],
+        },
+        timeout=10,
+    )
+    assert door_response.status_code == 200
+    door = door_response.json()
+
+    commit_response = requests.post(
+        f"{api_server}/api/floor-plans/{floor_plan['id']}/pipeline/openings/commit",
+        json={
+            "changes": {
+                "deleted": [{"element_type": "doors", "id": door["id"]}],
+                "update_doors": [
+                    {
+                        "id": door["id"],
+                        "data": {"x": 30, "y": -5, "wall_id": wall["id"]},
+                    }
+                ],
+            }
+        },
+        timeout=10,
+    )
+    assert commit_response.status_code == 200
+    assert commit_response.json()["floor_plan"]["doors"] == []
+
+
 def test_rooms_commit_applies_length_width_area_formula(api_server: str):
     project = create_project(api_server)
     floor_plan = create_floor_plan(api_server, project["id"])
@@ -452,10 +707,10 @@ def test_rooms_commit_applies_length_width_area_formula(api_server: str):
 
     updated_room = rooms_commit.json()["floor_plan"]["rooms"][0]
     assert updated_room["name"] == "Conference"
-    assert math.isclose(updated_room["length_m"], 4.0, rel_tol=1e-4)
-    assert math.isclose(updated_room["width_m"], 3.0, rel_tol=1e-4)
-    assert math.isclose(updated_room["area_sqm"], 12.0, rel_tol=1e-4)
-    assert math.isclose(updated_room["perimeter_m"], 14.0, rel_tol=1e-4)
+    assert math.isclose(updated_room["length_m"], 1.0, rel_tol=1e-4)
+    assert math.isclose(updated_room["width_m"], 1.0, rel_tol=1e-4)
+    assert math.isclose(updated_room["area_sqm"], 1.0, rel_tol=1e-4)
+    assert math.isclose(updated_room["perimeter_m"], 4.0, rel_tol=1e-4)
 
 
 def test_fire_alarm_batch_save_does_not_modify_walls_or_openings(api_server: str):

@@ -35,15 +35,15 @@ class RoomGeometryPolicy:
     def refresh(room, scale_factor: float) -> None:
         if room.boundary_points:
             room.calculate_center()
-            if room.length_m is None or room.width_m is None:
-                room.calculate_length_width(scale_factor)
-
-        if room.length_m is not None and room.width_m is not None:
-            room.area_sqm = room.length_m * room.width_m
-            room.perimeter_m = 2.0 * (room.length_m + room.width_m)
-        elif room.boundary_points:
+            room.calculate_length_width(scale_factor)
             room.calculate_area(scale_factor)
             room.calculate_perimeter(scale_factor)
+            return
+
+        room.length_m = None
+        room.width_m = None
+        room.area_sqm = 0.0
+        room.perimeter_m = 0.0
 
 
 class OpeningNormalizationPolicy:
@@ -79,8 +79,15 @@ class OpeningNormalizationPolicy:
 
         axis_x = dx / wall_length
         axis_y = dy / wall_length
+        normal_x = -axis_y
+        normal_y = axis_x
         rotation_deg = math.degrees(math.atan2(dy, dx))
         thickness_px = max(1.0, float(wall.thickness or 1.0) / floor_plan_scale_factor)
+        positive_offset, negative_offset = OpeningNormalizationPolicy.wall_normal_offsets_px(
+            wall,
+            floor_plan_scale_factor,
+        )
+        center_shift = (positive_offset - negative_offset) / 2.0
 
         width = max(4.0, min(float(data["width"]), wall_length))
         center_x = float(data["x"]) + float(data["width"]) / 2.0
@@ -88,8 +95,8 @@ class OpeningNormalizationPolicy:
         projected = ((center_x - wall.x1) * dx + (center_y - wall.y1) * dy) / wall_length
         half_width = width / 2.0
         along = min(max(projected, half_width), max(half_width, wall_length - half_width))
-        normalized_center_x = wall.x1 + axis_x * along
-        normalized_center_y = wall.y1 + axis_y * along
+        normalized_center_x = wall.x1 + axis_x * along + normal_x * center_shift
+        normalized_center_y = wall.y1 + axis_y * along + normal_y * center_shift
 
         return {
             **data,
@@ -130,15 +137,26 @@ class OpeningNormalizationPolicy:
             if length < 1e-6:
                 return float("inf"), False
 
-            t = ((center_x - wall.x1) * dx + (center_y - wall.y1) * dy) / (length * length)
-            along = t * length
-            signed = ((center_x - wall.x1) * dy - (center_y - wall.y1) * dx) / length
-            distance = abs(signed)
-
+            axis_x = dx / length
+            axis_y = dy / length
+            normal_x = -axis_y
+            normal_y = axis_x
+            along = ((center_x - wall.x1) * axis_x) + ((center_y - wall.y1) * axis_y)
+            signed = ((center_x - wall.x1) * normal_x) + ((center_y - wall.y1) * normal_y)
+            positive_offset, negative_offset = OpeningNormalizationPolicy.wall_normal_offsets_px(wall, scale_factor)
             thickness_px = max(1.0, (wall.thickness or 1.0) / scale_factor)
-            max_distance = max(thickness_px * 1.5, min(float(width), float(height), 40.0))
+            max_distance = max(thickness_px * 0.5, min(float(width), float(height), 40.0))
             within_projection = -projection_margin <= along <= (length + projection_margin)
-            within_thickness = distance <= max_distance
+            within_thickness = (
+                signed >= (-negative_offset - max_distance)
+                and signed <= (positive_offset + max_distance)
+            )
+            if signed < -negative_offset:
+                distance = abs(signed + negative_offset)
+            elif signed > positive_offset:
+                distance = abs(signed - positive_offset)
+            else:
+                distance = 0.0
             return distance, within_projection and within_thickness
 
         if wall_id is not None:
@@ -167,6 +185,17 @@ class OpeningNormalizationPolicy:
                 raise AppError(422, "opening_outside_wall", "Opening must be located on a wall")
             return None
         return best_wall
+
+    @staticmethod
+    def wall_normal_offsets_px(wall, scale_factor: float) -> tuple[float, float]:
+        thickness_px = max(1.0, float(wall.thickness or 1.0) / max(scale_factor, 1e-6))
+        alignment = str(getattr(wall, "alignment", "center") or "center").lower()
+        if alignment == "left":
+            return thickness_px, 0.0
+        if alignment == "right":
+            return 0.0, thickness_px
+        half = thickness_px / 2.0
+        return half, half
 
 
 class FireAlarmMetadataPolicy:

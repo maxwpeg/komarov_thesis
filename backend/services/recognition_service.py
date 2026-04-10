@@ -25,3 +25,9 @@ class RecognitionService:
 
     def get_recognition(self, floor_plan_id: int, debug: bool = False):
         return self._use_cases.get_recognition(floor_plan_id, debug=debug)
+
+    def submit_feedback_sample(self, floor_plan_id: int):
+        return self._use_cases.submit_feedback_sample(floor_plan_id)
+
+    def export_feedback_samples(self, *, batch_id=None, output_root=None):
+        return self._use_cases.export_feedback_samples(batch_id=batch_id, output_root=output_root)

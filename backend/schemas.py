@@ -15,6 +15,7 @@ class APIModel(BaseModel):
 
 
 SignalSystemType = Literal["addressable", "non_addressable"]
+WallAlignment = Literal["center", "left", "right"]
 
 
 class ProjectCreate(APIModel):
@@ -74,6 +75,7 @@ class WallCreate(APIModel):
     x2: float
     y2: float
     thickness: float = 200.0
+    alignment: WallAlignment = "center"
     is_load_bearing: bool = False
     material: str | None = None
     length_m: float | None = None
@@ -87,6 +89,7 @@ class WallUpdate(APIModel):
     x2: float | None = None
     y2: float | None = None
     thickness: float | None = None
+    alignment: WallAlignment | None = None
     is_load_bearing: bool | None = None
     material: str | None = None
     length_m: float | None = None
@@ -101,6 +104,7 @@ class WallRead(APIModel):
     x2: float
     y2: float
     thickness: float
+    alignment: WallAlignment = "center"
     is_load_bearing: bool
     material: str | None = None
     length_m: float | None = None
@@ -267,6 +271,8 @@ class FireAlarmCreate(APIModel):
     room_id: int | None = None
     offset_left_m: float | None = None
     offset_top_m: float | None = None
+    label_dx: float | None = None
+    label_dy: float | None = None
 
 
 class FireAlarmUpdate(APIModel):
@@ -287,6 +293,8 @@ class FireAlarmUpdate(APIModel):
     room_id: int | None = None
     offset_left_m: float | None = None
     offset_top_m: float | None = None
+    label_dx: float | None = None
+    label_dy: float | None = None
 
 
 class FireAlarmRead(APIModel):
@@ -308,6 +316,8 @@ class FireAlarmRead(APIModel):
     room_id: int | None = None
     offset_left_m: float | None = None
     offset_top_m: float | None = None
+    label_dx: float | None = None
+    label_dy: float | None = None
 
 
 class FireAlarmAutoLayoutDeviceRead(APIModel):
@@ -327,6 +337,8 @@ class FireAlarmAutoLayoutDeviceRead(APIModel):
     room_id: int | None = None
     offset_left_m: float | None = None
     offset_top_m: float | None = None
+    label_dx: float | None = None
+    label_dy: float | None = None
 
 
 class FireAlarmAutoLayoutRead(APIModel):
@@ -416,6 +428,8 @@ class SignalInstrumentCreate(APIModel):
     y: float
     name: str | None = None
     supports_cable_merge: bool | None = None
+    label_dx: float | None = None
+    label_dy: float | None = None
 
 
 class SignalInstrumentUpdate(APIModel):
@@ -426,6 +440,8 @@ class SignalInstrumentUpdate(APIModel):
     y: float | None = None
     name: str | None = None
     supports_cable_merge: bool | None = None
+    label_dx: float | None = None
+    label_dy: float | None = None
 
 
 class SignalInstrumentRead(APIModel):
@@ -437,6 +453,8 @@ class SignalInstrumentRead(APIModel):
     y: float
     name: str | None = None
     supports_cable_merge: bool
+    label_dx: float | None = None
+    label_dy: float | None = None
 
 
 class CableRouteRead(APIModel):
@@ -451,11 +469,19 @@ class CableRouteRead(APIModel):
     warnings: list[str] = Field(default_factory=list)
     length_m: float | None = None
     is_manual: bool = False
+    zc_label_dx: float | None = None
+    zc_label_dy: float | None = None
 
 
 class CableRouteUpdate(APIModel):
     polyline_points: list[list[float]] = Field(default_factory=list)
     is_manual: bool = True
+    zc_label_dx: float | None = None
+    zc_label_dy: float | None = None
+
+
+class InstrumentCableMergeRequest(APIModel):
+    device_ids: list[int] = Field(default_factory=list)
 
 
 class CableRoutesRecalculateRequest(APIModel):
@@ -514,6 +540,14 @@ class RecognitionRead(APIModel):
     processed_at: datetime | None = None
     debug_artifacts_dir: str | None = None
     debug_images: list[DebugImageRead] = Field(default_factory=list)
+
+
+class RecognitionFeedbackRead(APIModel):
+    id: int
+    recognition_id: int
+    status: str
+    submitted_at: datetime | None = None
+    exported_at: datetime | None = None
 
 
 class HealthRead(APIModel):

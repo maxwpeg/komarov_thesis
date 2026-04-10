@@ -177,6 +177,9 @@ PROJECT_DESCRIPTION_BOX_Y_MM = 15 * mm
 MAIN_SET_OF_WORKING_DRAWINGS_STR = "Основной комплект рабочих чертежей"
 
 DEFAULT_TITLE_FONT_SIZE = 18
+DIMENSION_TEXT_FONT_SIZE = 10.0
+DIMENSION_ARROW_SIZE = 3.0 * mm
+DIMENSION_TEXT_GAP = 0.5 * DIMENSION_TEXT_FONT_SIZE
 
 CEO_STR = "Генеральный директор"
 CPE_STR = "Главный инженер проекта"

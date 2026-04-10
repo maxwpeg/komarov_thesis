@@ -67,6 +67,8 @@ class SqlAlchemyFloorPlanRepository(FloorPlanRepository):
         updates = payload.model_dump(exclude_unset=True)
         for field, value in updates.items():
             setattr(floor_plan, field, value)
+        if "scale_factor" in updates and updates["scale_factor"] is not None:
+            floor_plan.scale_source = "manual"
         self.session.flush()
         return FloorPlanRecord.from_model(floor_plan, include_elements=True)
 

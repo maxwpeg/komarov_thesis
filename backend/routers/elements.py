@@ -41,6 +41,7 @@ from backend.schemas import (
     FireAlarmAutoLayoutRead,
     FireAlarmRead,
     FireAlarmUpdate,
+    InstrumentCableMergeRequest,
     MessageRead,
     RoomCreate,
     RoomRead,
@@ -357,6 +358,15 @@ def delete_signal_instrument(
 ) -> MessageRead:
     service.delete_signal_instrument(instrument_id)
     return MessageRead(message="Signal instrument deleted")
+
+
+@router.post("/api/signal-instruments/{instrument_id}/merge-routes", response_model=list[CableRouteRead])
+def merge_routes_for_instrument(
+    instrument_id: int,
+    payload: InstrumentCableMergeRequest,
+    service: SignalDesignUseCases = Depends(get_signal_design_use_cases),
+) -> list[CableRouteRead]:
+    return [cable_route_read(route) for route in service.merge_routes_for_instrument(instrument_id, payload.device_ids)]
 
 
 @router.get("/api/floor-plans/{floor_plan_id}/cable-routes", response_model=list[CableRouteRead])

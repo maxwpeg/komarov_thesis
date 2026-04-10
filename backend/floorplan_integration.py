@@ -137,8 +137,6 @@ class FloorplanRecognitionIntegrator:
             db_room.calculate_area(scale_factor=scale_factor_mm_per_px)
             db_room.calculate_perimeter(scale_factor=scale_factor_mm_per_px)
             db_room.calculate_center()
-            if db_room.length_m is not None and db_room.width_m is not None:
-                db_room.area_sqm = db_room.length_m * db_room.width_m
             rooms.append(db_room)
 
         # Convert dimensions (unit is meters in recognition result)

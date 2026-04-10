@@ -14,7 +14,12 @@ from backend.modules.signal_design.domain.policies import CableRoutingPolicy, Fi
 from backend.modules.signal_design.domain.records import CableRouteRecord, SignalInstrumentRecord, ZkspcZoneRecord
 from backend.modules.signal_design.ports.repositories import SignalDesignRepository
 from backend.schemas import ZkspcZoneCommit
-from backend.signal_planning import MERGE_CAPABLE_INSTRUMENTS
+from backend.signal_planning import (
+    MERGE_CAPABLE_INSTRUMENTS,
+    ROUTE_KIND_ORDER,
+    build_alarm_route_metadata,
+    normalize_branch_route_numbers,
+)
 
 
 def _default_zone_warnings(room_count: int, area_sqm: float) -> list[str]:
@@ -122,12 +127,13 @@ class FireAlarmLayoutUseCases:
                 },
             )
             self.repository.add(self.repository.create_fire_alarm(normalized))
-        update_signal_branch_state(
-            floor_plan,
+        self.repository.flush()
+        self.repository.delete_routes_for_branch(floor_plan_id, normalized_system)
+        CableRoutingUseCases(self.repository, self.uow, self.events)._sync_branch_routes_and_metadata(
+            floor_plan_id,
             normalized_system,
+            floor_plan=floor_plan,
             fire_alarms_status="validated",
-            devices_cables_status="draft",
-            active_step="devices_cables",
         )
         self.uow.commit()
         self.events.publish(
@@ -170,9 +176,6 @@ class SignalInstrumentUseCases:
     def create_signal_instrument(self, payload) -> SignalInstrumentRecord:
         system_type = self._normalize_system_type(payload.system_type)
         floor_plan = self.repository.get_floor_plan(payload.floor_plan_id)
-        existing = self.repository.list_instruments(payload.floor_plan_id, system_type)
-        if existing:
-            raise AppError(409, "instrument_limit_reached", "Only one primary instrument per system is supported")
         instrument = self.repository.create_instrument(
             {
                 "floor_plan_id": payload.floor_plan_id,
@@ -186,16 +189,16 @@ class SignalInstrumentUseCases:
                     if payload.supports_cable_merge is not None
                     else payload.instrument_type in MERGE_CAPABLE_INSTRUMENTS
                 ),
+                "label_dx": payload.label_dx,
+                "label_dy": payload.label_dy,
             }
         )
         self.repository.add(instrument)
         self.repository.flush()
-        CableRoutingUseCases(self.repository, self.uow, self.events)._replace_routes_for_instrument(instrument, use_shared_trunk=False)
-        update_signal_branch_state(
-            floor_plan,
+        CableRoutingUseCases(self.repository, self.uow, self.events)._sync_branch_routes_and_metadata(
+            payload.floor_plan_id,
             system_type,
-            devices_cables_status="validated",
-            active_step="devices_cables",
+            floor_plan=floor_plan,
         )
         self.uow.commit()
         self.repository.refresh(instrument)
@@ -219,13 +222,14 @@ class SignalInstrumentUseCases:
             instrument.name = payload.name
         if payload.supports_cable_merge is not None:
             instrument.supports_cable_merge = payload.supports_cable_merge
+        if payload.label_dx is not None:
+            instrument.label_dx = float(payload.label_dx)
+        if payload.label_dy is not None:
+            instrument.label_dy = float(payload.label_dy)
         self.repository.flush()
-        CableRoutingUseCases(self.repository, self.uow, self.events)._replace_routes_for_instrument(instrument, use_shared_trunk=False)
-        update_signal_branch_state(
-            self.repository.get_floor_plan(instrument.floor_plan_id),
+        CableRoutingUseCases(self.repository, self.uow, self.events)._sync_branch_routes_and_metadata(
+            instrument.floor_plan_id,
             instrument.system_type,
-            devices_cables_status="validated",
-            active_step="devices_cables",
         )
         self.uow.commit()
         self.repository.refresh(instrument)
@@ -233,14 +237,12 @@ class SignalInstrumentUseCases:
 
     def delete_signal_instrument(self, instrument_id: int) -> None:
         instrument = self.repository.get_instrument(instrument_id)
-        floor_plan = self.repository.get_floor_plan(instrument.floor_plan_id)
         system_type = instrument.system_type
         self.repository.delete(instrument)
-        update_signal_branch_state(
-            floor_plan,
+        self.repository.flush()
+        CableRoutingUseCases(self.repository, self.uow, self.events)._sync_branch_routes_and_metadata(
+            instrument.floor_plan_id,
             system_type,
-            devices_cables_status="draft",
-            active_step="fire_alarms",
         )
         self.uow.commit()
 
@@ -270,40 +272,149 @@ class CableRoutingUseCases:
         return [CableRouteRecord.from_model(route) for route in self.repository.list_routes(floor_plan_id, normalized_system)]
 
     def recalculate_routes(self, floor_plan_id: int, system_type: str, use_shared_trunk: bool = False) -> list[CableRouteRecord]:
-        instrument = self._require_single_instrument(floor_plan_id, system_type)
-        self._replace_routes_for_instrument(instrument, use_shared_trunk=use_shared_trunk)
-        update_signal_branch_state(
-            self.repository.get_floor_plan(floor_plan_id),
-            instrument.system_type,
-            devices_cables_status="validated",
-            active_step="devices_cables",
-        )
+        normalized_system = self._normalize_system_type(system_type)
+        instruments = self.repository.list_instruments(floor_plan_id, normalized_system)
+        if not instruments:
+            raise AppError(404, "instrument_not_found", "Signal instrument not found")
+        branch_alarms = self.repository.list_fire_alarms(floor_plan_id, normalized_system)
+        alarm_by_id = {
+            int(alarm.id): alarm
+            for alarm in branch_alarms
+            if alarm.id is not None
+        }
+        existing_routes = self.repository.list_routes(floor_plan_id, normalized_system)
+        assigned_by_instrument: dict[int, list[Any]] = {int(instrument.id): [] for instrument in instruments if instrument.id is not None}
+        if len(instruments) == 1:
+            assigned_by_instrument[int(instruments[0].id)] = branch_alarms
+        else:
+            for route in existing_routes:
+                if route.instrument_id not in assigned_by_instrument:
+                    continue
+                seen: set[int] = set()
+                for device_id in route.device_ids or []:
+                    safe_device_id = int(device_id)
+                    if safe_device_id <= 0 or safe_device_id in seen or safe_device_id not in alarm_by_id:
+                        continue
+                    assigned_by_instrument[route.instrument_id].append(alarm_by_id[safe_device_id])
+                    seen.add(safe_device_id)
+        for instrument in instruments:
+            instrument_id = int(instrument.id)
+            if len(instruments) == 1:
+                assigned_alarms = branch_alarms
+            else:
+                assigned_alarms = assigned_by_instrument.get(instrument_id, [])
+            self._replace_routes_for_instrument(
+                instrument,
+                use_shared_trunk=use_shared_trunk,
+                assigned_alarm_models=assigned_alarms,
+            )
+        self._sync_branch_routes_and_metadata(floor_plan_id, normalized_system)
         self.uow.commit()
         self.events.publish(
             "cable_routes_recalculated",
-            {"category": "signal_design", "use_case": "RecalculateCableRoutes", "floor_plan_id": floor_plan_id, "system_type": instrument.system_type},
+            {"category": "signal_design", "use_case": "RecalculateCableRoutes", "floor_plan_id": floor_plan_id, "system_type": normalized_system},
         )
         return [CableRouteRecord.from_model(route) for route in self.repository.list_routes(floor_plan_id, system_type)]
+
+    def merge_routes_for_instrument(self, instrument_id: int, device_ids: list[int]) -> list[CableRouteRecord]:
+        instrument = self.repository.get_instrument(instrument_id)
+        normalized_system = self._normalize_system_type(instrument.system_type)
+        floor_plan_id = int(instrument.floor_plan_id)
+        branch_alarms = self.repository.list_fire_alarms(floor_plan_id, normalized_system)
+        alarm_by_id = {
+            int(alarm.id): alarm
+            for alarm in branch_alarms
+            if alarm.id is not None
+        }
+        selected_ids = {
+            int(device_id)
+            for device_id in device_ids
+            if int(device_id) in alarm_by_id
+        }
+        branch_routes = self.repository.list_routes(floor_plan_id, normalized_system)
+        assigned_by_instrument: dict[int, list[int]] = {}
+        affected_instrument_ids = {int(instrument.id)}
+        for route in branch_routes:
+            current_ids = [
+                int(device_id)
+                for device_id in (route.device_ids or [])
+                if int(device_id) > 0 and int(device_id) in alarm_by_id
+            ]
+            if not current_ids and route.instrument_id != instrument.id:
+                continue
+            remaining_ids = [device_id for device_id in current_ids if device_id not in selected_ids]
+            if len(remaining_ids) != len(current_ids):
+                affected_instrument_ids.add(int(route.instrument_id))
+            assigned_by_instrument.setdefault(int(route.instrument_id), [])
+            assigned_by_instrument[int(route.instrument_id)].extend(remaining_ids)
+        assigned_by_instrument.setdefault(int(instrument.id), [])
+        assigned_by_instrument[int(instrument.id)].extend(sorted(selected_ids))
+        for current_instrument_id, assigned_ids in list(assigned_by_instrument.items()):
+            deduped_ids: list[int] = []
+            seen_ids: set[int] = set()
+            for assigned_id in assigned_ids:
+                if assigned_id in seen_ids:
+                    continue
+                seen_ids.add(assigned_id)
+                deduped_ids.append(assigned_id)
+            assigned_by_instrument[current_instrument_id] = deduped_ids
+        affected_instrument_ids.update(
+            current_instrument_id
+            for current_instrument_id, assigned_ids in assigned_by_instrument.items()
+            if not assigned_ids
+        )
+        for affected_instrument_id in affected_instrument_ids:
+            current_instrument = self.repository.get_instrument(affected_instrument_id)
+            assigned_alarm_models = [
+                alarm_by_id[assigned_id]
+                for assigned_id in assigned_by_instrument.get(affected_instrument_id, [])
+                if assigned_id in alarm_by_id
+            ]
+            self._replace_routes_for_instrument(
+                current_instrument,
+                use_shared_trunk=False,
+                assigned_alarm_models=assigned_alarm_models,
+            )
+        self._sync_branch_routes_and_metadata(floor_plan_id, normalized_system)
+        self.uow.commit()
+        self.events.publish(
+            "instrument_routes_merged",
+            {
+                "category": "signal_design",
+                "use_case": "MergeRoutesForInstrument",
+                "floor_plan_id": floor_plan_id,
+                "system_type": normalized_system,
+                "instrument_id": instrument_id,
+            },
+        )
+        return [CableRouteRecord.from_model(route) for route in self.repository.list_routes(floor_plan_id, normalized_system)]
 
     def update_cable_route(self, route_id: int, payload) -> CableRouteRecord:
         route = self.repository.get_route(route_id)
         route.polyline_points = payload.polyline_points
         route.is_manual = payload.is_manual
+        if payload.zc_label_dx is not None:
+            route.zc_label_dx = float(payload.zc_label_dx)
+        if payload.zc_label_dy is not None:
+            route.zc_label_dy = float(payload.zc_label_dy)
         floor_plan = self.repository.get_floor_plan(route.floor_plan_id)
         route.length_m = CableRoutingPolicy.length(route.polyline_points or [], floor_plan.scale_factor)
-        update_signal_branch_state(
-            floor_plan,
+        self._sync_branch_routes_and_metadata(
+            route.floor_plan_id,
             route.system_type,
-            devices_cables_status="validated",
-            active_step="devices_cables",
+            floor_plan=floor_plan,
         )
         self.uow.commit()
         self.repository.refresh(route)
         return CableRouteRecord.from_model(route)
 
-    def _replace_routes_for_instrument(self, instrument, *, use_shared_trunk: bool) -> None:
+    def _replace_routes_for_instrument(self, instrument, *, use_shared_trunk: bool, assigned_alarm_models: list[Any] | None = None) -> None:
         floor_plan = self.repository.get_floor_plan(instrument.floor_plan_id)
-        alarms = [alarm.to_dict() for alarm in self.repository.list_fire_alarms(instrument.floor_plan_id, instrument.system_type)]
+        alarm_models = assigned_alarm_models if assigned_alarm_models is not None else self.repository.list_fire_alarms(
+            instrument.floor_plan_id,
+            instrument.system_type,
+        )
+        alarms = [alarm.to_dict() for alarm in alarm_models]
         routes = CableRoutingPolicy.recalculate(
             floor_plan.to_dict(include_elements=True),
             system_type=instrument.system_type,
@@ -323,12 +434,59 @@ class CableRoutingUseCases:
             )
         self.repository.flush()
 
-    def _require_single_instrument(self, floor_plan_id: int, system_type: str):
+    def _sync_branch_routes_and_metadata(
+        self,
+        floor_plan_id: int,
+        system_type: str,
+        *,
+        floor_plan=None,
+        fire_alarms_status: str | None = None,
+    ) -> None:
         normalized_system = self._normalize_system_type(system_type)
-        instruments = self.repository.list_instruments(floor_plan_id, normalized_system)
-        if not instruments:
-            raise AppError(404, "instrument_not_found", "Signal instrument not found")
-        return instruments[0]
+        branch_routes = self.repository.list_routes(floor_plan_id, normalized_system)
+        route_sort_key = lambda route: (
+            ROUTE_KIND_ORDER.get(str(route.route_kind or ""), 99),
+            int(route.instrument_id or 0),
+            int(route.route_number or 0),
+            int(route.id or 0),
+        )
+        normalized_payloads = normalize_branch_route_numbers([route.to_dict() for route in branch_routes])
+        normalized_numbers_by_id = {
+            int(payload["id"]): int(payload["route_number"])
+            for payload in normalized_payloads
+            if payload.get("id") is not None
+        }
+        for route in sorted(branch_routes, key=route_sort_key):
+            if route.id is not None and int(route.id) in normalized_numbers_by_id:
+                route.route_number = normalized_numbers_by_id[int(route.id)]
+        metadata = build_alarm_route_metadata(
+            [route.to_dict() for route in sorted(branch_routes, key=route_sort_key)],
+            system_type=normalized_system,
+        )
+        branch_alarms = self.repository.list_fire_alarms(floor_plan_id, normalized_system)
+        for alarm in branch_alarms:
+            if alarm.id is None or int(alarm.id) not in metadata:
+                alarm.loop_kind = None
+                alarm.loop_number = None
+                alarm.device_number = None
+                alarm.address = None
+                continue
+            update = metadata[int(alarm.id)]
+            alarm.loop_kind = update["loop_kind"]
+            alarm.loop_number = update["loop_number"]
+            alarm.device_number = update["device_number"]
+            alarm.address = update["address"]
+        assigned_alarm_ids = {alarm_id for alarm_id in metadata}
+        devices_cables_status = "validated"
+        if any(alarm.id is not None and int(alarm.id) not in assigned_alarm_ids for alarm in branch_alarms):
+            devices_cables_status = "draft"
+        update_signal_branch_state(
+            floor_plan or self.repository.get_floor_plan(floor_plan_id),
+            normalized_system,
+            fire_alarms_status=fire_alarms_status,
+            devices_cables_status=devices_cables_status,
+            active_step="devices_cables",
+        )
 
     @staticmethod
     def _normalize_system_type(value: str | None) -> str:
@@ -380,3 +538,6 @@ class SignalDesignUseCases:
 
     def update_cable_route(self, route_id: int, payload) -> CableRouteRecord:
         return self.cable_routing.update_cable_route(route_id, payload)
+
+    def merge_routes_for_instrument(self, instrument_id: int, device_ids: list[int]) -> list[CableRouteRecord]:
+        return self.cable_routing.merge_routes_for_instrument(instrument_id, device_ids)

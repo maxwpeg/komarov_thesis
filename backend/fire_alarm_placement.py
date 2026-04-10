@@ -5,6 +5,11 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from backend.fire_alarm_cover_solver import solve_room_detector_positions
+from shapely.geometry import Point as ShapelyPoint
+from shapely.geometry import Polygon
+from shapely.ops import unary_union
+
 
 Point = tuple[float, float]
 
@@ -366,6 +371,179 @@ def _expand_rect(rect: tuple[float, float, float, float], margin: float) -> tupl
     return min_x - margin, min_y - margin, max_x + margin, max_y + margin
 
 
+def _room_polygon_pixels(room: dict[str, Any]) -> Polygon | None:
+    points = room.get("boundary_points") or []
+    if len(points) < 3:
+        return None
+    polygon = Polygon([(float(point[0]), float(point[1])) for point in points])
+    if polygon.is_empty:
+        return None
+    if not polygon.is_valid:
+        polygon = polygon.buffer(0)
+    if polygon.is_empty or not isinstance(polygon, Polygon):
+        return None
+    return polygon
+
+
+def _detector_coverage_satisfied(
+    room_polygon: Polygon,
+    positions: list[Point],
+    radius_px: float,
+    multiplicity: int,
+) -> bool:
+    if room_polygon.is_empty or not positions:
+        return False
+
+    disks = [
+        ShapelyPoint(float(point[0]), float(point[1])).buffer(radius_px, quad_segs=32).intersection(room_polygon)
+        for point in positions
+    ]
+    if multiplicity <= 1:
+        covered = unary_union(disks)
+    else:
+        covered_once = Polygon()
+        covered_twice = Polygon()
+        for disk in disks:
+            if covered_once.is_empty:
+                covered_once = disk
+                continue
+            overlap = covered_once.intersection(disk)
+            covered_twice = overlap if covered_twice.is_empty else unary_union([covered_twice, overlap])
+            covered_once = unary_union([covered_once, disk])
+        covered = covered_twice
+    uncovered = room_polygon.difference(covered)
+    return uncovered.area <= 1e-3
+
+
+def _detector_symbol_spacing_px(scale_factor: float) -> float:
+    scale = _safe_scale(scale_factor)
+    return max(20.0, 220.0 / scale)
+
+
+def _refine_detector_positions_for_drawing(
+    room: dict[str, Any],
+    positions: list[Point],
+    *,
+    radius_px: float,
+    scale_factor: float,
+    coverage_need: int,
+) -> tuple[list[Point], bool]:
+    if len(positions) < 2:
+        return positions, False
+
+    room_polygon = _room_polygon_pixels(room)
+    if room_polygon is None:
+        return positions, False
+
+    min_spacing = _detector_symbol_spacing_px(scale_factor)
+    center = _room_center(room)
+    refined = [(float(point[0]), float(point[1])) for point in positions]
+    moved = False
+
+    for _ in range(24):
+        updated = False
+        for left_index in range(len(refined) - 1):
+            for right_index in range(left_index + 1, len(refined)):
+                left = refined[left_index]
+                right = refined[right_index]
+                dx = right[0] - left[0]
+                dy = right[1] - left[1]
+                distance = math.hypot(dx, dy)
+                if distance >= min_spacing - 1e-6:
+                    continue
+
+                if distance <= 1e-6:
+                    dx = right[0] - center[0]
+                    dy = right[1] - center[1]
+                    if abs(dx) <= 1e-6 and abs(dy) <= 1e-6:
+                        dx = 1.0
+                        dy = 0.0
+                    distance = math.hypot(dx, dy)
+
+                shift = (min_spacing - distance) / 2.0 + 0.25
+                direction = (dx / distance, dy / distance)
+                candidates = [
+                    (
+                        (left[0] - direction[0] * shift, left[1] - direction[1] * shift),
+                        (right[0] + direction[0] * shift, right[1] + direction[1] * shift),
+                    ),
+                    (
+                        (left[0] - direction[0] * shift * 2.0, left[1] - direction[1] * shift * 2.0),
+                        right,
+                    ),
+                    (
+                        left,
+                        (right[0] + direction[0] * shift * 2.0, right[1] + direction[1] * shift * 2.0),
+                    ),
+                ]
+
+                accepted = None
+                for next_left, next_right in candidates:
+                    if not room_polygon.covers(ShapelyPoint(next_left)) or not room_polygon.covers(ShapelyPoint(next_right)):
+                        continue
+                    trial = refined[:]
+                    trial[left_index] = next_left
+                    trial[right_index] = next_right
+                    if _detector_coverage_satisfied(room_polygon, trial, radius_px, coverage_need):
+                        accepted = trial
+                        break
+
+                if accepted is None:
+                    continue
+
+                refined = accepted
+                updated = True
+                moved = True
+                break
+            if updated:
+                break
+        if not updated:
+            break
+
+    has_overlap = any(
+        _distance(refined[left_index], refined[right_index]) < min_spacing - 1e-6
+        for left_index in range(len(refined) - 1)
+        for right_index in range(left_index + 1, len(refined))
+    )
+    return refined, has_overlap
+
+
+def _wall_axis_data(wall: dict[str, Any]) -> tuple[Point, Point, Point, float] | None:
+    x1 = float(wall.get("x1") or 0.0)
+    y1 = float(wall.get("y1") or 0.0)
+    x2 = float(wall.get("x2") or 0.0)
+    y2 = float(wall.get("y2") or 0.0)
+    dx = x2 - x1
+    dy = y2 - y1
+    length = math.hypot(dx, dy)
+    if length <= 1e-6:
+        return None
+    axis = (dx / length, dy / length)
+    normal = (-axis[1], axis[0])
+    return (x1, y1), axis, normal, length
+
+
+def _opening_half_span_along_axis(
+    opening: dict[str, Any],
+    axis: Point,
+) -> float:
+    half_width = float(opening.get("width") or 0.0) / 2.0
+    half_height = float(opening.get("height") or 0.0) / 2.0
+    return abs(axis[0]) * half_width + abs(axis[1]) * half_height
+
+
+def _opening_projection_interval(
+    opening: dict[str, Any],
+    wall_origin: Point,
+    axis: Point,
+) -> tuple[float, float]:
+    center_x = float(opening["x"]) + float(opening.get("width", 0.0)) / 2.0
+    center_y = float(opening["y"]) + float(opening.get("height", 0.0)) / 2.0
+    projection = ((center_x - wall_origin[0]) * axis[0]) + ((center_y - wall_origin[1]) * axis[1])
+    half_span = _opening_half_span_along_axis(opening, axis)
+    return projection - half_span, projection + half_span
+
+
 class FireAlarmPlacement:
     """Auto-place smoke detectors and manual call points."""
 
@@ -395,15 +573,26 @@ class FireAlarmPlacement:
         if not room.get("boundary_points") or len(room["boundary_points"]) < 3:
             return [], [f"Помещение {room.get('id') or room.get('name') or 'без имени'} пропущено: нет полигона."]
 
-        radius_px = self.smoke_detector_radius / _safe_scale(scale_factor)
-        detector_positions, warnings = _select_detector_positions(
+        detector_positions, warnings = solve_room_detector_positions(
             room,
-            radius_px,
-            scale_factor,
+            smoke_detector_radius_mm=self.smoke_detector_radius,
+            scale_factor=scale_factor,
             coverage_need=1 if self.system_type == "addressable" else 2,
         )
+        radius_px = self.smoke_detector_radius / _safe_scale(scale_factor)
+        refined_positions, has_overlap = _refine_detector_positions_for_drawing(
+            room,
+            detector_positions,
+            radius_px=radius_px,
+            scale_factor=scale_factor,
+            coverage_need=1 if self.system_type == "addressable" else 2,
+        )
+        if has_overlap:
+            warnings.append(
+                f"Detector layout for room {room.get('id') or room.get('name') or 'unknown'} still contains drawing overlaps after refinement."
+            )
         devices = []
-        for x, y in detector_positions:
+        for x, y in refined_positions:
             devices.append(
                 {
                     "device_type": "smoke_detector",
@@ -428,10 +617,17 @@ class FireAlarmPlacement:
             return devices
 
         walls_by_id = {int(wall["id"]): wall for wall in walls if wall.get("id") is not None}
+        openings_by_wall: dict[int, list[dict[str, Any]]] = {}
+        for door in doors:
+            wall_id = door.get("wall_id")
+            if wall_id is None:
+                continue
+            openings_by_wall.setdefault(int(wall_id), []).append(door)
         scale = _safe_scale(scale_factor)
         sample_offset_px = max(6.0, 750.0 / scale)
         placement_offset_px = max(4.0, self.DEFAULT_MANUAL_CALL_POINT_OFFSET / scale)
         stair_margin_px = max(8.0, 600.0 / scale)
+        tangent_clearance_px = max(8.0, 180.0 / scale)
 
         stair_rects = [
             _expand_rect(
@@ -486,11 +682,59 @@ class FireAlarmPlacement:
             if desired_sign == 0.0:
                 continue
 
+            wall = walls_by_id.get(int(door["wall_id"])) if door.get("wall_id") is not None else None
+            if wall is None:
+                continue
+            wall_axis = _wall_axis_data(wall)
+            if wall_axis is None:
+                continue
+            origin, axis, _wall_normal, wall_length = wall_axis
+            door_start, door_end = _opening_projection_interval(door, origin, axis)
+            door_start = max(0.0, door_start)
+            door_end = min(wall_length, door_end)
+
+            left_limit = 0.0
+            right_limit = wall_length
+            for other in openings_by_wall.get(int(wall["id"]), []):
+                if other.get("id") == door.get("id"):
+                    continue
+                other_start, other_end = _opening_projection_interval(other, origin, axis)
+                if other_end <= door_start and other_end > left_limit:
+                    left_limit = other_end
+                if other_start >= door_end and other_start < right_limit:
+                    right_limit = other_start
+
+            available_left = max(0.0, door_start - left_limit)
+            available_right = max(0.0, right_limit - door_end)
+            side_order = [1.0, -1.0] if available_right >= available_left else [-1.0, 1.0]
+
+            half_span = _opening_half_span_along_axis(door, axis)
+            placed_point = None
+            for tangent_sign in side_order:
+                available_span = available_right if tangent_sign > 0 else available_left
+                if available_span <= tangent_clearance_px + 1e-6:
+                    continue
+                shift_along_wall = half_span + min(
+                    available_span - 2.0,
+                    max(tangent_clearance_px, half_span + tangent_clearance_px * 0.35),
+                )
+                projection = ((center_x - origin[0]) * axis[0]) + ((center_y - origin[1]) * axis[1])
+                projected = max(0.0, min(wall_length, projection + (tangent_sign * shift_along_wall)))
+                candidate = (
+                    origin[0] + (axis[0] * projected) + (normal[0] * placement_offset_px * desired_sign),
+                    origin[1] + (axis[1] * projected) + (normal[1] * placement_offset_px * desired_sign),
+                )
+                placed_point = candidate
+                break
+
+            if placed_point is None:
+                continue
+
             devices.append(
                 {
                     "device_type": "manual_call_point",
-                    "x": center_x + normal[0] * placement_offset_px * desired_sign,
-                    "y": center_y + normal[1] * placement_offset_px * desired_sign,
+                    "x": placed_point[0],
+                    "y": placed_point[1],
                     "coverage_radius": None,
                     "mounting_height": self.DEFAULT_MANUAL_CALL_POINT_HEIGHT,
                 }
@@ -594,7 +838,10 @@ class FireAlarmPlacement:
                 device["address"] = str(index)
             for zone_number, zone_devices in smoke_by_zone.items():
                 if len(zone_devices) > 32:
-                    warnings.append(f"ЗКСПС {zone_number} превышает лимит 32 датчика для адресной системы.")
+                    warnings.append(
+                        f"Полное покрытие требует {len(zone_devices)} датчиков в ЗКСПС {zone_number}, "
+                        "что превышает лимит 32 для адресной системы."
+                    )
             return warnings
 
         for zone_number, zone_devices in smoke_by_zone.items():
@@ -605,14 +852,17 @@ class FireAlarmPlacement:
                 device["device_number"] = index
                 device["address"] = str(index)
             if len(zone_devices) > 20:
-                warnings.append(f"ЗКСПС {zone_number} превышает лимит 20 датчиков для безадресной системы.")
+                warnings.append(
+                    f"Полное покрытие требует {len(zone_devices)} датчиков в ЗКСПС {zone_number}, "
+                    "что превышает лимит 20 для безадресной системы."
+                )
 
-        manual_loop_number = (max(smoke_by_zone) if smoke_by_zone else 0) + 1
+        manual_loop_start = (max(smoke_by_zone) if smoke_by_zone else 0) + 1
         for index, device in enumerate(sorted(manual_call_points, key=lambda item: (float(item["x"]), float(item["y"]))), start=1):
             device["loop_kind"] = "manual_line"
-            device["loop_number"] = manual_loop_number
-            device["device_number"] = index
-            device["address"] = str(index)
+            device["loop_number"] = manual_loop_start + index - 1
+            device["device_number"] = 1
+            device["address"] = "1"
         return warnings
 
 

@@ -90,6 +90,8 @@ class FloorPlanService:
         updates = payload.model_dump(exclude_unset=True)
         for field, value in updates.items():
             setattr(floor_plan, field, value)
+        if "scale_factor" in updates and updates["scale_factor"] is not None:
+            floor_plan.scale_source = "manual"
         self.db.commit()
         self.db.refresh(floor_plan)
         return floor_plan

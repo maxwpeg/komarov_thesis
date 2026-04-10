@@ -7,15 +7,19 @@ export default function DevicesCablesSidebarSection({
   visibleSignalInstruments,
   visibleCableRoutes,
   selectedElement,
+  mergeInstrumentId,
+  mergeSelectionCount,
   onSelectTool,
   onSelectInstrument,
-  onMergeCableRoutes,
+  onStartMerge,
+  onApplyMerge,
+  onCancelMerge,
   onDeleteSignalInstrument,
 }) {
   return (
     <div className="editor-sidebar" style={{ borderLeft: '1px solid var(--panel-border)' }}>
       <div className="sidebar-section">
-        <h3>Приборы и кабели</h3>
+        <h3>РџСЂРёР±РѕСЂС‹ Рё РєР°Р±РµР»Рё</h3>
         <div style={{ display: 'grid', gap: '6px', marginBottom: '10px' }}>
           {SIGNAL_INSTRUMENT_OPTIONS.map((option) => (
             <button
@@ -27,40 +31,68 @@ export default function DevicesCablesSidebarSection({
             </button>
           ))}
         </div>
+
+        {mergeInstrumentId && (
+          <div style={{ marginBottom: '10px', padding: '8px', borderRadius: '8px', background: 'rgba(15, 143, 124, 0.08)' }}>
+            <div style={{ fontSize: '12px', marginBottom: '6px' }}>
+              Р’С‹Р±СЂР°РЅРѕ РґР°С‚С‡РёРєРѕРІ: {mergeSelectionCount}
+            </div>
+            <div style={{ display: 'flex', gap: '6px' }}>
+              <button className="tool-button" onClick={onApplyMerge} disabled={!mergeSelectionCount}>
+                РџСЂРёРјРµРЅРёС‚СЊ
+              </button>
+              <button className="tool-button" onClick={onCancelMerge}>
+                РћС‚РјРµРЅР°
+              </button>
+            </div>
+          </div>
+        )}
+
         <ul className="element-list">
-          {visibleSignalInstruments.map((instrument) => (
-            <li
-              key={`instrument-${instrument.id}`}
-              className={`element-item ${selectedElement?.type === 'signal-instrument' && selectedElement?.id === instrument.id ? 'selected' : ''}`}
-              onClick={() => onSelectInstrument(instrument)}
-            >
-              <div>
-                <div>{instrument.name || getSignalInstrumentDefinition(instrument.instrument_type).label}</div>
-                <small>{getSignalInstrumentDefinition(instrument.instrument_type).label}</small>
-              </div>
-              {instrument.supports_cable_merge && (
+          {visibleSignalInstruments.map((instrument) => {
+            const definition = getSignalInstrumentDefinition(instrument.instrument_type);
+            const supportsMerge = Boolean(definition.supportsMerge);
+            const mergeActive = mergeInstrumentId === instrument.id;
+            return (
+              <li
+                key={`instrument-${instrument.id}`}
+                className={`element-item ${selectedElement?.type === 'signal-instrument' && selectedElement?.id === instrument.id ? 'selected' : ''}`}
+                onClick={() => onSelectInstrument(instrument)}
+              >
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div>{instrument.name || definition.label}</div>
+                  <small>{definition.label}</small>
+                  {supportsMerge && (
+                    <div style={{ marginTop: '6px' }}>
+                      <button
+                        className="tool-button"
+                        style={{ fontSize: '11px', padding: '3px 7px' }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (mergeActive) {
+                            onApplyMerge();
+                          } else {
+                            onStartMerge(instrument);
+                          }
+                        }}
+                      >
+                        {mergeActive ? 'РџСЂРёРјРµРЅРёС‚СЊ' : 'РЎРІРµСЃС‚Рё РґР°С‚С‡РёРєРё'}
+                      </button>
+                    </div>
+                  )}
+                </div>
                 <button
-                  className="tool-button"
-                  style={{ fontSize: '11px', padding: '3px 6px' }}
+                  className="element-delete"
                   onClick={(e) => {
                     e.stopPropagation();
-                    onMergeCableRoutes(instrument);
+                    onDeleteSignalInstrument(instrument.id, instrument.system_type);
                   }}
                 >
-                  Свести
+                  Г—
                 </button>
-              )}
-              <button
-                className="element-delete"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onDeleteSignalInstrument(instrument.id, instrument.system_type);
-                }}
-              >
-                ×
-              </button>
-            </li>
-          ))}
+              </li>
+            );
+          })}
         </ul>
         <div style={{ marginTop: '10px', fontSize: '12px', color: 'var(--muted-text)' }}>
           {visibleCableRoutes.map((route) => (

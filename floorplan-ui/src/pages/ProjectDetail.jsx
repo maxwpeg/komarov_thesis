@@ -148,7 +148,6 @@ function ProjectDetail() {
       link.click();
       window.URL.revokeObjectURL(url);
       document.body.removeChild(link);
-      alert('PDF успешно создан и загружен.');
     } catch (error) {
       console.error('Error generating PDF:', error);
       alert(`Ошибка при генерации PDF: ${error.message}`);

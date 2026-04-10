@@ -409,6 +409,8 @@ class FireAlarmCrudUseCases:
             "device_number": updates.get("device_number", fire_alarm.device_number),
             "zone": updates.get("zone", fire_alarm.zone),
             "address": updates.get("address", fire_alarm.address),
+            "label_dx": updates.get("label_dx", fire_alarm.label_dx),
+            "label_dy": updates.get("label_dy", fire_alarm.label_dy),
         }
         normalized = self._normalize_fire_alarm_payload(floor_plan_id, merged)
         for field, value in normalized.items():
@@ -467,6 +469,8 @@ class FireAlarmCrudUseCases:
                     "device_number": fire_alarm.device_number,
                     "zone": fire_alarm.zone,
                     "address": fire_alarm.address,
+                    "label_dx": fire_alarm.label_dx,
+                    "label_dy": fire_alarm.label_dy,
                 },
                 scale_factor=scale_factor,
                 rooms=rooms,
@@ -510,8 +514,18 @@ class BatchSaveFloorPlanUseCase:
         fire_alarms = FireAlarmCrudUseCases(self.repository, self.uow, self.events)
         walls_changed = False
         touched_fire_alarm_systems: set[str] = set()
+        deleted_ids_by_type: dict[str, set[int]] = {
+            "walls": set(),
+            "stairs": set(),
+            "doors": set(),
+            "windows": set(),
+            "fire-alarms": set(),
+            "rooms": set(),
+            "dimensions": set(),
+        }
 
         for item in payload.deleted:
+            deleted_ids_by_type.setdefault(item.element_type, set()).add(int(item.id))
             if item.element_type == "walls":
                 walls_changed = True
             if item.element_type == "fire-alarms":
@@ -554,11 +568,15 @@ class BatchSaveFloorPlanUseCase:
             touched_fire_alarm_systems.add(data["system_type"])
             self.repository.add(self.repository.create_fire_alarm(data))
         for command in payload.update_walls:
+            if command.id in deleted_ids_by_type["walls"]:
+                continue
             wall = self.repository.get_wall(command.id)
             for field, value in command.data.model_dump(exclude_unset=True).items():
                 setattr(wall, field, value)
             walls_changed = True
         for command in payload.update_stairs:
+            if command.id in deleted_ids_by_type["stairs"]:
+                continue
             stair = self.repository.get_stair(command.id)
             normalized = StairGeometryPolicy.normalize(
                 {
@@ -575,6 +593,8 @@ class BatchSaveFloorPlanUseCase:
             for field, value in normalized.items():
                 setattr(stair, field, value)
         for command in payload.update_doors:
+            if command.id in deleted_ids_by_type["doors"]:
+                continue
             door = self._get_or_stale("door", command.id, "door")
             normalized = OpeningNormalizationPolicy.normalize(
                 {
@@ -596,6 +616,8 @@ class BatchSaveFloorPlanUseCase:
             for field, value in normalized.items():
                 setattr(door, field, value)
         for command in payload.update_windows:
+            if command.id in deleted_ids_by_type["windows"]:
+                continue
             window = self._get_or_stale("window", command.id, "window")
             normalized = OpeningNormalizationPolicy.normalize(
                 {
@@ -615,12 +637,16 @@ class BatchSaveFloorPlanUseCase:
             for field, value in normalized.items():
                 setattr(window, field, value)
         for command in payload.update_rooms:
+            if command.id in deleted_ids_by_type["rooms"]:
+                continue
             room = self.repository.get_room(command.id)
             floor_plan_for_room = self.repository.get_floor_plan(room.floor_plan_id)
             for field, value in command.data.model_dump(exclude_unset=True).items():
                 setattr(room, field, value)
             RoomGeometryPolicy.refresh(room, floor_plan_for_room.scale_factor)
         for command in payload.update_fire_alarms:
+            if command.id in deleted_ids_by_type["fire-alarms"]:
+                continue
             fire_alarm = self.repository.get_fire_alarm(command.id)
             updates = command.data.model_dump(exclude_unset=True)
             floor_plan_id_for_alarm = int(updates.get("floor_plan_id", fire_alarm.floor_plan_id))
@@ -639,6 +665,8 @@ class BatchSaveFloorPlanUseCase:
                 "device_number": updates.get("device_number", fire_alarm.device_number),
                 "zone": updates.get("zone", fire_alarm.zone),
                 "address": updates.get("address", fire_alarm.address),
+                "label_dx": updates.get("label_dx", fire_alarm.label_dx),
+                "label_dy": updates.get("label_dy", fire_alarm.label_dy),
             }
             normalized_alarm = fire_alarms._normalize_fire_alarm_payload(floor_plan_id_for_alarm, merged)
             touched_fire_alarm_systems.add(normalized_alarm["system_type"])
@@ -649,11 +677,22 @@ class BatchSaveFloorPlanUseCase:
             wall_use_cases._relink_or_prune_openings(floor_plan_id, delete_invalid=True)
         fire_alarms.refresh_metadata_for_floor_plan(floor_plan_id)
         for system_type in touched_fire_alarm_systems:
+            self.repository.delete_routes_for_branch(floor_plan_id, system_type)
+            branch_alarm_models = [
+                alarm
+                for alarm in self.repository.list_fire_alarms(floor_plan_id)
+                if alarm.system_type == system_type
+            ]
+            for alarm in branch_alarm_models:
+                alarm.loop_kind = None
+                alarm.loop_number = None
+                alarm.device_number = None
+                alarm.address = None
             update_signal_branch_state(
                 floor_plan,
                 system_type,
                 fire_alarms_status="validated",
-                devices_cables_status="draft",
+                devices_cables_status="draft" if branch_alarm_models else "validated",
                 active_step="devices_cables",
             )
         self.uow.commit()

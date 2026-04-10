@@ -102,6 +102,7 @@ class PipelineService:
                 x2=float(wall.midline.x2),
                 y2=float(wall.midline.y2),
                 thickness=float(wall.thickness_px * scale_factor),
+                alignment="center",
                 is_load_bearing=False,
                 material=f"detected_wall_{wall.id}",
                 length_m=length_m,
@@ -166,8 +167,12 @@ class PipelineService:
             self.db.rollback()
             raise WallValidationError(sorted(missing_wall_ids))
 
-        recalculated_scale = self._recalculate_scale_factor(walls, floor_plan.scale_factor or 1.0)
-        floor_plan.scale_factor = recalculated_scale
+        if (floor_plan.scale_source or "auto") == "manual" and (floor_plan.scale_factor or 0) > 0:
+            recalculated_scale = float(floor_plan.scale_factor)
+        else:
+            recalculated_scale = self._recalculate_scale_factor(walls, floor_plan.scale_factor or 1.0)
+            floor_plan.scale_factor = recalculated_scale
+            floor_plan.scale_source = "auto"
 
         for wall in walls:
             pixel_length = math.hypot(wall.x2 - wall.x1, wall.y2 - wall.y1)
@@ -181,12 +186,8 @@ class PipelineService:
         for room in rooms:
             room.calculate_center()
             room.calculate_length_width(recalculated_scale)
-            if room.length_m is not None and room.width_m is not None:
-                room.area_sqm = room.length_m * room.width_m
-                room.perimeter_m = 2.0 * (room.length_m + room.width_m)
-            else:
-                room.calculate_area(recalculated_scale)
-                room.calculate_perimeter(recalculated_scale)
+            room.calculate_area(recalculated_scale)
+            room.calculate_perimeter(recalculated_scale)
 
         self.element_service.relink_or_prune_openings(floor_plan_id, delete_invalid=True)
 
@@ -327,12 +328,8 @@ class PipelineService:
                 db_room.name = preserved_name
             db_room.calculate_center()
             db_room.calculate_length_width(floor_plan.scale_factor or 1.0)
-            if db_room.length_m is not None and db_room.width_m is not None:
-                db_room.area_sqm = db_room.length_m * db_room.width_m
-                db_room.perimeter_m = 2.0 * (db_room.length_m + db_room.width_m)
-            else:
-                db_room.calculate_area(floor_plan.scale_factor or 1.0)
-                db_room.calculate_perimeter(floor_plan.scale_factor or 1.0)
+            db_room.calculate_area(floor_plan.scale_factor or 1.0)
+            db_room.calculate_perimeter(floor_plan.scale_factor or 1.0)
             self.db.add(db_room)
 
         self._set_step_status(state, "rooms", "draft", detected=True)
@@ -362,22 +359,13 @@ class PipelineService:
                 room.room_number = room_update.room_number
             if room_update.room_type is not None:
                 room.room_type = room_update.room_type
-            if room_update.length_m is not None:
-                room.length_m = room_update.length_m
-            if room_update.width_m is not None:
-                room.width_m = room_update.width_m
 
         rooms = self.db.query(RoomModel).filter(RoomModel.floor_plan_id == floor_plan_id).all()
         for room in rooms:
             room.calculate_center()
-            if room.length_m is None or room.width_m is None:
-                room.calculate_length_width(floor_plan.scale_factor or 1.0)
-            if room.length_m is not None and room.width_m is not None:
-                room.area_sqm = room.length_m * room.width_m
-                room.perimeter_m = 2.0 * (room.length_m + room.width_m)
-            else:
-                room.calculate_area(floor_plan.scale_factor or 1.0)
-                room.calculate_perimeter(floor_plan.scale_factor or 1.0)
+            room.calculate_length_width(floor_plan.scale_factor or 1.0)
+            room.calculate_area(floor_plan.scale_factor or 1.0)
+            room.calculate_perimeter(floor_plan.scale_factor or 1.0)
 
         self._set_step_status(state, "rooms", "validated", committed=True, bump_revision=True)
         self._mark_downstream_stale(state, "rooms")

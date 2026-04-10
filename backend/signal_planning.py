@@ -9,6 +9,15 @@ from typing import Any
 
 SYSTEM_TYPES = {"addressable", "non_addressable"}
 MERGE_CAPABLE_INSTRUMENTS = {"control_panel", "loop_controller"}
+DETECTOR_SYMBOL_HALF_SIZE_PX = 9.0
+ZC_SYMBOL_HALF_SIZE_PX = 5.4
+ZC_ROUTE_OFFSET_PX = DETECTOR_SYMBOL_HALF_SIZE_PX + ZC_SYMBOL_HALF_SIZE_PX
+SINGLE_RING_DETOUR_PX = 18.0
+ROUTE_KIND_ORDER = {
+    "ring": 0,
+    "zone_loop": 1,
+    "manual_line": 2,
+}
 
 
 def _safe_scale(scale_factor: float | None) -> float:
@@ -17,6 +26,32 @@ def _safe_scale(scale_factor: float | None) -> float:
 
 def _distance(a: tuple[float, float], b: tuple[float, float]) -> float:
     return math.hypot(a[0] - b[0], a[1] - b[1])
+
+
+def _alarm_identity(alarm: dict[str, Any], fallback_index: int) -> tuple[Any, ...]:
+    alarm_id = alarm.get("id")
+    if alarm_id is not None:
+        return ("id", int(alarm_id))
+    return (
+        "coord",
+        alarm.get("device_type"),
+        int(alarm.get("loop_number") or 0),
+        int(alarm.get("device_number") or fallback_index),
+        round(float(alarm.get("x") or 0.0), 4),
+        round(float(alarm.get("y") or 0.0), 4),
+    )
+
+
+def _dedupe_alarms(alarms: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    unique: list[dict[str, Any]] = []
+    seen: set[tuple[Any, ...]] = set()
+    for index, alarm in enumerate(alarms, start=1):
+        identity = _alarm_identity(alarm, index)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        unique.append(alarm)
+    return unique
 
 
 def _bounding_box(points: list[list[float]]) -> tuple[float, float, float, float]:
@@ -167,6 +202,57 @@ def route_length_m(polyline_points: list[list[float]], scale_factor: float | Non
     return round(length_px * scale / 1000.0, 3)
 
 
+def build_alarm_route_metadata(routes: list[dict[str, Any]], *, system_type: str) -> dict[int, dict[str, Any]]:
+    system = system_type if system_type in SYSTEM_TYPES else "non_addressable"
+    metadata: dict[int, dict[str, Any]] = {}
+    branch_address = 1
+    for route in sorted(
+        routes,
+        key=lambda item: (
+            ROUTE_KIND_ORDER.get(str(item.get("route_kind") or ""), 99),
+            int(item.get("route_number") or 0),
+            int(item.get("instrument_id") or 0),
+        ),
+    ):
+        route_kind = str(route.get("route_kind") or ("ring" if system == "addressable" else "zone_loop"))
+        route_number = int(route.get("route_number") or 1)
+        for index, device_id in enumerate(route.get("device_ids") or [], start=1):
+            safe_device_id = int(device_id)
+            if safe_device_id <= 0 or safe_device_id in metadata:
+                continue
+            metadata[safe_device_id] = {
+                "loop_kind": route_kind,
+                "loop_number": route_number,
+                "device_number": index,
+                "address": str(branch_address),
+            }
+            branch_address += 1
+    return metadata
+
+
+def sort_branch_routes(routes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(
+        routes,
+        key=lambda item: (
+            ROUTE_KIND_ORDER.get(str(item.get("route_kind") or ""), 99),
+            int(item.get("instrument_id") or 0),
+            int(item.get("route_number") or 0),
+            int(item.get("id") or 0),
+        ),
+    )
+
+
+def normalize_branch_route_numbers(routes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for route_number, route in enumerate(sort_branch_routes(routes), start=1):
+        next_route = {
+            **route,
+            "route_number": route_number,
+        }
+        normalized.append(next_route)
+    return normalized
+
+
 def recalculate_cable_routes(
     floor_plan_data: dict[str, Any],
     *,
@@ -178,20 +264,14 @@ def recalculate_cable_routes(
     system = system_type if system_type in SYSTEM_TYPES else "non_addressable"
     scale_factor = floor_plan_data.get("scale_factor")
     walls = floor_plan_data.get("walls") or []
-    trunk_anchor = _nearest_wall_anchor((float(instrument["x"]), float(instrument["y"])), walls) if use_shared_trunk else None
+    normalized_alarms = _dedupe_alarms(alarms)
+    _ = use_shared_trunk
+    trunk_anchor = None
 
     if system == "addressable":
-        if not alarms:
+        if not normalized_alarms:
             return []
-        ordered = sorted(
-            alarms,
-            key=lambda item: (
-                int(item.get("loop_number") or 1),
-                int(item.get("device_number") or 0),
-                float(item.get("x") or 0.0),
-                float(item.get("y") or 0.0),
-            ),
-        )
+        ordered = _optimize_alarm_order((float(instrument["x"]), float(instrument["y"])), normalized_alarms, walls, close_ring=True)
         polyline = _build_polyline(
             start=(float(instrument["x"]), float(instrument["y"])),
             targets=[(float(item["x"]), float(item["y"])) for item in ordered],
@@ -214,7 +294,7 @@ def recalculate_cable_routes(
         ]
 
     grouped: dict[tuple[str, int], list[dict[str, Any]]] = defaultdict(list)
-    for alarm in alarms:
+    for alarm in normalized_alarms:
         if alarm.get("device_type") == "manual_call_point":
             route_number = int(alarm.get("loop_number") or len(grouped) + 1)
             grouped[("manual_line", route_number)].append(alarm)
@@ -223,15 +303,20 @@ def recalculate_cable_routes(
         grouped[("zone_loop", route_number)].append(alarm)
 
     routes: list[dict[str, Any]] = []
+    assigned_device_ids: set[int] = set()
     for index, ((route_kind, route_number), group_alarms) in enumerate(sorted(grouped.items(), key=lambda item: (item[0][0], item[0][1]))):
-        ordered = sorted(
-            group_alarms,
-            key=lambda item: (
-                int(item.get("device_number") or 0),
-                float(item.get("x") or 0.0),
-                float(item.get("y") or 0.0),
-            ),
-        )
+        filtered_group = []
+        for alarm in group_alarms:
+            alarm_id = alarm.get("id")
+            if alarm_id is not None and int(alarm_id) in assigned_device_ids:
+                continue
+            filtered_group.append(alarm)
+        ordered = _optimize_alarm_order((float(instrument["x"]), float(instrument["y"])), filtered_group, walls, close_ring=False)
+        if not ordered:
+            continue
+        for alarm in ordered:
+            if alarm.get("id") is not None:
+                assigned_device_ids.add(int(alarm["id"]))
         close_ring = False
         polyline = _build_polyline(
             start=(float(instrument["x"]), float(instrument["y"])),
@@ -240,6 +325,8 @@ def recalculate_cable_routes(
             close_ring=close_ring,
             trunk_anchor=trunk_anchor,
         )
+        if ordered:
+            polyline = _append_zc_terminal(polyline, walls)
         routes.append(
             {
                 "system_type": system,
@@ -247,7 +334,10 @@ def recalculate_cable_routes(
                 "route_kind": route_kind,
                 "route_number": route_number if route_number > 0 else index + 1,
                 "polyline_points": polyline,
-                "device_ids": [int(item["id"]) for item in ordered if item.get("id") is not None],
+                "device_ids": [
+                    int(item.get("id")) if item.get("id") is not None else -(device_index + 1)
+                    for device_index, item in enumerate(ordered)
+                ],
                 "warnings": [],
                 "length_m": route_length_m(polyline, scale_factor),
                 "is_manual": False,
@@ -287,6 +377,76 @@ def _project_point_to_segment(
     return start[0] + dx * factor, start[1] + dy * factor
 
 
+def _normalized_segment_parameter(
+    point: tuple[float, float],
+    start: tuple[float, float],
+    end: tuple[float, float],
+) -> float:
+    dx = end[0] - start[0]
+    dy = end[1] - start[1]
+    length_sq = dx * dx + dy * dy
+    if length_sq <= 1e-9:
+        return 0.0
+    factor = ((point[0] - start[0]) * dx + (point[1] - start[1]) * dy) / length_sq
+    return min(1.0, max(0.0, factor))
+
+
+def _segment_intersection_point(
+    a1: tuple[float, float],
+    a2: tuple[float, float],
+    b1: tuple[float, float],
+    b2: tuple[float, float],
+) -> tuple[float, float] | None:
+    if not _segments_intersect(a1, a2, b1, b2):
+        return None
+
+    denominator = ((a1[0] - a2[0]) * (b1[1] - b2[1])) - ((a1[1] - a2[1]) * (b1[0] - b2[0]))
+    if abs(denominator) <= 1e-9:
+        return None
+
+    determinant_a = (a1[0] * a2[1]) - (a1[1] * a2[0])
+    determinant_b = (b1[0] * b2[1]) - (b1[1] * b2[0])
+    x = ((determinant_a * (b1[0] - b2[0])) - ((a1[0] - a2[0]) * determinant_b)) / denominator
+    y = ((determinant_a * (b1[1] - b2[1])) - ((a1[1] - a2[1]) * determinant_b)) / denominator
+    return (x, y)
+
+
+def _wall_crossing_events(
+    polyline: list[tuple[float, float]],
+    walls: list[dict[str, Any]],
+) -> list[tuple[int, float]]:
+    events: list[tuple[int, float]] = []
+
+    for segment_index, (start, end) in enumerate(zip(polyline, polyline[1:])):
+        for wall_index, wall in enumerate(walls):
+            wall_id = int(wall.get("id") or wall_index + 1)
+            wall_start = (float(wall.get("x1") or 0.0), float(wall.get("y1") or 0.0))
+            wall_end = (float(wall.get("x2") or 0.0), float(wall.get("y2") or 0.0))
+            intersection = _segment_intersection_point(start, end, wall_start, wall_end)
+            if intersection is None:
+                continue
+            events.append((wall_id, _normalized_segment_parameter(intersection, wall_start, wall_end)))
+    return events
+
+
+def _wall_crossing_summary(
+    polyline: list[tuple[float, float]],
+    walls: list[dict[str, Any]],
+) -> tuple[int, float]:
+    events = _wall_crossing_events(polyline, walls)
+    positions_by_wall: dict[int, list[float]] = defaultdict(list)
+    for wall_id, position in events:
+        positions_by_wall[wall_id].append(position)
+
+    repeated_crossing_spread = 0.0
+    for positions in positions_by_wall.values():
+        if len(positions) < 2:
+            continue
+        repeated_crossing_spread += max(positions) - min(positions)
+
+    return len(events), round(repeated_crossing_spread, 6)
+
+
 def _build_polyline(
     *,
     start: tuple[float, float],
@@ -295,16 +455,35 @@ def _build_polyline(
     close_ring: bool,
     trunk_anchor: tuple[float, float] | None,
 ) -> list[list[float]]:
+    if close_ring and len(targets) == 1:
+        return _build_single_target_ring(start, targets[0], walls)
+
     points: list[tuple[float, float]] = [start]
     current = start
     if trunk_anchor and _distance(start, trunk_anchor) > 1e-6:
-        points.extend(_connector_points(start, trunk_anchor, walls))
+        points.extend(_connector_points(start, trunk_anchor, walls, preferred_axis=None, existing_points=points))
         current = points[-1]
     for target in targets:
-        points.extend(_connector_points(current, target, walls))
+        points.extend(
+            _connector_points(
+                current,
+                target,
+                walls,
+                preferred_axis=_last_segment_axis(points),
+                existing_points=points,
+            )
+        )
         current = points[-1]
     if close_ring and targets:
-        points.extend(_connector_points(current, start, walls))
+        points.extend(
+            _connector_points(
+                current,
+                start,
+                walls,
+                preferred_axis=_last_segment_axis(points),
+                existing_points=points,
+            )
+        )
     return _dedupe_polyline(points)
 
 
@@ -312,35 +491,311 @@ def _connector_points(
     start: tuple[float, float],
     end: tuple[float, float],
     walls: list[dict[str, Any]],
+    preferred_axis: str | None = None,
+    existing_points: list[tuple[float, float]] | None = None,
 ) -> list[tuple[float, float]]:
-    if _distance(start, end) <= 1e-6:
-        return [end]
-    horizontal_first = [start, (end[0], start[1]), end]
-    vertical_first = [start, (start[0], end[1]), end]
-    best = horizontal_first
-    best_score = _polyline_score(horizontal_first, walls)
-    alt_score = _polyline_score(vertical_first, walls)
-    if alt_score < best_score:
-        best = vertical_first
+    best = _choose_connector_variant(
+        start,
+        end,
+        walls,
+        preferred_axis=preferred_axis,
+        existing_points=existing_points,
+    )
     return best[1:]
 
 
-def _polyline_score(polyline: list[tuple[float, float]], walls: list[dict[str, Any]]) -> tuple[int, float]:
+def _alarm_point(alarm: dict[str, Any]) -> tuple[float, float]:
+    return float(alarm.get("x") or 0.0), float(alarm.get("y") or 0.0)
+
+
+def _device_sort_key(alarm: dict[str, Any]) -> tuple[Any, ...]:
+    address = alarm.get("address")
+    address_text = str(address or "").strip()
+    if address_text.isdigit():
+        address_key: tuple[int, Any] = (0, int(address_text))
+    else:
+        address_key = (1, address_text)
     return (
-        _count_wall_crossings(polyline, walls),
-        sum(_distance(start, end) for start, end in zip(polyline, polyline[1:])),
+        int(alarm.get("loop_number") or 0),
+        int(alarm.get("device_number") or 0),
+        address_key,
+        float(alarm.get("x") or 0.0),
+        float(alarm.get("y") or 0.0),
+        int(alarm.get("id") or 0),
+    )
+
+
+def _optimize_alarm_order(
+    start: tuple[float, float],
+    alarms: list[dict[str, Any]],
+    walls: list[dict[str, Any]],
+    *,
+    close_ring: bool,
+) -> list[dict[str, Any]]:
+    if len(alarms) <= 1:
+        return list(alarms)
+
+    remaining = sorted(alarms, key=_device_sort_key)
+    ordered: list[dict[str, Any]] = []
+    current = start
+    while remaining:
+        next_alarm = min(
+            remaining,
+            key=lambda item: _best_connector_score(current, _alarm_point(item), walls) + (_device_sort_key(item),),
+        )
+        ordered.append(next_alarm)
+        remaining.remove(next_alarm)
+        current = _alarm_point(next_alarm)
+
+    best = list(ordered)
+    best_score = _ordered_alarm_score(start, best, walls, close_ring=close_ring)
+    improved = True
+    while improved and len(best) >= 3:
+        improved = False
+        for left in range(len(best) - 1):
+            for right in range(left + 1, len(best)):
+                candidate = best[:left] + list(reversed(best[left : right + 1])) + best[right + 1 :]
+                candidate_score = _ordered_alarm_score(start, candidate, walls, close_ring=close_ring)
+                if candidate_score < best_score:
+                    best = candidate
+                    best_score = candidate_score
+                    improved = True
+                    break
+            if improved:
+                break
+    return best
+
+
+def _ordered_alarm_score(
+    start: tuple[float, float],
+    alarms: list[dict[str, Any]],
+    walls: list[dict[str, Any]],
+    *,
+    close_ring: bool,
+) -> tuple[int, float, float]:
+    polyline = _build_polyline(
+        start=start,
+        targets=[_alarm_point(alarm) for alarm in alarms],
+        walls=walls,
+        close_ring=close_ring,
+        trunk_anchor=None,
+    )
+    return _polyline_score([(float(point[0]), float(point[1])) for point in polyline], walls)
+
+
+def _best_connector_score(
+    start: tuple[float, float],
+    end: tuple[float, float],
+    walls: list[dict[str, Any]],
+) -> tuple[int, float, float]:
+    return min((_polyline_score(candidate, walls) for candidate in _connector_variants(start, end)), default=(0, 0.0, 0.0))
+
+
+def _connector_variants(
+    start: tuple[float, float],
+    end: tuple[float, float],
+) -> list[list[tuple[float, float]]]:
+    if _distance(start, end) <= 1e-6:
+        return [[start]]
+    candidates = [
+        _dedupe_tuple_polyline([start, (end[0], start[1]), end]),
+        _dedupe_tuple_polyline([start, (start[0], end[1]), end]),
+    ]
+    unique: list[list[tuple[float, float]]] = []
+    seen: set[tuple[tuple[float, float], ...]] = set()
+    for candidate in candidates:
+        signature = tuple((round(point[0], 3), round(point[1], 3)) for point in candidate)
+        if signature in seen:
+            continue
+        seen.add(signature)
+        unique.append(candidate)
+    return unique or [[start, end]]
+
+
+def _choose_connector_variant(
+    start: tuple[float, float],
+    end: tuple[float, float],
+    walls: list[dict[str, Any]],
+    *,
+    preferred_axis: str | None,
+    existing_points: list[tuple[float, float]] | None = None,
+) -> list[tuple[float, float]]:
+    variants = _connector_variants(start, end)
+    ranked = sorted(
+        variants,
+        key=lambda candidate: (
+            *(_polyline_score(
+                (existing_points or []) + candidate[1:] if existing_points else candidate,
+                walls,
+            )),
+            0 if preferred_axis is None or _first_segment_axis(candidate) == preferred_axis else 1,
+            tuple((round(point[0], 3), round(point[1], 3)) for point in candidate),
+        ),
+    )
+    return ranked[0]
+
+
+def _build_single_target_ring(
+    start: tuple[float, float],
+    target: tuple[float, float],
+    walls: list[dict[str, Any]],
+) -> list[list[float]]:
+    outgoing_variants = sorted(
+        _connector_variants(start, target),
+        key=lambda candidate: (
+            _polyline_score(candidate, walls)[0],
+            _polyline_score(candidate, walls)[1],
+            tuple((round(point[0], 3), round(point[1], 3)) for point in candidate),
+        ),
+    )
+    return_variants = sorted(
+        _connector_variants(target, start),
+        key=lambda candidate: (
+            _polyline_score(candidate, walls)[0],
+            _polyline_score(candidate, walls)[1],
+            tuple((round(point[0], 3), round(point[1], 3)) for point in candidate),
+        ),
+    )
+
+    for outgoing in outgoing_variants:
+        outgoing_segments = _segment_signature_set(outgoing)
+        for returning in return_variants:
+            if outgoing_segments.intersection(_segment_signature_set(returning)):
+                continue
+            return _dedupe_polyline(outgoing + returning[1:])
+    return _dedupe_polyline(_single_target_ring_detour(start, target, walls))
+
+
+def _single_target_ring_detour(
+    start: tuple[float, float],
+    target: tuple[float, float],
+    walls: list[dict[str, Any]],
+) -> list[tuple[float, float]]:
+    dx = target[0] - start[0]
+    dy = target[1] - start[1]
+    candidates: list[list[tuple[float, float]]] = []
+    if abs(dx) <= 1e-6:
+        for sign in (-1.0, 1.0):
+            offset = sign * SINGLE_RING_DETOUR_PX
+            candidates.append(
+                [
+                    start,
+                    (start[0] + offset, start[1]),
+                    (start[0] + offset, target[1]),
+                    target,
+                    (start[0] - offset, target[1]),
+                    (start[0] - offset, start[1]),
+                    start,
+                ]
+            )
+    elif abs(dy) <= 1e-6:
+        for sign in (-1.0, 1.0):
+            offset = sign * SINGLE_RING_DETOUR_PX
+            candidates.append(
+                [
+                    start,
+                    (start[0], start[1] + offset),
+                    (target[0], start[1] + offset),
+                    target,
+                    (target[0], start[1] - offset),
+                    (start[0], start[1] - offset),
+                    start,
+                ]
+            )
+    else:
+        candidates.append([start, (target[0], start[1]), target, (start[0], target[1]), start])
+        candidates.append([start, (start[0], target[1]), target, (target[0], start[1]), start])
+
+    best = min(candidates, key=lambda candidate: _polyline_score(candidate, walls))
+    return _dedupe_tuple_polyline(best)
+
+
+def _append_zc_terminal(polyline: list[list[float]], walls: list[dict[str, Any]]) -> list[list[float]]:
+    if len(polyline) < 2:
+        return polyline
+    last = (float(polyline[-1][0]), float(polyline[-1][1]))
+    previous = (float(polyline[-2][0]), float(polyline[-2][1]))
+    terminal = _select_zc_terminal(last, previous, walls)
+    return _dedupe_polyline([*[(float(point[0]), float(point[1])) for point in polyline], terminal])
+
+
+def _select_zc_terminal(
+    last_point: tuple[float, float],
+    previous_point: tuple[float, float],
+    walls: list[dict[str, Any]],
+) -> tuple[float, float]:
+    dx = last_point[0] - previous_point[0]
+    dy = last_point[1] - previous_point[1]
+    directions: list[tuple[float, float]]
+    if abs(dx) > abs(dy) and abs(dx) > 1e-6:
+        forward = (1.0 if dx > 0 else -1.0, 0.0)
+        directions = [forward, (0.0, -1.0), (0.0, 1.0), (-forward[0], 0.0)]
+    elif abs(dy) > 1e-6:
+        forward = (0.0, 1.0 if dy > 0 else -1.0)
+        directions = [forward, (-1.0, 0.0), (1.0, 0.0), (0.0, -forward[1])]
+    else:
+        directions = [(1.0, 0.0), (0.0, -1.0), (0.0, 1.0), (-1.0, 0.0)]
+
+    candidates = [
+        (
+            last_point[0] + (direction[0] * ZC_ROUTE_OFFSET_PX),
+            last_point[1] + (direction[1] * ZC_ROUTE_OFFSET_PX),
+        )
+        for direction in directions
+    ]
+    best = min(candidates, key=lambda candidate: _polyline_score([last_point, candidate], walls))
+    return best
+
+
+def _last_segment_axis(points: list[tuple[float, float]]) -> str | None:
+    if len(points) < 2:
+        return None
+    return _axis_between(points[-2], points[-1])
+
+
+def _first_segment_axis(polyline: list[tuple[float, float]]) -> str | None:
+    if len(polyline) < 2:
+        return None
+    return _axis_between(polyline[0], polyline[1])
+
+
+def _axis_between(start: tuple[float, float], end: tuple[float, float]) -> str | None:
+    if abs(end[0] - start[0]) > abs(end[1] - start[1]):
+        return "horizontal"
+    if abs(end[1] - start[1]) > 1e-6:
+        return "vertical"
+    return None
+
+
+def _segment_signature_set(polyline: list[tuple[float, float]]) -> set[tuple[tuple[float, float], tuple[float, float]]]:
+    signatures: set[tuple[tuple[float, float], tuple[float, float]]] = set()
+    for start, end in zip(polyline, polyline[1:]):
+        normalized = tuple(sorted(((round(start[0], 3), round(start[1], 3)), (round(end[0], 3), round(end[1], 3)))))
+        signatures.add(normalized)  # type: ignore[arg-type]
+    return signatures
+
+
+def _dedupe_tuple_polyline(points: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    deduped: list[tuple[float, float]] = []
+    for point in points:
+        normalized = (round(float(point[0]), 3), round(float(point[1]), 3))
+        if deduped and deduped[-1] == normalized:
+            continue
+        deduped.append(normalized)
+    return deduped
+
+
+def _polyline_score(polyline: list[tuple[float, float]], walls: list[dict[str, Any]]) -> tuple[int, float, float]:
+    crossings, repeated_crossing_spread = _wall_crossing_summary(polyline, walls)
+    return (
+        crossings,
+        round(sum(_distance(start, end) for start, end in zip(polyline, polyline[1:])), 6),
+        repeated_crossing_spread,
     )
 
 
 def _count_wall_crossings(polyline: list[tuple[float, float]], walls: list[dict[str, Any]]) -> int:
-    count = 0
-    for start, end in zip(polyline, polyline[1:]):
-        for wall in walls:
-            wall_start = (float(wall.get("x1") or 0.0), float(wall.get("y1") or 0.0))
-            wall_end = (float(wall.get("x2") or 0.0), float(wall.get("y2") or 0.0))
-            if _segments_intersect(start, end, wall_start, wall_end):
-                count += 1
-    return count
+    return _wall_crossing_summary(polyline, walls)[0]
 
 
 def _segments_intersect(
