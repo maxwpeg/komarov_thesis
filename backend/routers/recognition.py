@@ -6,10 +6,12 @@ import json
 
 from fastapi import APIRouter, Depends, Query
 
+from backend.dependencies import get_pipeline_use_cases
 from backend.config import settings
 from backend.dependencies import get_recognition_use_cases
+from backend.modules.pipeline.application.use_cases import PipelineUseCases
 from backend.modules.recognition.application.use_cases import RecognitionUseCases
-from backend.schemas import FeedbackCreate, MessageRead, RecognitionFeedbackRead, RecognitionProcessRead, RecognitionRead
+from backend.schemas import FeedbackCreate, MessageRead, RecognitionFeedbackRead, RecognitionFeedbackStatsRead, RecognitionProcessRead, RecognitionRead
 
 
 router = APIRouter(tags=["recognition"])
@@ -51,6 +53,13 @@ def submit_floor_plan_recognition_feedback(
     service: RecognitionUseCases = Depends(get_recognition_use_cases),
 ) -> RecognitionFeedbackRead:
     return service.submit_feedback_sample(floor_plan_id)
+
+
+@router.get("/api/recognition-feedback/stats", response_model=RecognitionFeedbackStatsRead)
+def get_recognition_feedback_stats(
+    service: PipelineUseCases = Depends(get_pipeline_use_cases),
+) -> RecognitionFeedbackStatsRead:
+    return RecognitionFeedbackStatsRead.model_validate(service.get_feedback_stats())
 
 
 @router.post("/feedback", response_model=MessageRead)

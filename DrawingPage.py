@@ -8,18 +8,59 @@ import numpy as np
 from reportlab.lib import colors
 from reportlab.pdfbase import pdfmetrics
 
+from backend.signal_planning import DETECTOR_SYMBOL_HALF_SIZE_PX, ZC_ROUTE_OFFSET_PX, ZC_SYMBOL_HALF_SIZE_PX, should_show_zc_terminator
 from Page import Page
 from consts import *
 
 Point = tuple[float, float]
 Segment = tuple[Point, Point]
 
-DISPLAY_ROUTE_SPACING = 4.0
+PDF_CABLE_ROUTE_STROKE_WIDTH = 1.6
+DISPLAY_ROUTE_SPACING = PDF_CABLE_ROUTE_STROKE_WIDTH
 ZC_LABEL_TEXT = "ZC"
 ARK_LABEL_TEXT = "ARK"
 ZC_LABEL_FONT_SIZE = 8.0
 FIRE_ALARM_LABEL_FONT_SIZE = 8.0
 SIGNAL_LABEL_FONT_SIZE = 9.0
+ZC_SIDE_VECTORS: dict[str, Point] = {
+    "east": (1.0, 0.0),
+    "west": (-1.0, 0.0),
+    "north": (0.0, -1.0),
+    "south": (0.0, 1.0),
+}
+FIRE_ALARM_AUTO_POINTS: tuple[Point, ...] = (
+    (2.2, -6.6),
+    (-1.2, -0.8),
+    (2.6, -0.8),
+    (-2.2, 6.6),
+    (1.2, 0.8),
+    (-2.6, 0.8),
+)
+FIRE_ALARM_MANUAL_POINTS: tuple[Point, ...] = (
+    (-5.5, -3.5),
+    (-4.8, -0.2),
+    (-3.0, 2.4),
+    (0.0, 3.2),
+    (3.0, 2.4),
+    (4.8, -0.2),
+    (5.5, -3.5),
+)
+FIRE_ALARM_MANUAL_STEM: tuple[Point, Point] = ((0.0, 3.2), (0.0, 8.0))
+EDITOR_SYMBOL_REFERENCE_SIZE = 18.0
+EXIT_SIGN_RADIUS = 13.0
+EXIT_SIGN_CROSS_RATIO = 7.0 / 13.0
+SIREN_BODY_X = -10.2
+SIREN_BODY_Y = -9.0
+SIREN_BODY_WIDTH = 7.2
+SIREN_BODY_HEIGHT = 18.0
+SIREN_HORN_POINTS: tuple[Point, ...] = (
+    (-3.0, -9.0),
+    (9.6, -22.0),
+    (9.6, 22.0),
+    (-3.0, 9.0),
+)
+SIREN_HALF_WIDTH = 10.2
+SIREN_HALF_HEIGHT = 22.0
 
 
 @dataclass(frozen=True)
@@ -198,6 +239,12 @@ ZKSPC_COLOR_PALETTE: tuple[str, ...] = (
     "#c026d3",
     "#0891b2",
 )
+
+SOUE_COLOR_HEX = "#0000FF"
+SOUE_COLOR = colors.HexColor(SOUE_COLOR_HEX)
+COMMON_SIGNAL_SYSTEM = "common"
+SUPPORTED_SIGNAL_SYSTEMS = {"addressable", "non_addressable", COMMON_SIGNAL_SYSTEM}
+SUPPORTED_ACTIVE_SIGNAL_SYSTEMS = {"addressable", "non_addressable"}
 
 
 DIMENSION_EXTENSION_LENGTH = 10.0 * mm
@@ -555,26 +602,156 @@ def find_room_badge_center(room: dict, radius: float, transform: PlanTransform) 
     return center if center is not None else (bounds[0] + inset_px, bounds[1] + inset_px)
 
 
+def _find_room_badge_rect(
+    c,
+    room: dict,
+    text: str,
+    radius: float,
+    font_size: float,
+    transform: PlanTransform,
+    obstacles: list[dict[str, float]],
+    bounds: dict[str, float] | None,
+) -> dict[str, object] | None:
+    preferred_center = find_room_badge_center(room, radius, transform) or _room_center(room)
+    if preferred_center is None:
+        return None
+    points = room.get("boundary_points") or []
+    region_constraint = {
+        "polygons": [points] if len(points) >= 3 else [],
+        "preferred_points": [preferred_center],
+        "bounds": _room_bounds(room),
+    }
+    text_placement = _place_plan_text_pdf(
+        c,
+        text=str(text),
+        font_size=font_size,
+        anchor=preferred_center,
+        obstacles=obstacles,
+        bounds=bounds,
+        strategy="region",
+        region_constraint=region_constraint,
+    )
+    if text_placement is None or text_placement.get("rect") is None:
+        return None
+    center_x, center_y = _rect_center(text_placement["rect"])
+    badge_rect = {
+        "x": center_x - radius,
+        "y": center_y - radius,
+        "width": radius * 2.0,
+        "height": radius * 2.0,
+    }
+    if any(_rects_intersect(badge_rect, obstacle) for obstacle in obstacles):
+        return None
+    if not _rect_inside_bounds(badge_rect, bounds):
+        return None
+    return {
+        "rect": badge_rect,
+        "leader_polyline": text_placement.get("leader_polyline"),
+        "overflow": bool(text_placement.get("overflow")),
+    }
+
+
 def draw_fire_alarm_symbol(c, x: float, y: float, device_type: str | None, size: float = 4.5 * mm) -> None:
     half = size / 2.0
+    scale = size / EDITOR_SYMBOL_REFERENCE_SIZE
     c.saveState()
     c.setStrokeColor(colors.red)
     c.setFillColor(colors.white)
     c.setLineWidth(max(0.7, size * 0.08))
+    c.setLineCap(1)
+    c.setLineJoin(1)
     c.rect(x - half, y - half, size, size, stroke=1, fill=1)
 
     if device_type == "manual_call_point":
-        c.line(x, y - size * 0.10, x - size * 0.18, y + size * 0.08)
-        c.line(x - size * 0.18, y + size * 0.08, x - size * 0.34, y + size * 0.28)
-        c.line(x, y - size * 0.10, x + size * 0.18, y + size * 0.08)
-        c.line(x + size * 0.18, y + size * 0.08, x + size * 0.34, y + size * 0.28)
-        c.line(x, y - size * 0.10, x, y - size * 0.34)
+        manual_path = c.beginPath()
+        first_point = FIRE_ALARM_MANUAL_POINTS[0]
+        manual_path.moveTo(x + (first_point[0] * scale), y + (first_point[1] * scale))
+        for point_x, point_y in FIRE_ALARM_MANUAL_POINTS[1:]:
+            manual_path.lineTo(x + (point_x * scale), y + (point_y * scale))
+        c.drawPath(manual_path, stroke=1, fill=0)
+        c.line(
+            x + (FIRE_ALARM_MANUAL_STEM[0][0] * scale),
+            y + (FIRE_ALARM_MANUAL_STEM[0][1] * scale),
+            x + (FIRE_ALARM_MANUAL_STEM[1][0] * scale),
+            y + (FIRE_ALARM_MANUAL_STEM[1][1] * scale),
+        )
     else:
-        c.line(x - size * 0.28, y - size * 0.20, x - size * 0.10, y + size * 0.08)
-        c.line(x - size * 0.10, y + size * 0.08, x + size * 0.04, y - size * 0.05)
-        c.line(x + size * 0.04, y - size * 0.05, x + size * 0.26, y + size * 0.22)
+        auto_path = c.beginPath()
+        first_point = FIRE_ALARM_AUTO_POINTS[0]
+        auto_path.moveTo(x + (first_point[0] * scale), y + (first_point[1] * scale))
+        for point_x, point_y in FIRE_ALARM_AUTO_POINTS[1:]:
+            auto_path.lineTo(x + (point_x * scale), y + (point_y * scale))
+        c.drawPath(auto_path, stroke=1, fill=0)
 
     c.restoreState()
+
+
+def _rotate_half_extents(half_width: float, half_height: float, rotation_deg: float) -> tuple[float, float]:
+    angle_rad = math.radians(float(rotation_deg or 0.0) % 360.0)
+    sin_value = abs(math.sin(angle_rad))
+    cos_value = abs(math.cos(angle_rad))
+    return (
+        (half_width * cos_value) + (half_height * sin_value),
+        (half_width * sin_value) + (half_height * cos_value),
+    )
+
+
+def _soue_device_symbol_half_extents(
+    device_type: str | None,
+    size: float = 4.5 * mm,
+    rotation_deg: float = 0.0,
+) -> tuple[float, float]:
+    scale = size / EDITOR_SYMBOL_REFERENCE_SIZE
+    if device_type == "siren":
+        return _rotate_half_extents(SIREN_HALF_WIDTH * scale, SIREN_HALF_HEIGHT * scale, rotation_deg)
+    radius = EXIT_SIGN_RADIUS * scale
+    return radius, radius
+
+
+def draw_soue_device_symbol(
+    c,
+    x: float,
+    y: float,
+    device_type: str | None,
+    size: float = 4.5 * mm,
+    rotation_deg: float = 0.0,
+) -> tuple[float, float]:
+    stroke = SOUE_COLOR
+    scale = size / EDITOR_SYMBOL_REFERENCE_SIZE
+    half_width, half_height = _soue_device_symbol_half_extents(device_type, size, rotation_deg)
+    c.saveState()
+    c.translate(x, y)
+    if device_type == "siren" and abs(float(rotation_deg or 0.0)) > 1e-6:
+        c.rotate(float(rotation_deg))
+    c.setStrokeColor(stroke)
+    c.setFillColor(colors.white)
+    c.setLineWidth(max(0.7, size * 0.08))
+
+    if device_type == "siren":
+        c.rect(
+            SIREN_BODY_X * scale,
+            SIREN_BODY_Y * scale,
+            SIREN_BODY_WIDTH * scale,
+            SIREN_BODY_HEIGHT * scale,
+            stroke=1,
+            fill=1,
+        )
+        horn_path = c.beginPath()
+        first_point = SIREN_HORN_POINTS[0]
+        horn_path.moveTo(first_point[0] * scale, first_point[1] * scale)
+        for point_x, point_y in SIREN_HORN_POINTS[1:]:
+            horn_path.lineTo(point_x * scale, point_y * scale)
+        horn_path.close()
+        c.drawPath(horn_path, stroke=1, fill=1)
+        c.restoreState()
+        return half_width, half_height
+
+    c.circle(0.0, 0.0, half_width, stroke=1, fill=1)
+    cross_offset = half_width * EXIT_SIGN_CROSS_RATIO
+    c.line(-cross_offset, -cross_offset, cross_offset, cross_offset)
+    c.line(-cross_offset, cross_offset, cross_offset, -cross_offset)
+    c.restoreState()
+    return half_width, half_height
 
 
 def _get_fire_alarm_code(alarm: dict, floor_number: object | None, fallback_number: int = 1) -> str:
@@ -585,9 +762,115 @@ def _get_fire_alarm_code(alarm: dict, floor_number: object | None, fallback_numb
     return f"{floor_text}{prefix}{loop}.{address}"
 
 
-def _measure_text_rect(c, center_x: float, center_y: float, text: str, font_size: float, padding_x: float = 3.0) -> dict[str, float]:
+def _get_soue_device_code(device: dict, floor_number: object | None, fallback_number: int = 1) -> str:
+    floor_text = str(floor_number if floor_number is not None else 1).strip() or "1"
+    prefix = "BIAS1" if device.get("device_type") == "siren" else "BIAL2"
+    device_number = str(device.get("device_number") or fallback_number).strip() or str(fallback_number)
+    return f"{floor_text}{prefix}.{device_number}"
+
+
+def _normalize_signal_system_type(value: object | None) -> str:
+    normalized = str(value or "").strip()
+    return normalized if normalized in SUPPORTED_SIGNAL_SYSTEMS else "non_addressable"
+
+
+def _normalize_active_signal_system_type(value: object | None) -> str:
+    normalized = _normalize_signal_system_type(value)
+    return normalized if normalized in SUPPORTED_ACTIVE_SIGNAL_SYSTEMS else "non_addressable"
+
+
+def _filter_items_by_system_type(items: list[dict], system_type: object | None) -> list[dict]:
+    normalized_system_type = _normalize_signal_system_type(system_type)
+    return [
+        item
+        for item in (items or [])
+        if _normalize_signal_system_type(item.get("system_type")) == normalized_system_type
+    ]
+
+
+def _active_floor_plan_signal_system(floor_plan_data: dict) -> str:
+    return _normalize_active_signal_system_type(floor_plan_data.get("active_signal_system_type"))
+
+
+def _all_items_missing_system_type(items: list[dict]) -> bool:
+    return bool(items) and all(not str(item.get("system_type") or "").strip() for item in items)
+
+
+def _visible_signal_instruments_for_sheet(floor_plan_data: dict, sheet_kind: str) -> list[dict]:
+    instruments = list(floor_plan_data.get("signal_instruments", []) or [])
+    if sheet_kind in {"sps", "soue"}:
+        common_instruments = _filter_items_by_system_type(instruments, COMMON_SIGNAL_SYSTEM)
+        if common_instruments or not _all_items_missing_system_type(instruments):
+            return common_instruments
+    return instruments
+
+
+def _visible_fire_alarms_for_sheet(floor_plan_data: dict, sheet_kind: str) -> list[dict]:
+    alarms = list(floor_plan_data.get("fire_alarms", []) or [])
+    if sheet_kind == "sps":
+        return _filter_items_by_system_type(alarms, _active_floor_plan_signal_system(floor_plan_data))
+    return alarms
+
+
+def _visible_soue_devices_for_sheet(floor_plan_data: dict, sheet_kind: str) -> list[dict]:
+    devices = list(floor_plan_data.get("soue_devices", []) or [])
+    if sheet_kind == "soue":
+        common_devices = _filter_items_by_system_type(devices, COMMON_SIGNAL_SYSTEM)
+        if common_devices or not _all_items_missing_system_type(devices):
+            return common_devices
+    return devices
+
+
+def _get_signal_instrument_label_text(instrument: dict | None) -> str | None:
+    if not instrument:
+        return None
+    if instrument.get("instrument_type") == "control_panel":
+        return ARK_LABEL_TEXT
+    equipment_name = str(instrument.get("equipment_name") or "").strip()
+    if equipment_name:
+        return equipment_name
+    explicit_name = str(instrument.get("name") or "").strip()
+    if explicit_name:
+        return explicit_name
+    return None
+
+
+def _soue_device_counter_key(device_type: object | None) -> str:
+    return "siren" if str(device_type or "") == "siren" else "non_siren"
+
+
+def _dedupe_signal_instruments_for_sheet(instruments: list[dict]) -> list[dict]:
+    unique: list[dict] = []
+    seen: set[tuple[str, int, int, str]] = set()
+    for instrument in instruments:
+        instrument_type = str(instrument.get("instrument_type") or "")
+        signature = (
+            instrument_type,
+            int(round(float(instrument.get("x") or 0.0) * 10.0)),
+            int(round(float(instrument.get("y") or 0.0) * 10.0)),
+            "" if instrument_type == "control_panel" else str(instrument.get("name") or "").strip(),
+        )
+        if signature in seen:
+            continue
+        seen.add(signature)
+        unique.append(instrument)
+    return unique
+
+
+def _measure_text_rect(
+    c,
+    center_x: float,
+    center_y: float,
+    text: str,
+    font_size: float,
+    padding_x: float = 3.0,
+    rotation: float = 0.0,
+) -> dict[str, float]:
     width = c.stringWidth(str(text or ""), DEFAULT_FONT_NAME, font_size) + (padding_x * 2.0)
     height = max(font_size + 2.0, font_size * 1.2)
+    quarter_turn = int(round(rotation / 90.0)) % 4
+    if quarter_turn in {1, 3}:
+        width, height = height, width
     return {
         "x": center_x - (width / 2.0),
         "y": center_y - (height / 2.0),
@@ -605,11 +888,15 @@ def _measure_text_rect_from_offset(
     dx: object | None,
     dy: object | None,
     padding_x: float = 3.0,
+    rotation: float = 0.0,
 ) -> dict[str, float] | None:
     if dx is None or dy is None:
         return None
     width = c.stringWidth(str(text or ""), DEFAULT_FONT_NAME, font_size) + (padding_x * 2.0)
     height = max(font_size + 2.0, font_size * 1.2)
+    quarter_turn = int(round(rotation / 90.0)) % 4
+    if quarter_turn in {1, 3}:
+        width, height = height, width
     return {
         "x": float(anchor_x) + float(dx),
         "y": float(anchor_y) + float(dy),
@@ -667,6 +954,308 @@ def _polyline_obstacles(points: list[Point], padding: float = 4.0) -> list[dict[
     return [_line_obstacle(start, end, padding) for start, end in zip(points, points[1:])]
 
 
+def _merge_rect_bounds(bounds_list: list[dict[str, float] | None]) -> dict[str, float] | None:
+    valid = [bounds for bounds in bounds_list if bounds is not None]
+    if not valid:
+        return None
+    min_x = min(bounds["x"] for bounds in valid)
+    min_y = min(bounds["y"] for bounds in valid)
+    max_x = max(bounds["x"] + bounds["width"] for bounds in valid)
+    max_y = max(bounds["y"] + bounds["height"] for bounds in valid)
+    return {
+        "x": min_x,
+        "y": min_y,
+        "width": max_x - min_x,
+        "height": max_y - min_y,
+    }
+
+
+def _rect_center(rect: dict[str, float]) -> Point:
+    return rect["x"] + (rect["width"] / 2.0), rect["y"] + (rect["height"] / 2.0)
+
+
+def _rect_contains_point(rect: dict[str, float] | None, point: Point) -> bool:
+    if rect is None:
+        return False
+    return (
+        point[0] >= rect["x"]
+        and point[0] <= rect["x"] + rect["width"]
+        and point[1] >= rect["y"]
+        and point[1] <= rect["y"] + rect["height"]
+    )
+
+
+def _normalize_vector(vector: Point | None) -> Point | None:
+    if vector is None:
+        return None
+    length = math.hypot(vector[0], vector[1])
+    if length <= 1e-6:
+        return None
+    return vector[0] / length, vector[1] / length
+
+
+def _build_direction_order(preferred_vector: Point | None) -> list[Point]:
+    directions = [
+        (1.0, 0.0),
+        (math.sqrt(0.5), -math.sqrt(0.5)),
+        (math.sqrt(0.5), math.sqrt(0.5)),
+        (-1.0, 0.0),
+        (-math.sqrt(0.5), -math.sqrt(0.5)),
+        (-math.sqrt(0.5), math.sqrt(0.5)),
+        (0.0, -1.0),
+        (0.0, 1.0),
+    ]
+    normalized = _normalize_vector(preferred_vector)
+    if normalized is None:
+        return directions
+    return sorted(directions, key=lambda item: -((item[0] * normalized[0]) + (item[1] * normalized[1])))
+
+
+def _point_in_any_polygon(point: Point, polygons: list[list[list[float]] | list[tuple[float, float]]]) -> bool:
+    if not polygons:
+        return True
+    return any(_point_in_polygon(point, polygon) for polygon in polygons if len(polygon) >= 3)
+
+
+def _region_bounds(polygons: list[list[list[float]] | list[tuple[float, float]]]) -> dict[str, float] | None:
+    return _merge_rect_bounds([
+        (
+            {
+                "x": bounds[0],
+                "y": bounds[1],
+                "width": bounds[2] - bounds[0],
+                "height": bounds[3] - bounds[1],
+            }
+            if bounds is not None
+            else None
+        )
+        for polygon in polygons
+        for bounds in [_room_bounds({"boundary_points": polygon}) if len(polygon) >= 3 else None]
+    ])
+
+
+def _rect_matches_region(rect: dict[str, float], region_constraint: dict[str, object] | None) -> bool:
+    if region_constraint is None:
+        return True
+    center = _rect_center(rect)
+    polygons = [
+        polygon
+        for polygon in region_constraint.get("polygons", [])
+        if isinstance(polygon, list) and len(polygon) >= 3
+    ]
+    if not _point_in_any_polygon(center, polygons):
+        return False
+    bounds = region_constraint.get("bounds")
+    return _rect_inside_bounds(rect, bounds if isinstance(bounds, dict) else None)
+
+
+def _leader_polyline_candidates(anchor: Point, rect: dict[str, float]) -> list[list[Point]]:
+    left_distance = abs(anchor[0] - rect["x"])
+    right_distance = abs(anchor[0] - (rect["x"] + rect["width"]))
+    top_distance = abs(anchor[1] - rect["y"])
+    bottom_distance = abs(anchor[1] - (rect["y"] + rect["height"]))
+    minimum = min(left_distance, right_distance, top_distance, bottom_distance)
+    if minimum == left_distance:
+        target = (rect["x"], min(max(anchor[1], rect["y"]), rect["y"] + rect["height"]))
+    elif minimum == right_distance:
+        target = (rect["x"] + rect["width"], min(max(anchor[1], rect["y"]), rect["y"] + rect["height"]))
+    elif minimum == top_distance:
+        target = (min(max(anchor[0], rect["x"]), rect["x"] + rect["width"]), rect["y"])
+    else:
+        target = (min(max(anchor[0], rect["x"]), rect["x"] + rect["width"]), rect["y"] + rect["height"])
+    if abs(anchor[0] - target[0]) <= 1e-6 or abs(anchor[1] - target[1]) <= 1e-6:
+        return [[anchor, target]]
+    return [
+        [anchor, (target[0], anchor[1]), target],
+        [anchor, (anchor[0], target[1]), target],
+    ]
+
+
+def _leader_polyline_clear(polyline: list[Point], anchor: Point, rect: dict[str, float], obstacles: list[dict[str, float]]) -> bool:
+    filtered = [obstacle for obstacle in obstacles if not _rect_contains_point(obstacle, anchor)]
+    for leader_obstacle in _polyline_obstacles(polyline, 3.0):
+        if any(_rects_intersect(leader_obstacle, obstacle) and not _rects_intersect(obstacle, rect) for obstacle in filtered):
+            return False
+    return True
+
+
+def _build_overflow_candidates(anchor: Point, width: float, height: float, bounds: dict[str, float] | None) -> list[dict[str, float]]:
+    if bounds is None:
+        return []
+    step = max(width * 0.55, height * 1.15, 18.0)
+    side_offsets = [0.0]
+    for index in range(1, 13):
+        side_offsets.extend((-(index * step), index * step))
+    side_specs = [
+        {
+            "distance": abs(anchor[1] - bounds["y"]),
+            "builder": lambda offset: {
+                "x": min(max(anchor[0] + offset - (width / 2.0), bounds["x"] + 8.0), bounds["x"] + bounds["width"] - width - 8.0),
+                "y": bounds["y"] + 8.0,
+                "width": width,
+                "height": height,
+            },
+        },
+        {
+            "distance": abs((bounds["y"] + bounds["height"]) - anchor[1]),
+            "builder": lambda offset: {
+                "x": min(max(anchor[0] + offset - (width / 2.0), bounds["x"] + 8.0), bounds["x"] + bounds["width"] - width - 8.0),
+                "y": bounds["y"] + bounds["height"] - height - 8.0,
+                "width": width,
+                "height": height,
+            },
+        },
+        {
+            "distance": abs(anchor[0] - bounds["x"]),
+            "builder": lambda offset: {
+                "x": bounds["x"] + 8.0,
+                "y": min(max(anchor[1] + offset - (height / 2.0), bounds["y"] + 8.0), bounds["y"] + bounds["height"] - height - 8.0),
+                "width": width,
+                "height": height,
+            },
+        },
+        {
+            "distance": abs((bounds["x"] + bounds["width"]) - anchor[0]),
+            "builder": lambda offset: {
+                "x": bounds["x"] + bounds["width"] - width - 8.0,
+                "y": min(max(anchor[1] + offset - (height / 2.0), bounds["y"] + 8.0), bounds["y"] + bounds["height"] - height - 8.0),
+                "width": width,
+                "height": height,
+            },
+        },
+    ]
+    candidates: list[dict[str, float]] = []
+    for spec in sorted(side_specs, key=lambda item: float(item["distance"])):
+        for offset in side_offsets:
+            candidates.append(spec["builder"](offset))
+    return candidates
+
+
+def _place_plan_text_pdf(
+    c,
+    *,
+    text: str,
+    font_size: float,
+    anchor: Point,
+    obstacles: list[dict[str, float]],
+    bounds: dict[str, float] | None,
+    strategy: str = "anchor",
+    symbol_half_width: float = 0.0,
+    symbol_half_height: float = 0.0,
+    preferred_offset: tuple[float, float] | None = None,
+    preferred_vector: Point | None = None,
+    preferred_side: int | None = None,
+    segment: tuple[Point, Point] | None = None,
+    region_constraint: dict[str, object] | None = None,
+    rotation: float = 0.0,
+) -> dict[str, object] | None:
+    if not str(text or "").strip():
+        return None
+    base_rect = _measure_text_rect(c, anchor[0], anchor[1], text, font_size, rotation=rotation)
+    width = base_rect["width"]
+    height = base_rect["height"]
+    candidates: list[dict[str, float]] = []
+    if preferred_offset is not None:
+        preferred_rect = _measure_text_rect_from_offset(
+            c,
+            anchor[0],
+            anchor[1],
+            text,
+            font_size,
+            preferred_offset[0],
+            preferred_offset[1],
+            rotation=rotation,
+        )
+        if preferred_rect is not None:
+            candidates.append(preferred_rect)
+            preferred_center = _rect_center(preferred_rect)
+            preferred_vector = (
+                preferred_center[0] - anchor[0],
+                preferred_center[1] - anchor[1],
+            )
+    if strategy == "segment" and segment is not None:
+        start, end = segment
+        dx = end[0] - start[0]
+        dy = end[1] - start[1]
+        length = math.hypot(dx, dy) or 1.0
+        tangent = (dx / length, dy / length)
+        normal = (-tangent[1], tangent[0])
+        midpoint = ((start[0] + end[0]) / 2.0, (start[1] + end[1]) / 2.0)
+        tangent_step = max(width * 0.5, 18.0)
+        tangent_offsets = [0.0, -tangent_step, tangent_step, -(tangent_step * 2.0), tangent_step * 2.0]
+        signs = [-1, 1] if preferred_side == -1 else [1, -1] if preferred_side == 1 else [1, -1]
+        normal_step = max(height * 0.75, 10.0)
+        for sign in signs:
+            for ring in range(6):
+                for tangent_offset in tangent_offsets:
+                    center_x = midpoint[0] + (normal[0] * sign * ((height / 2.0) + 8.0 + (ring * normal_step))) + (tangent[0] * tangent_offset)
+                    center_y = midpoint[1] + (normal[1] * sign * ((height / 2.0) + 8.0 + (ring * normal_step))) + (tangent[1] * tangent_offset)
+                    candidates.append(_measure_text_rect(c, center_x, center_y, text, font_size, rotation=rotation))
+    elif strategy == "region":
+        normalized_region = region_constraint or {}
+        polygons = [
+            polygon
+            for polygon in normalized_region.get("polygons", [])
+            if isinstance(polygon, list) and len(polygon) >= 3
+        ]
+        region_bounds = normalized_region.get("bounds")
+        if not isinstance(region_bounds, dict):
+            region_bounds = _region_bounds(polygons)
+            if region_constraint is not None:
+                region_constraint["bounds"] = region_bounds
+        preferred_points = [
+            tuple(point)
+            for point in normalized_region.get("preferred_points", [])
+            if point is not None
+        ]
+        for point in preferred_points:
+            candidates.append(_measure_text_rect(c, float(point[0]), float(point[1]), text, font_size, rotation=rotation))
+        if region_bounds is not None:
+            step_x = max(width * 0.55, 12.0)
+            step_y = max(height * 0.8, 12.0)
+            y = region_bounds["y"] + (height / 2.0)
+            while y <= region_bounds["y"] + region_bounds["height"] - (height / 2.0) + 1e-6:
+                x = region_bounds["x"] + (width / 2.0)
+                while x <= region_bounds["x"] + region_bounds["width"] - (width / 2.0) + 1e-6:
+                    if _point_in_any_polygon((x, y), polygons):
+                        candidates.append(_measure_text_rect(c, x, y, text, font_size, rotation=rotation))
+                    x += step_x
+                y += step_y
+    else:
+        for direction in _build_direction_order(preferred_vector):
+            for ring in range(6):
+                tangent_offsets = [0.0] if ring == 0 else [0.0, -(max(width, height) * 0.35), max(width, height) * 0.35]
+                for tangent_offset in tangent_offsets:
+                    normal = (-direction[1], direction[0])
+                    center_x = anchor[0] + (direction[0] * (symbol_half_width + 8.0 + (width / 2.0) + (ring * max(10.0, min(width, height))))) + (normal[0] * tangent_offset)
+                    center_y = anchor[1] + (direction[1] * (symbol_half_height + 8.0 + (height / 2.0) + (ring * max(10.0, min(width, height))))) + (normal[1] * tangent_offset)
+                    candidates.append(_measure_text_rect(c, center_x, center_y, text, font_size, rotation=rotation))
+
+    for candidate in candidates:
+        if not _rect_inside_bounds(candidate, bounds):
+            continue
+        if not _rect_matches_region(candidate, region_constraint):
+            continue
+        if any(_rects_intersect(candidate, obstacle) for obstacle in obstacles):
+            continue
+        return {"rect": candidate, "leader_polyline": None, "overflow": False}
+
+    for candidate in _build_overflow_candidates(anchor, width, height, bounds):
+        if any(_rects_intersect(candidate, obstacle) for obstacle in obstacles):
+            continue
+        leader = next(
+            (
+                polyline
+                for polyline in _leader_polyline_candidates(anchor, candidate)
+                if _leader_polyline_clear(polyline, anchor, candidate, obstacles)
+            ),
+            None,
+        )
+        if leader is not None:
+            return {"rect": candidate, "leader_polyline": leader, "overflow": True}
+    return None
+
+
 def _place_symbol_label(
     c,
     *,
@@ -678,28 +1267,18 @@ def _place_symbol_label(
     symbol_half_height: float,
     obstacles: list[dict[str, float]],
     bounds: dict[str, float] | None,
-) -> dict[str, float]:
-    horizontal_gap = symbol_half_width + 8.0
-    vertical_gap = symbol_half_height + 8.0
-    side_gap = symbol_half_height + 6.0
-    candidates = [
-        _measure_text_rect(c, anchor_x + horizontal_gap, anchor_y, text, font_size),
-        _measure_text_rect(c, anchor_x + horizontal_gap, anchor_y - vertical_gap, text, font_size),
-        _measure_text_rect(c, anchor_x + horizontal_gap, anchor_y + vertical_gap, text, font_size),
-        _measure_text_rect(c, anchor_x - horizontal_gap, anchor_y, text, font_size),
-        _measure_text_rect(c, anchor_x - horizontal_gap, anchor_y - vertical_gap, text, font_size),
-        _measure_text_rect(c, anchor_x - horizontal_gap, anchor_y + vertical_gap, text, font_size),
-        _measure_text_rect(c, anchor_x, anchor_y - side_gap, text, font_size),
-        _measure_text_rect(c, anchor_x, anchor_y + side_gap, text, font_size),
-    ]
-
-    for candidate in candidates:
-        if not _rect_inside_bounds(candidate, bounds):
-            continue
-        if any(_rects_intersect(candidate, obstacle) for obstacle in obstacles):
-            continue
-        return candidate
-    return candidates[0]
+) -> dict[str, object] | None:
+    return _place_plan_text_pdf(
+        c,
+        text=text,
+        font_size=font_size,
+        anchor=(anchor_x, anchor_y),
+        obstacles=obstacles,
+        bounds=bounds,
+        strategy="anchor",
+        symbol_half_width=symbol_half_width,
+        symbol_half_height=symbol_half_height,
+    )
 
 
 def draw_signal_instrument_symbol(c, x: float, y: float, instrument_type: str | None, size: float = 6.0 * mm) -> tuple[float, float]:
@@ -766,11 +1345,11 @@ def _segment_key(start: Point, end: Point) -> str | None:
     return f"v:{x}:{y1}:{y2}"
 
 
-def _spread_offsets(count: int) -> list[float]:
+def _spread_offsets(count: int, spacing_step: float = DISPLAY_ROUTE_SPACING) -> list[float]:
     if count <= 1:
         return [0.0]
     midpoint = (count - 1) / 2.0
-    return [(index - midpoint) * DISPLAY_ROUTE_SPACING for index in range(count)]
+    return [(index - midpoint) * spacing_step for index in range(count)]
 
 
 def _offset_segment(start: Point, end: Point, offset: float) -> tuple[str | None, Point, Point]:
@@ -813,7 +1392,12 @@ def _apply_route_offsets(polyline: list[Point], route_id: object, offset_lookup:
     return [(_round_display_value(point[0]), _round_display_value(point[1])) for point in display_points]
 
 
-def build_display_cable_routes_pdf(routes: list[dict], transform: PlanTransform) -> dict[object, list[Point]]:
+def build_display_cable_routes_pdf(
+    routes: list[dict],
+    transform: PlanTransform,
+    *,
+    spacing_step: float = DISPLAY_ROUTE_SPACING,
+) -> dict[object, list[Point]]:
     prepared = []
     for route_index, route in enumerate(routes or []):
         route_id = route.get("id", f"route-{route_index}")
@@ -859,7 +1443,7 @@ def build_display_cable_routes_pdf(routes: list[dict], transform: PlanTransform)
                 int(entry["route_index"]),
             ),
         )
-        offsets = _spread_offsets(len(ordered))
+        offsets = _spread_offsets(len(ordered), spacing_step)
         for index, entry in enumerate(ordered):
             offset_lookup[f"{entry['route_id']}:{entry['segment_index']}"] = offsets[index]
 
@@ -883,29 +1467,135 @@ def _terminal_direction(polyline: list[Point]) -> Point:
     return (1.0, 0.0)
 
 
-def _get_zc_label_layout_pdf(c, polyline: list[Point], obstacles: list[dict[str, float]], bounds: dict[str, float] | None) -> dict[str, float] | None:
+def _point_signature(point: Point | None) -> tuple[float, float] | None:
+    if point is None:
+        return None
+    return round(float(point[0]), 3), round(float(point[1]), 3)
+
+
+def _ordered_zc_sides(dx: float, dy: float) -> list[str]:
+    if abs(dx) <= 1e-6 and abs(dy) <= 1e-6:
+        return ["east", "north", "south", "west"]
+    return [
+        side
+        for side, _score in sorted(
+            (
+                (side, -((vector[0] * dx) + (vector[1] * dy)))
+                for side, vector in ZC_SIDE_VECTORS.items()
+            ),
+            key=lambda item: (item[1], item[0]),
+        )
+    ]
+
+
+def _infer_used_zc_side(center_point: Point, polyline: list[Point]) -> str | None:
+    center_signature = _point_signature(center_point)
+    for point in reversed(polyline):
+        if _point_signature(point) == center_signature:
+            continue
+        dx = float(point[0]) - float(center_point[0])
+        dy = float(point[1]) - float(center_point[1])
+        ordered = _ordered_zc_sides(dx, dy)
+        return ordered[0] if ordered else None
+    return None
+
+
+def _zc_candidate_point(center_point: Point, side: str) -> Point:
+    vector = ZC_SIDE_VECTORS.get(side, (1.0, 0.0))
+    return (
+        round(float(center_point[0]) + (vector[0] * ZC_ROUTE_OFFSET_PX), 3),
+        round(float(center_point[1]) + (vector[1] * ZC_ROUTE_OFFSET_PX), 3),
+    )
+
+
+def _zc_candidate_obstacles(center_point: Point, candidate_point: Point) -> list[dict[str, float]]:
+    return [
+        obstacle
+        for obstacle in (
+            _line_obstacle(center_point, candidate_point, 3.0),
+            _inflate_rect(
+                {
+                    "x": candidate_point[0] - ZC_SYMBOL_HALF_SIZE_PX,
+                    "y": candidate_point[1] - ZC_SYMBOL_HALF_SIZE_PX,
+                    "width": ZC_SYMBOL_HALF_SIZE_PX * 2.0,
+                    "height": ZC_SYMBOL_HALF_SIZE_PX * 2.0,
+                },
+                1.0,
+            ),
+        )
+        if obstacle is not None
+    ]
+
+
+def _resolve_zc_terminator_point_pdf(
+    route: dict,
+    display_polyline: list[Point],
+    device_lookup: dict[object, Point],
+    obstacles: list[dict[str, float]],
+) -> Point | None:
+    if not display_polyline:
+        return None
+    device_ids = route.get("device_ids") or []
+    last_device_id = device_ids[-1] if device_ids else None
+    center_point = device_lookup.get(last_device_id)
+    raw_endpoint = display_polyline[-1]
+    if center_point is None:
+        return raw_endpoint
+
+    base_polyline = display_polyline[:-1] if len(display_polyline) > 1 else list(display_polyline)
+    reference_point = base_polyline[-1] if base_polyline else raw_endpoint
+    blocked_side = _infer_used_zc_side(center_point, base_polyline)
+    ordered_sides = _ordered_zc_sides(
+        float(center_point[0]) - float(reference_point[0]),
+        float(center_point[1]) - float(reference_point[1]),
+    )
+    if blocked_side in ordered_sides and len(ordered_sides) > 1:
+        ordered_sides = [side for side in ordered_sides if side != blocked_side] + [blocked_side]
+
+    device_obstacles = [
+        _inflate_rect(
+            {
+                "x": device_point[0] - DETECTOR_SYMBOL_HALF_SIZE_PX,
+                "y": device_point[1] - DETECTOR_SYMBOL_HALF_SIZE_PX,
+                "width": DETECTOR_SYMBOL_HALF_SIZE_PX * 2.0,
+                "height": DETECTOR_SYMBOL_HALF_SIZE_PX * 2.0,
+            },
+            1.0,
+        )
+        for device_id, device_point in device_lookup.items()
+        if device_id != last_device_id
+    ]
+
+    for side in ordered_sides:
+        candidate = _zc_candidate_point(center_point, side)
+        candidate_obstacles = _zc_candidate_obstacles(center_point, candidate)
+        if any(
+            _rects_intersect(candidate_obstacle, obstacle)
+            for candidate_obstacle in candidate_obstacles
+            for obstacle in [*obstacles, *device_obstacles]
+        ):
+            continue
+        return candidate
+
+    return raw_endpoint
+
+
+def _get_zc_label_layout_pdf(c, polyline: list[Point], obstacles: list[dict[str, float]], bounds: dict[str, float] | None) -> dict[str, object] | None:
     if not polyline:
         return None
     end = polyline[-1]
-    direction = _terminal_direction(polyline)
-    normal = (-direction[1], direction[0])
-    label_rect = _measure_text_rect(c, 0.0, 0.0, ZC_LABEL_TEXT, ZC_LABEL_FONT_SIZE)
-    terminator_size = 10.8
-    forward_distance = (terminator_size / 2.0) + (label_rect["width"] / 2.0) + 6.0
-    side_distance = (label_rect["height"] / 2.0) + 6.0
-    candidates = [
-        _measure_text_rect(c, end[0] + (direction[0] * forward_distance), end[1] + (direction[1] * forward_distance), ZC_LABEL_TEXT, ZC_LABEL_FONT_SIZE),
-        _measure_text_rect(c, end[0] + (direction[0] * forward_distance) + (normal[0] * side_distance), end[1] + (direction[1] * forward_distance) + (normal[1] * side_distance), ZC_LABEL_TEXT, ZC_LABEL_FONT_SIZE),
-        _measure_text_rect(c, end[0] + (direction[0] * forward_distance) - (normal[0] * side_distance), end[1] + (direction[1] * forward_distance) - (normal[1] * side_distance), ZC_LABEL_TEXT, ZC_LABEL_FONT_SIZE),
-        _measure_text_rect(c, end[0] - (direction[0] * forward_distance), end[1] - (direction[1] * forward_distance), ZC_LABEL_TEXT, ZC_LABEL_FONT_SIZE),
-    ]
-    for candidate in candidates:
-        if not _rect_inside_bounds(candidate, bounds):
-            continue
-        if any(_rects_intersect(candidate, obstacle) for obstacle in obstacles):
-            continue
-        return candidate
-    return candidates[0]
+    return _place_plan_text_pdf(
+        c,
+        text=ZC_LABEL_TEXT,
+        font_size=ZC_LABEL_FONT_SIZE,
+        anchor=end,
+        obstacles=obstacles,
+        bounds=bounds,
+        strategy="anchor",
+        symbol_half_width=5.4,
+        symbol_half_height=5.4,
+        preferred_vector=_terminal_direction(polyline),
+    )
 
 
 def wall_thickness_px(wall: dict, scale_factor: float) -> float:
@@ -1532,7 +2222,13 @@ class DrawingPage(Page):
         spec: ExteriorDimensionSpec,
         transform: PlanTransform,
         line_width: float,
-    ) -> None:
+        placed_text_obstacles: list[dict[str, float]] | None = None,
+    ) -> list[dict[str, float]]:
+        local_text_obstacles: list[dict[str, float]] = list(placed_text_obstacles or [])
+        dimension_text_bounds = _inflate_rect(
+            self._plan_stage_bounds(transform),
+            DIMENSION_LINE_OFFSET + DIMENSION_EXTENSION_LENGTH + max(DIMENSION_TEXT_FONT_SIZE * 3.0, 20.0),
+        )
         c.saveState()
         c.setStrokeColor(colors.black)
         c.setFillColor(colors.black)
@@ -1551,7 +2247,7 @@ class DrawingPage(Page):
         )
         if len(anchor_points) < 2:
             c.restoreState()
-            return
+            return local_text_obstacles
 
         delta_x = abs(anchor_points[-1][0] - anchor_points[0][0])
         delta_y = abs(anchor_points[-1][1] - anchor_points[0][1])
@@ -1585,21 +2281,59 @@ class DrawingPage(Page):
                 self._draw_dimension_arrow(c, (start_x, dimension_y), (1.0, 0.0), DIMENSION_ARROW_SIZE)
                 self._draw_dimension_arrow(c, (end_x, dimension_y), (-1.0, 0.0), DIMENSION_ARROW_SIZE)
                 c.setFont(DEFAULT_FONT_NAME, DIMENSION_TEXT_FONT_SIZE)
-                text_x = (
+                preferred_center_x = (
                     (start_x + end_x) / 2.0
                     if fits_between_arrows
                     else max(start_x, end_x) + DIMENSION_ARROW_SIZE + (1.5 * mm) + (label_width / 2.0)
                 )
-                text_y = (
+                preferred_baseline_y = (
                     dimension_y + DIMENSION_TEXT_GAP + ascent
                     if outward_sign > 0
                     else dimension_y - DIMENSION_TEXT_GAP - ascent
                 )
+                preferred_metrics = _measure_text_rect(c, 0.0, 0.0, label, DIMENSION_TEXT_FONT_SIZE)
+                preferred_rect = {
+                    "x": preferred_center_x - (preferred_metrics["width"] / 2.0),
+                    "y": preferred_baseline_y - (preferred_metrics["height"] * 0.62),
+                    "width": preferred_metrics["width"],
+                    "height": preferred_metrics["height"],
+                }
+                placement = _place_plan_text_pdf(
+                    c,
+                    text=label,
+                    font_size=DIMENSION_TEXT_FONT_SIZE,
+                    anchor=((start_x + end_x) / 2.0, dimension_y),
+                    preferred_offset=(
+                        preferred_rect["x"] - ((start_x + end_x) / 2.0),
+                        preferred_rect["y"] - dimension_y,
+                    ),
+                    preferred_side=1 if outward_sign > 0 else -1,
+                    segment=((start_x, dimension_y), (end_x, dimension_y)),
+                    obstacles=local_text_obstacles,
+                    bounds=dimension_text_bounds,
+                    strategy="segment",
+                )
+                if placement is None or placement.get("rect") is None:
+                    continue
+                label_rect = placement["rect"]
+                if placement.get("leader_polyline"):
+                    c.saveState()
+                    c.setLineWidth(max(0.4, line_width))
+                    c.setDash(4, 3)
+                    leader_path = c.beginPath()
+                    leader_polyline = placement["leader_polyline"]
+                    leader_path.moveTo(leader_polyline[0][0], leader_polyline[0][1])
+                    for point in leader_polyline[1:]:
+                        leader_path.lineTo(point[0], point[1])
+                    c.drawPath(leader_path, stroke=1, fill=0)
+                    c.restoreState()
+                    local_text_obstacles.extend(_polyline_obstacles(leader_polyline, 2.0))
                 c.drawCentredString(
-                    text_x,
-                    text_y,
+                    label_rect["x"] + (label_rect["width"] / 2.0),
+                    label_rect["y"] + (label_rect["height"] * 0.62),
                     label,
                 )
+                local_text_obstacles.append(label_rect)
         else:
             edge_x = sum(point[0] for point in anchor_points) / len(anchor_points)
             outward_sign = 1.0 if edge_x >= plan_center_x else -1.0
@@ -1626,36 +2360,97 @@ class DrawingPage(Page):
                 c.line(dimension_x, start_y, dimension_x, end_y)
                 self._draw_dimension_arrow(c, (dimension_x, start_y), (0.0, 1.0), DIMENSION_ARROW_SIZE)
                 self._draw_dimension_arrow(c, (dimension_x, end_y), (0.0, -1.0), DIMENSION_ARROW_SIZE)
-                c.saveState()
-                c.setFont(DEFAULT_FONT_NAME, DIMENSION_TEXT_FONT_SIZE)
-                text_y = (
+                preferred_center_y = (
                     (start_y + end_y) / 2.0
                     if fits_between_arrows
                     else max(start_y, end_y) + DIMENSION_ARROW_SIZE + (1.5 * mm) + (label_width / 2.0)
                 )
-                c.translate(dimension_x + (outward_sign * DIMENSION_TEXT_GAP), text_y)
+                preferred_center_x = dimension_x + (outward_sign * DIMENSION_TEXT_GAP)
+                preferred_rect = _measure_text_rect(
+                    c,
+                    preferred_center_x,
+                    preferred_center_y,
+                    label,
+                    DIMENSION_TEXT_FONT_SIZE,
+                    rotation=90.0,
+                )
+                placement = _place_plan_text_pdf(
+                    c,
+                    text=label,
+                    font_size=DIMENSION_TEXT_FONT_SIZE,
+                    anchor=(dimension_x, (start_y + end_y) / 2.0),
+                    preferred_offset=(
+                        preferred_rect["x"] - dimension_x,
+                        preferred_rect["y"] - ((start_y + end_y) / 2.0),
+                    ),
+                    preferred_side=1 if outward_sign < 0 else -1,
+                    segment=((dimension_x, start_y), (dimension_x, end_y)),
+                    obstacles=local_text_obstacles,
+                    bounds=dimension_text_bounds,
+                    strategy="segment",
+                    rotation=90.0,
+                )
+                if placement is None or placement.get("rect") is None:
+                    continue
+                label_rect = placement["rect"]
+                if placement.get("leader_polyline"):
+                    c.saveState()
+                    c.setLineWidth(max(0.4, line_width))
+                    c.setDash(4, 3)
+                    leader_path = c.beginPath()
+                    leader_polyline = placement["leader_polyline"]
+                    leader_path.moveTo(leader_polyline[0][0], leader_polyline[0][1])
+                    for point in leader_polyline[1:]:
+                        leader_path.lineTo(point[0], point[1])
+                    c.drawPath(leader_path, stroke=1, fill=0)
+                    c.restoreState()
+                    local_text_obstacles.extend(_polyline_obstacles(leader_polyline, 2.0))
+                c.saveState()
+                c.setFont(DEFAULT_FONT_NAME, DIMENSION_TEXT_FONT_SIZE)
+                c.translate(label_rect["x"] + (label_rect["width"] / 2.0), label_rect["y"] + (label_rect["height"] / 2.0))
                 c.rotate(90)
                 c.drawCentredString(0.0, -(DIMENSION_TEXT_FONT_SIZE * 0.34), label)
                 c.restoreState()
+                local_text_obstacles.append(label_rect)
 
         c.restoreState()
+        return local_text_obstacles
 
-    def _draw_exterior_dimensions(self, c, walls: list[dict], transform: PlanTransform) -> None:
+    def _draw_exterior_dimensions(self, c, walls: list[dict], transform: PlanTransform) -> list[dict[str, float]]:
         if not walls or not self._should_draw_exterior_dimensions():
-            return
+            return []
         specs = build_exterior_dimension_specs(walls, transform.scale_factor)
         if not specs:
-            return
+            return []
         line_width = max(0.25, _wall_stroke_width(walls, transform) * 0.5)
+        placed_text_obstacles: list[dict[str, float]] = []
         for side in ("top", "bottom", "left", "right"):
             spec = specs.get(side)
             if spec is not None:
-                self._draw_exterior_dimension_spec(c, spec, transform, line_width)
+                placed_text_obstacles = self._draw_exterior_dimension_spec(
+                    c,
+                    spec,
+                    transform,
+                    line_width,
+                    placed_text_obstacles=placed_text_obstacles,
+                )
+        return placed_text_obstacles
 
     def _draw_fire_alarms(self, c, fire_alarms: list[dict], transform: PlanTransform) -> None:
         for alarm in fire_alarms:
             x, y = plan_point_to_pdf(alarm["x"], alarm["y"], transform)
             draw_fire_alarm_symbol(c, x, y, alarm.get("device_type"))
+
+    def _draw_soue_devices(self, c, devices: list[dict], transform: PlanTransform) -> None:
+        for device in devices:
+            x, y = plan_point_to_pdf(device["x"], device["y"], transform)
+            draw_soue_device_symbol(
+                c,
+                x,
+                y,
+                device.get("device_type"),
+                rotation_deg=_as_float(device.get("rotation_deg"), 0.0),
+            )
 
     def _plan_stage_bounds(self, transform: PlanTransform) -> dict[str, float]:
         corners = [
@@ -1723,74 +2518,146 @@ class DrawingPage(Page):
         *,
         base_obstacles: list[dict[str, float]],
         stage_bounds: dict[str, float],
+        device_lookup: dict[object, Point] | None = None,
     ) -> list[dict[str, float]]:
         if not routes:
             return []
 
-        display_map = build_display_cable_routes_pdf(routes, transform)
-        route_obstacles: list[dict[str, float]] = []
+        display_map = build_display_cable_routes_pdf(
+            routes,
+            transform,
+            spacing_step=PDF_CABLE_ROUTE_STROKE_WIDTH,
+        )
+        normalized_device_lookup = device_lookup or {}
+        base_route_obstacles: list[dict[str, float]] = []
+        route_display_data: dict[object, dict[str, object]] = {}
         for route in routes:
             route_id = route.get("id")
             display_polyline = display_map.get(route_id, [])
-            route_obstacles.extend(_polyline_obstacles(display_polyline, 3.0))
-            if display_polyline:
-                route_obstacles.append(_inflate_rect(_measure_text_rect(c, display_polyline[-1][0], display_polyline[-1][1], "", 10.8), 4.0))
+            base_polyline = display_polyline[:-1] if should_show_zc_terminator(route) and len(display_polyline) > 1 else display_polyline
+            base_route_obstacles.extend(_polyline_obstacles(base_polyline, 3.0))
+            if base_polyline:
+                base_route_obstacles.append(_inflate_rect(_measure_text_rect(c, base_polyline[-1][0], base_polyline[-1][1], "", 10.8), 4.0))
+
+        placed_zc_obstacles: list[dict[str, float]] = []
+        for route in routes:
+            route_id = route.get("id")
+            display_polyline = display_map.get(route_id, [])
+            should_show_zc = should_show_zc_terminator(route)
+            base_polyline = display_polyline[:-1] if should_show_zc and len(display_polyline) > 1 else display_polyline
+            zc_point = (
+                _resolve_zc_terminator_point_pdf(
+                    route,
+                    display_polyline,
+                    normalized_device_lookup,
+                    base_obstacles + base_route_obstacles + placed_zc_obstacles,
+                )
+                if should_show_zc and display_polyline
+                else None
+            )
+            final_polyline = [*base_polyline, zc_point] if zc_point is not None else list(base_polyline)
+            own_tail_obstacles = _zc_candidate_obstacles(base_polyline[-1], zc_point) if zc_point is not None and base_polyline else []
+            route_display_data[route_id] = {
+                "polyline": final_polyline,
+                "zc_point": zc_point,
+                "own_tail_obstacles": own_tail_obstacles,
+            }
+            placed_zc_obstacles.extend(own_tail_obstacles)
+
+        route_obstacles = base_route_obstacles + placed_zc_obstacles
 
         c.saveState()
-        c.setStrokeColor(colors.red)
-        c.setLineWidth(1.6)
+        c.setLineWidth(PDF_CABLE_ROUTE_STROKE_WIDTH)
         c.setLineCap(1)
         c.setLineJoin(1)
         for route in routes:
             route_id = route.get("id")
-            display_polyline = display_map.get(route_id, [])
+            display_polyline = route_display_data.get(route_id, {}).get("polyline", display_map.get(route_id, []))
             if len(display_polyline) < 2:
                 continue
+            route_color = SOUE_COLOR if str(route.get("subsystem_type") or "sps") == "soue" else colors.red
+            c.setStrokeColor(route_color)
             path = c.beginPath()
             path.moveTo(display_polyline[0][0], display_polyline[0][1])
             for point in display_polyline[1:]:
                 path.lineTo(point[0], point[1])
             c.drawPath(path, stroke=1, fill=0)
-            should_show_zc = route.get("system_type") == "non_addressable" and route.get("route_kind") in {"zone_loop", "manual_line"}
+            should_show_zc = should_show_zc_terminator(route)
             if should_show_zc:
-                _draw_zc_terminator(c, display_polyline[-1][0], display_polyline[-1][1])
+                zc_point = route_display_data.get(route_id, {}).get("zc_point") or display_polyline[-1]
+                _draw_zc_terminator(c, zc_point[0], zc_point[1])
         c.restoreState()
 
-        placed_labels: list[dict[str, float]] = []
+        placed_obstacles: list[dict[str, float]] = []
         for route in routes:
             route_id = route.get("id")
-            display_polyline = display_map.get(route_id, [])
-            should_show_zc = route.get("system_type") == "non_addressable" and route.get("route_kind") in {"zone_loop", "manual_line"}
+            display_polyline = route_display_data.get(route_id, {}).get("polyline", display_map.get(route_id, []))
+            should_show_zc = should_show_zc_terminator(route)
             if not should_show_zc or not display_polyline:
                 continue
             anchor_x, anchor_y = display_polyline[-1]
-            label_rect = _measure_text_rect_from_offset(
-                c,
-                anchor_x,
-                anchor_y,
-                ZC_LABEL_TEXT,
-                ZC_LABEL_FONT_SIZE,
-                route.get("zc_label_dx"),
-                route.get("zc_label_dy"),
-            ) or _get_zc_label_layout_pdf(
-                c,
-                display_polyline,
-                base_obstacles + route_obstacles + placed_labels,
-                stage_bounds,
+            own_tail_obstacles = route_display_data.get(route_id, {}).get("own_tail_obstacles", [])
+            placement = (
+                _place_plan_text_pdf(
+                    c,
+                    text=ZC_LABEL_TEXT,
+                    font_size=ZC_LABEL_FONT_SIZE,
+                    anchor=(anchor_x, anchor_y),
+                    obstacles=base_obstacles + [
+                        obstacle
+                        for obstacle in route_obstacles
+                        if obstacle not in own_tail_obstacles
+                    ] + placed_obstacles,
+                    bounds=stage_bounds,
+                    strategy="anchor",
+                    symbol_half_width=5.4,
+                    symbol_half_height=5.4,
+                    preferred_vector=_terminal_direction(display_polyline),
+                    preferred_offset=(
+                        (float(route.get("zc_label_dx")), float(route.get("zc_label_dy")))
+                        if route.get("zc_label_dx") is not None and route.get("zc_label_dy") is not None
+                        else None
+                    ),
+                )
+                or _get_zc_label_layout_pdf(
+                    c,
+                    display_polyline,
+                    base_obstacles + [
+                        obstacle
+                        for obstacle in route_obstacles
+                        if obstacle not in own_tail_obstacles
+                    ] + placed_obstacles,
+                    stage_bounds,
+                )
             )
-            if label_rect is None:
+            if placement is None or placement.get("rect") is None:
                 continue
+            label_rect = placement["rect"]
+            label_color = SOUE_COLOR if str(route.get("subsystem_type") or "sps") == "soue" else colors.red
+            if placement.get("leader_polyline"):
+                c.saveState()
+                c.setStrokeColor(label_color)
+                c.setLineWidth(0.8)
+                c.setDash(4, 3)
+                leader_path = c.beginPath()
+                leader_polyline = placement["leader_polyline"]
+                leader_path.moveTo(leader_polyline[0][0], leader_polyline[0][1])
+                for point in leader_polyline[1:]:
+                    leader_path.lineTo(point[0], point[1])
+                c.drawPath(leader_path, stroke=1, fill=0)
+                c.restoreState()
+                placed_obstacles.extend(_polyline_obstacles(leader_polyline, 3.0))
             c.saveState()
             c.setFont(DEFAULT_FONT_NAME, ZC_LABEL_FONT_SIZE)
-            c.setFillColor(colors.red)
+            c.setFillColor(label_color)
             c.drawCentredString(
                 label_rect["x"] + (label_rect["width"] / 2.0),
                 label_rect["y"] + (label_rect["height"] * 0.14),
                 ZC_LABEL_TEXT,
             )
             c.restoreState()
-            placed_labels.append(label_rect)
-        return route_obstacles + placed_labels
+            placed_obstacles.append(label_rect)
+        return route_obstacles + placed_obstacles
 
     def _draw_signal_instruments(
         self,
@@ -1815,33 +2682,54 @@ class DrawingPage(Page):
                 "width": half_width * 2.0,
                 "height": half_height * 2.0,
             })
-            label_text = str(instrument.get("name") or "").strip() or (
-                ARK_LABEL_TEXT if instrument.get("instrument_type") == "control_panel" else ""
-            )
+            label_text = _get_signal_instrument_label_text(instrument)
             if label_text:
                 control_labels.append((instrument, {"x": x, "y": y}, (half_width, half_height), label_text))
 
-        placed_labels: list[dict[str, float]] = []
+        placed_obstacles: list[dict[str, float]] = []
         for instrument, anchor, halves, label_text in control_labels:
-            label_rect = _measure_text_rect_from_offset(
+            placement = _place_plan_text_pdf(
                 c,
-                anchor["x"],
-                anchor["y"],
-                label_text,
-                SIGNAL_LABEL_FONT_SIZE,
-                instrument.get("label_dx"),
-                instrument.get("label_dy"),
-            ) or _place_symbol_label(
-                c,
-                anchor_x=anchor["x"],
-                anchor_y=anchor["y"],
                 text=label_text,
                 font_size=SIGNAL_LABEL_FONT_SIZE,
+                anchor=(anchor["x"], anchor["y"]),
+                preferred_offset=(
+                    (float(instrument.get("label_dx")), float(instrument.get("label_dy")))
+                    if instrument.get("label_dx") is not None and instrument.get("label_dy") is not None
+                    else None
+                ),
                 symbol_half_width=halves[0],
                 symbol_half_height=halves[1],
-                obstacles=obstacles + symbol_obstacles + placed_labels,
+                obstacles=obstacles + symbol_obstacles + placed_obstacles,
                 bounds=stage_bounds,
             )
+            if placement is None or placement.get("rect") is None:
+                fallback_rect = _measure_text_rect_from_offset(
+                    c,
+                    anchor["x"],
+                    anchor["y"],
+                    label_text,
+                    SIGNAL_LABEL_FONT_SIZE,
+                    halves[0] + 8.0,
+                    -(SIGNAL_LABEL_FONT_SIZE + 2.0),
+                )
+                if fallback_rect is None:
+                    continue
+                placement = {"rect": fallback_rect}
+            label_rect = placement["rect"]
+            if placement.get("leader_polyline"):
+                c.saveState()
+                c.setStrokeColor(colors.black)
+                c.setLineWidth(0.8)
+                c.setDash(4, 3)
+                leader_path = c.beginPath()
+                leader_polyline = placement["leader_polyline"]
+                leader_path.moveTo(leader_polyline[0][0], leader_polyline[0][1])
+                for point in leader_polyline[1:]:
+                    leader_path.lineTo(point[0], point[1])
+                c.drawPath(leader_path, stroke=1, fill=0)
+                c.restoreState()
+                placed_obstacles.extend(_polyline_obstacles(leader_polyline, 3.0))
             c.saveState()
             c.setFont(DEFAULT_FONT_NAME, SIGNAL_LABEL_FONT_SIZE)
             c.setFillColor(colors.black)
@@ -1851,8 +2739,108 @@ class DrawingPage(Page):
                 label_text,
             )
             c.restoreState()
-            placed_labels.append(label_rect)
-        return symbol_obstacles + placed_labels
+            placed_obstacles.append(label_rect)
+        return symbol_obstacles + placed_obstacles
+
+    def _draw_soue_device_annotations(
+        self,
+        c,
+        devices: list[dict],
+        floor_number: object | None,
+        transform: PlanTransform,
+        *,
+        obstacles: list[dict[str, float]],
+        stage_bounds: dict[str, float],
+    ) -> list[dict[str, float]]:
+        if not devices:
+            return []
+
+        symbol_obstacles: list[dict[str, float]] = []
+        labels: list[tuple[dict, dict[str, float], tuple[float, float], str]] = []
+        type_counts: dict[str, int] = {"siren": 0, "non_siren": 0}
+        for device in devices:
+            x, y = plan_point_to_pdf(device["x"], device["y"], transform)
+            rotation_deg = _as_float(device.get("rotation_deg"), 0.0)
+            half_width, half_height = _soue_device_symbol_half_extents(
+                device.get("device_type"),
+                rotation_deg=rotation_deg,
+            )
+            symbol_obstacles.append({
+                "x": x - half_width,
+                "y": y - half_height,
+                "width": half_width * 2.0,
+                "height": half_height * 2.0,
+            })
+            counter_key = _soue_device_counter_key(device.get("device_type"))
+            type_counts[counter_key] = type_counts.get(counter_key, 0) + 1
+            label_text = _get_soue_device_code(device, floor_number, type_counts[counter_key])
+            if label_text:
+                labels.append((device, {"x": x, "y": y}, (half_width, half_height), label_text))
+
+        placed_obstacles: list[dict[str, float]] = []
+        label_color = SOUE_COLOR
+        for device, anchor, halves, label_text in labels:
+            placement = _place_plan_text_pdf(
+                c,
+                text=label_text,
+                font_size=SIGNAL_LABEL_FONT_SIZE,
+                anchor=(anchor["x"], anchor["y"]),
+                preferred_offset=(
+                    (float(device.get("label_dx")), float(device.get("label_dy")))
+                    if device.get("label_dx") is not None and device.get("label_dy") is not None
+                    else None
+                ),
+                symbol_half_width=halves[0],
+                symbol_half_height=halves[1],
+                obstacles=obstacles + symbol_obstacles + placed_obstacles,
+                bounds=stage_bounds,
+            )
+            if placement is None or placement.get("rect") is None:
+                continue
+            label_rect = placement["rect"]
+            if placement.get("leader_polyline"):
+                c.saveState()
+                c.setStrokeColor(label_color)
+                c.setLineWidth(0.8)
+                c.setDash(4, 3)
+                leader_path = c.beginPath()
+                leader_polyline = placement["leader_polyline"]
+                leader_path.moveTo(leader_polyline[0][0], leader_polyline[0][1])
+                for point in leader_polyline[1:]:
+                    leader_path.lineTo(point[0], point[1])
+                c.drawPath(leader_path, stroke=1, fill=0)
+                c.restoreState()
+                placed_obstacles.extend(_polyline_obstacles(leader_polyline, 3.0))
+            c.saveState()
+            c.setFont(DEFAULT_FONT_NAME, SIGNAL_LABEL_FONT_SIZE)
+            c.setFillColor(label_color)
+            c.drawCentredString(
+                label_rect["x"] + (label_rect["width"] / 2.0),
+                label_rect["y"] + (label_rect["height"] * 0.14),
+                label_text,
+            )
+            c.restoreState()
+            placed_obstacles.append(label_rect)
+        return symbol_obstacles + placed_obstacles
+
+    def _sheet_signal_routes(self, floor_plan_data: dict) -> list[dict]:
+        routes = list(floor_plan_data.get("cable_routes", []) or [])
+        if self.sheet_kind == "soue":
+            common_routes = [
+                route
+                for route in _filter_items_by_system_type(routes, COMMON_SIGNAL_SYSTEM)
+                if str(route.get("subsystem_type") or "sps") == "soue"
+            ]
+            if common_routes or not _all_items_missing_system_type(routes):
+                return common_routes
+            return [route for route in routes if str(route.get("subsystem_type") or "sps") == "soue"]
+        if self.sheet_kind == "sps":
+            return [
+                route
+                for route in _filter_items_by_system_type(routes, _active_floor_plan_signal_system(floor_plan_data))
+                if str(route.get("subsystem_type") or "sps") == "sps"
+            ]
+        return routes
 
     def _draw_fire_alarm_annotations(
         self,
@@ -1867,15 +2855,7 @@ class DrawingPage(Page):
         if not fire_alarms:
             return []
 
-        sorted_alarms = sorted(
-            fire_alarms,
-            key=lambda alarm: (
-                str(alarm.get("zone") or ""),
-                str(alarm.get("address") or ""),
-                float(alarm.get("x") or 0.0),
-                float(alarm.get("y") or 0.0),
-            ),
-        )
+        sorted_alarms = list(fire_alarms)
         symbol_obstacles: list[dict[str, float]] = []
         anchors: list[tuple[dict, Point]] = []
         for index, alarm in enumerate(sorted_alarms, start=1):
@@ -1888,28 +2868,40 @@ class DrawingPage(Page):
             })
             anchors.append((alarm, (x, y)))
 
-        placed_labels: list[dict[str, float]] = []
+        placed_obstacles: list[dict[str, float]] = []
         for index, (alarm, anchor) in enumerate(anchors, start=1):
             label_text = _get_fire_alarm_code(alarm, floor_number, index)
-            label_rect = _measure_text_rect_from_offset(
+            placement = _place_plan_text_pdf(
                 c,
-                anchor[0],
-                anchor[1],
-                label_text,
-                FIRE_ALARM_LABEL_FONT_SIZE,
-                alarm.get("label_dx"),
-                alarm.get("label_dy"),
-            ) or _place_symbol_label(
-                c,
-                anchor_x=anchor[0],
-                anchor_y=anchor[1],
                 text=label_text,
                 font_size=FIRE_ALARM_LABEL_FONT_SIZE,
+                anchor=anchor,
+                preferred_offset=(
+                    (float(alarm.get("label_dx")), float(alarm.get("label_dy")))
+                    if alarm.get("label_dx") is not None and alarm.get("label_dy") is not None
+                    else None
+                ),
                 symbol_half_width=7.0,
                 symbol_half_height=7.0,
-                obstacles=obstacles + symbol_obstacles + placed_labels,
+                obstacles=obstacles + symbol_obstacles + placed_obstacles,
                 bounds=stage_bounds,
             )
+            if placement is None or placement.get("rect") is None:
+                continue
+            label_rect = placement["rect"]
+            if placement.get("leader_polyline"):
+                c.saveState()
+                c.setStrokeColor(colors.red)
+                c.setLineWidth(0.8)
+                c.setDash(4, 3)
+                leader_path = c.beginPath()
+                leader_polyline = placement["leader_polyline"]
+                leader_path.moveTo(leader_polyline[0][0], leader_polyline[0][1])
+                for point in leader_polyline[1:]:
+                    leader_path.lineTo(point[0], point[1])
+                c.drawPath(leader_path, stroke=1, fill=0)
+                c.restoreState()
+                placed_obstacles.extend(_polyline_obstacles(leader_polyline, 3.0))
             c.saveState()
             c.setFont(DEFAULT_FONT_NAME, FIRE_ALARM_LABEL_FONT_SIZE)
             c.setFillColor(colors.red)
@@ -1919,10 +2911,16 @@ class DrawingPage(Page):
                 label_text,
             )
             c.restoreState()
-            placed_labels.append(label_rect)
-        return symbol_obstacles + placed_labels
+            placed_obstacles.append(label_rect)
+        return symbol_obstacles + placed_obstacles
 
-    def _draw_zkspc_overlays(self, c, floor_plan_data: dict, transform: PlanTransform) -> None:
+    def _draw_zkspc_overlays(
+        self,
+        c,
+        floor_plan_data: dict,
+        transform: PlanTransform,
+        obstacles: list[dict[str, float]] | None = None,
+    ) -> list[dict[str, float]]:
         rooms = floor_plan_data.get("rooms") or []
         rooms_by_id = {
             int(room["id"]): room
@@ -1931,6 +2929,8 @@ class DrawingPage(Page):
         }
         floor_plan_id = int(floor_plan_data.get("id") or 0)
         style_map = build_zkspc_style_map(floor_plan_data)
+        stage_bounds = self._plan_stage_bounds(transform)
+        placed_label_obstacles: list[dict[str, float]] = list(obstacles or [])
 
         for zone in floor_plan_data.get("zkspc_zones") or []:
             zone_style = get_zkspc_style(
@@ -1979,12 +2979,52 @@ class DrawingPage(Page):
             if centers:
                 center_x = sum(point[0] for point in centers) / len(centers)
                 center_y = sum(point[1] for point in centers) / len(centers)
-                pdf_x, pdf_y = plan_point_to_pdf(center_x, center_y, transform)
+                polygons = [
+                    [plan_point_to_pdf(float(point[0]), float(point[1]), transform) for point in room.get("boundary_points") or []]
+                    for room_id in zone.get("room_ids") or []
+                    for room in [rooms_by_id.get(int(room_id))]
+                    if room is not None and room.get("room_type") != "РЅРµРѕР±СЃР»СѓР¶РёРІР°РµРјРѕРµ" and len(room.get("boundary_points") or []) >= 3
+                ]
+                placement = _place_plan_text_pdf(
+                    c,
+                    text=str(zone_style["label"]),
+                    font_size=11,
+                    anchor=plan_point_to_pdf(center_x, center_y, transform),
+                    obstacles=placed_label_obstacles,
+                    bounds=stage_bounds,
+                    strategy="region",
+                    region_constraint={
+                        "polygons": polygons,
+                        "preferred_points": [plan_point_to_pdf(point[0], point[1], transform) for point in centers],
+                    },
+                )
+                if placement is None or placement.get("rect") is None:
+                    continue
+                label_rect = placement["rect"]
+                if placement.get("leader_polyline"):
+                    c.saveState()
+                    c.setStrokeColor(zone_style["label_color"])
+                    c.setLineWidth(0.8)
+                    c.setDash(4, 3)
+                    leader_path = c.beginPath()
+                    leader_polyline = placement["leader_polyline"]
+                    leader_path.moveTo(leader_polyline[0][0], leader_polyline[0][1])
+                    for point in leader_polyline[1:]:
+                        leader_path.lineTo(point[0], point[1])
+                    c.drawPath(leader_path, stroke=1, fill=0)
+                    c.restoreState()
+                    placed_label_obstacles.extend(_polyline_obstacles(leader_polyline, 3.0))
                 c.saveState()
                 c.setFillColor(zone_style["label_color"])
                 c.setFont(DEFAULT_FONT_NAME, 11)
-                c.drawCentredString(pdf_x, pdf_y, str(zone_style["label"]))
+                c.drawCentredString(
+                    label_rect["x"] + (label_rect["width"] / 2.0),
+                    label_rect["y"] + (label_rect["height"] * 0.14),
+                    str(zone_style["label"]),
+                )
                 c.restoreState()
+                placed_label_obstacles.append(label_rect)
+        return placed_label_obstacles
 
     def _draw_unserviceable_room_crosses(self, c, rooms: list[dict], transform: PlanTransform) -> None:
         c.saveState()
@@ -2004,24 +3044,70 @@ class DrawingPage(Page):
             c.line(top_right[0], top_right[1], bottom_left[0], bottom_left[1])
         c.restoreState()
 
-    def _draw_room_number_circles(self, c, numbered_rooms: list[dict[str, object]], transform: PlanTransform) -> None:
+    def _draw_room_number_circles(
+        self,
+        c,
+        numbered_rooms: list[dict[str, object]],
+        transform: PlanTransform,
+        obstacles: list[dict[str, float]] | None = None,
+    ) -> list[dict[str, float]]:
         if not numbered_rooms:
-            return
+            return []
         radius = compute_room_circle_radius(numbered_rooms, transform)
         font_size = max(8.0, min(12.0, radius * 1.05))
+        stage_bounds = self._plan_stage_bounds(transform)
+        placed_obstacles: list[dict[str, float]] = list(obstacles or [])
         c.saveState()
         c.setStrokeColor(colors.black)
         c.setFillColor(colors.white)
         c.setLineWidth(0.7)
         c.setFont(DEFAULT_FONT_NAME, font_size)
         for item in numbered_rooms:
-            center_x, center_y = find_room_badge_center(item["room"], radius, transform) or item["center"]
-            pdf_x, pdf_y = plan_point_to_pdf(center_x, center_y, transform)
+            badge_layout = _find_room_badge_rect(
+                c,
+                item["room"],
+                str(item["number"]),
+                radius,
+                font_size,
+                transform,
+                placed_obstacles,
+                stage_bounds,
+            )
+            if badge_layout is None or badge_layout.get("rect") is None:
+                center_x, center_y = find_room_badge_center(item["room"], radius, transform) or item["center"]
+                pdf_x, pdf_y = plan_point_to_pdf(center_x, center_y, transform)
+                fallback_rect = {
+                    "x": pdf_x - radius,
+                    "y": pdf_y - radius,
+                    "width": radius * 2.0,
+                    "height": radius * 2.0,
+                }
+                if any(_rects_intersect(fallback_rect, obstacle) for obstacle in placed_obstacles) or not _rect_inside_bounds(fallback_rect, stage_bounds):
+                    continue
+                badge_rect = fallback_rect
+            else:
+                badge_rect = badge_layout["rect"]
+                pdf_x, pdf_y = _rect_center(badge_rect)
+                if badge_layout.get("leader_polyline"):
+                    c.saveState()
+                    c.setStrokeColor(colors.black)
+                    c.setLineWidth(0.7)
+                    c.setDash(4, 3)
+                    leader_path = c.beginPath()
+                    leader_polyline = badge_layout["leader_polyline"]
+                    leader_path.moveTo(leader_polyline[0][0], leader_polyline[0][1])
+                    for point in leader_polyline[1:]:
+                        leader_path.lineTo(point[0], point[1])
+                    c.drawPath(leader_path, stroke=1, fill=0)
+                    c.restoreState()
+                    placed_obstacles.extend(_polyline_obstacles(leader_polyline, 2.0))
             c.circle(pdf_x, pdf_y, radius, stroke=1, fill=1)
             c.setFillColor(colors.black)
             c.drawCentredString(pdf_x, pdf_y - (font_size * 0.34), str(item["number"]))
             c.setFillColor(colors.white)
+            placed_obstacles.append(badge_rect)
         c.restoreState()
+        return placed_obstacles
 
     def _measure_explication_layout(self, c, numbered_rooms: list[dict[str, object]]) -> dict[str, object] | None:
         if self.sheet_kind != "zkspc" or not numbered_rooms:
@@ -2291,8 +3377,15 @@ class DrawingPage(Page):
             rotation_quarter_turns=plan_rotation,
         )
 
+        zkspc_obstacles: list[dict[str, float]] = []
         if self.sheet_kind == "zkspc":
-            self._draw_zkspc_overlays(c, floor_plan_data, transform)
+            zkspc_geometry_obstacles = self._collect_geometry_obstacles(walls, doors, windows, stairs, transform)
+            zkspc_obstacles = self._draw_zkspc_overlays(
+                c,
+                floor_plan_data,
+                transform,
+                obstacles=zkspc_geometry_obstacles,
+            )
 
         self._draw_walls(c, walls, transform)
         self._draw_openings(c, doors, walls, transform, builder=build_door_symbol_segments)
@@ -2300,9 +3393,12 @@ class DrawingPage(Page):
         self._draw_stairs(c, stairs, transform)
 
         if self.sheet_kind in {"generic", "sps"}:
+            sheet_fire_alarms = _visible_fire_alarms_for_sheet(floor_plan_data, self.sheet_kind)
+            sheet_routes = self._sheet_signal_routes(floor_plan_data)
+            sheet_instruments = _visible_signal_instruments_for_sheet(floor_plan_data, self.sheet_kind)
             stage_bounds = self._plan_stage_bounds(transform)
             geometry_obstacles = self._collect_geometry_obstacles(walls, doors, windows, stairs, transform)
-            for alarm in floor_plan_data.get("fire_alarms", []) or []:
+            for alarm in sheet_fire_alarms:
                 alarm_x, alarm_y = plan_point_to_pdf(alarm["x"], alarm["y"], transform)
                 geometry_obstacles.append({
                     "x": alarm_x - 7.0,
@@ -2310,7 +3406,7 @@ class DrawingPage(Page):
                     "width": 14.0,
                     "height": 14.0,
                 })
-            for instrument in floor_plan_data.get("signal_instruments", []) or []:
+            for instrument in sheet_instruments:
                 instrument_x, instrument_y = plan_point_to_pdf(instrument["x"], instrument["y"], transform)
                 if instrument.get("instrument_type") == "control_panel":
                     half_width = (6.0 * mm * 1.6) / 2.0
@@ -2326,14 +3422,24 @@ class DrawingPage(Page):
                 })
             cable_route_obstacles = self._draw_cable_routes(
                 c,
-                floor_plan_data.get("cable_routes", []) or [],
+                sheet_routes,
                 transform,
                 base_obstacles=geometry_obstacles,
                 stage_bounds=stage_bounds,
+                device_lookup={
+                    alarm.get("id"): plan_point_to_pdf(alarm["x"], alarm["y"], transform)
+                    for alarm in sheet_fire_alarms
+                    if alarm.get("id") is not None
+                },
+            )
+            self._draw_fire_alarms(
+                c,
+                sheet_fire_alarms,
+                transform,
             )
             fire_alarm_obstacles = self._draw_fire_alarm_annotations(
                 c,
-                floor_plan_data.get("fire_alarms", []) or [],
+                sheet_fire_alarms,
                 floor_plan_data.get("floor_number"),
                 transform,
                 obstacles=geometry_obstacles + cable_route_obstacles,
@@ -2341,15 +3447,72 @@ class DrawingPage(Page):
             )
             self._draw_signal_instruments(
                 c,
-                floor_plan_data.get("signal_instruments", []) or [],
+                sheet_instruments,
                 transform,
                 obstacles=geometry_obstacles + cable_route_obstacles + fire_alarm_obstacles,
                 stage_bounds=stage_bounds,
             )
 
+        if self.sheet_kind == "soue":
+            sheet_routes = self._sheet_signal_routes(floor_plan_data)
+            soue_devices = _visible_soue_devices_for_sheet(floor_plan_data, self.sheet_kind)
+            sheet_instruments = _visible_signal_instruments_for_sheet(floor_plan_data, self.sheet_kind)
+            stage_bounds = self._plan_stage_bounds(transform)
+            geometry_obstacles = self._collect_geometry_obstacles(walls, doors, windows, stairs, transform)
+            for device in soue_devices:
+                device_x, device_y = plan_point_to_pdf(device["x"], device["y"], transform)
+                half_width, half_height = _soue_device_symbol_half_extents(
+                    device.get("device_type"),
+                    rotation_deg=_as_float(device.get("rotation_deg"), 0.0),
+                )
+                geometry_obstacles.append({
+                    "x": device_x - half_width,
+                    "y": device_y - half_height,
+                    "width": half_width * 2.0,
+                    "height": half_height * 2.0,
+                })
+            for instrument in sheet_instruments:
+                instrument_x, instrument_y = plan_point_to_pdf(instrument["x"], instrument["y"], transform)
+                if instrument.get("instrument_type") == "control_panel":
+                    half_width = (6.0 * mm * 1.6) / 2.0
+                    half_height = (6.0 * mm * 0.8) / 2.0
+                else:
+                    half_width = (6.0 * mm) / 2.0
+                    half_height = half_width
+                geometry_obstacles.append({
+                    "x": instrument_x - half_width,
+                    "y": instrument_y - half_height,
+                    "width": half_width * 2.0,
+                    "height": half_height * 2.0,
+                })
+            cable_route_obstacles = self._draw_cable_routes(
+                c,
+                sheet_routes,
+                transform,
+                base_obstacles=geometry_obstacles,
+                stage_bounds=stage_bounds,
+                device_lookup={},
+            )
+            self._draw_soue_devices(c, soue_devices, transform)
+            soue_device_obstacles = self._draw_soue_device_annotations(
+                c,
+                soue_devices,
+                floor_plan_data.get("floor_number"),
+                transform,
+                obstacles=geometry_obstacles + cable_route_obstacles,
+                stage_bounds=stage_bounds,
+            )
+            self._draw_signal_instruments(
+                c,
+                sheet_instruments,
+                transform,
+                obstacles=geometry_obstacles + cable_route_obstacles + soue_device_obstacles,
+                stage_bounds=stage_bounds,
+            )
+
         if self.sheet_kind == "zkspc":
             self._draw_unserviceable_room_crosses(c, floor_plan_data.get("rooms", []) or [], transform)
-            self._draw_room_number_circles(c, numbered_rooms or [], transform)
+            self._draw_room_number_circles(c, numbered_rooms or [], transform, obstacles=zkspc_obstacles)
 
         self._draw_exterior_dimensions(c, walls, transform)
 

@@ -16,8 +16,9 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+import backend.database as database
 from backend.bootstrap import ensure_runtime_directories, register_pdf_fonts
-from backend.database import configure_database, init_db
+from backend.config import settings
 
 
 def _get_free_port() -> int:
@@ -29,16 +30,27 @@ def _get_free_port() -> int:
 @pytest.fixture
 def api_server(tmp_path: Path) -> str:
     database_path = tmp_path / "test.db"
+    database.configure_database(f"sqlite:///{database_path.as_posix()}")
     env = os.environ.copy()
     env["DATABASE_URL"] = f"sqlite:///{database_path.as_posix()}"
     port = _get_free_port()
-
-    ensure_runtime_directories()
-    register_pdf_fonts()
-
-    process = subprocess.Popen(
-        [
+    command = [
+        "python",
+        "-m",
+        "uvicorn",
+        "backend.app:app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(port),
+    ]
+    if env.get("ENABLE_TEST_SERVER_COVERAGE") == "1":
+        command = [
             "python",
+            "-m",
+            "coverage",
+            "run",
+            "--parallel-mode",
             "-m",
             "uvicorn",
             "backend.app:app",
@@ -46,7 +58,13 @@ def api_server(tmp_path: Path) -> str:
             "127.0.0.1",
             "--port",
             str(port),
-        ],
+        ]
+
+    ensure_runtime_directories()
+    register_pdf_fonts()
+
+    process = subprocess.Popen(
+        command,
         cwd=str(PROJECT_ROOT),
         env=env,
         stdout=subprocess.DEVNULL,
@@ -75,13 +93,14 @@ def api_server(tmp_path: Path) -> str:
             process.wait(timeout=10)
         except subprocess.TimeoutExpired:
             process.kill()
+        database.configure_database(settings.database_url)
 
 
 @pytest.fixture
 def isolated_database(tmp_path: Path) -> Path:
     database_path = tmp_path / "unit.db"
-    configure_database(f"sqlite:///{database_path.as_posix()}")
-    init_db()
+    database.configure_database(f"sqlite:///{database_path.as_posix()}")
+    database.init_db()
     ensure_runtime_directories()
     register_pdf_fonts()
     return database_path

@@ -28,6 +28,8 @@ def test_state_manager_unlocks_branch_steps_after_zkspc():
     state = manager.set_step_status(state, "zkspc", "validated", committed=True, bump_revision=True)
     state = manager.activate_branch_steps(state)
 
-    assert state["branches"]["addressable"]["steps"]["fire_alarms"]["status"] == "draft"
-    assert state["branches"]["addressable"]["steps"]["devices_cables"]["status"] == "draft"
-    assert state["branches"]["non_addressable"]["steps"]["fire_alarms"]["status"] == "draft"
+    assert state["branches"]["common"]["steps"]["signal_instruments"]["status"] == "draft"
+    assert state["branches"]["addressable"]["steps"]["signal_instruments"]["status"] == "locked"
+    assert state["branches"]["addressable"]["steps"]["fire_alarms"]["status"] == "locked"
+    assert state["branches"]["addressable"]["steps"]["devices_cables"]["status"] == "locked"
+    assert state["branches"]["non_addressable"]["steps"]["signal_instruments"]["status"] == "locked"

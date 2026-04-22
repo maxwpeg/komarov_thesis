@@ -10,6 +10,7 @@ from backend.modules.shared.infrastructure.persistence.models import (
     FireAlarm as FireAlarmModel,
     FloorPlan as FloorPlanModel,
     SignalInstrument as SignalInstrumentModel,
+    SoueDevice as SoueDeviceModel,
     ZkspcZone as ZkspcZoneModel,
     ZkspcZoneRoom as ZkspcZoneRoomModel,
 )
@@ -34,6 +35,12 @@ class SqlAlchemySignalDesignRepository(SignalDesignRepository):
             raise AppError(404, "instrument_not_found", "Signal instrument not found")
         return instrument
 
+    def get_soue_device(self, device_id: int) -> SoueDeviceModel:
+        device = self.session.query(SoueDeviceModel).filter(SoueDeviceModel.id == device_id).first()
+        if device is None:
+            raise AppError(404, "soue_device_not_found", "SOUe device not found")
+        return device
+
     def get_route(self, route_id: int) -> CableRouteModel:
         route = self.session.query(CableRouteModel).filter(CableRouteModel.id == route_id).first()
         if route is None:
@@ -54,10 +61,18 @@ class SqlAlchemySignalDesignRepository(SignalDesignRepository):
             query = query.filter(SignalInstrumentModel.system_type == system_type)
         return query.order_by(SignalInstrumentModel.id.asc()).all()
 
-    def list_routes(self, floor_plan_id: int, system_type: str | None = None) -> list[CableRouteModel]:
+    def list_soue_devices(self, floor_plan_id: int, system_type: str | None = None) -> list[SoueDeviceModel]:
+        query = self.session.query(SoueDeviceModel).filter(SoueDeviceModel.floor_plan_id == floor_plan_id)
+        if system_type:
+            query = query.filter(SoueDeviceModel.system_type == system_type)
+        return query.order_by(SoueDeviceModel.device_type.asc(), SoueDeviceModel.id.asc()).all()
+
+    def list_routes(self, floor_plan_id: int, system_type: str | None = None, subsystem_type: str | None = None) -> list[CableRouteModel]:
         query = self.session.query(CableRouteModel).filter(CableRouteModel.floor_plan_id == floor_plan_id)
         if system_type:
             query = query.filter(CableRouteModel.system_type == system_type)
+        if subsystem_type:
+            query = query.filter(CableRouteModel.subsystem_type == subsystem_type)
         return query.order_by(CableRouteModel.route_kind.asc(), CableRouteModel.route_number.asc(), CableRouteModel.id.asc()).all()
 
     def list_fire_alarms(self, floor_plan_id: int, system_type: str | None = None) -> list[FireAlarmModel]:
@@ -78,6 +93,9 @@ class SqlAlchemySignalDesignRepository(SignalDesignRepository):
     def create_instrument(self, data: dict) -> SignalInstrumentModel:
         return SignalInstrumentModel(**data)
 
+    def create_soue_device(self, data: dict) -> SoueDeviceModel:
+        return SoueDeviceModel(**data)
+
     def create_route(self, data: dict) -> CableRouteModel:
         return CableRouteModel(**data)
 
@@ -93,14 +111,20 @@ class SqlAlchemySignalDesignRepository(SignalDesignRepository):
     def refresh(self, entity) -> None:
         self.session.refresh(entity)
 
-    def delete_routes_for_instrument(self, instrument_id: int) -> None:
-        self.session.query(CableRouteModel).filter(CableRouteModel.instrument_id == instrument_id).delete(synchronize_session=False)
+    def delete_routes_for_instrument(self, instrument_id: int, subsystem_type: str | None = None) -> None:
+        query = self.session.query(CableRouteModel).filter(CableRouteModel.instrument_id == instrument_id)
+        if subsystem_type:
+            query = query.filter(CableRouteModel.subsystem_type == subsystem_type)
+        query.delete(synchronize_session=False)
 
-    def delete_routes_for_branch(self, floor_plan_id: int, system_type: str) -> None:
-        self.session.query(CableRouteModel).filter(
+    def delete_routes_for_branch(self, floor_plan_id: int, system_type: str, subsystem_type: str | None = None) -> None:
+        query = self.session.query(CableRouteModel).filter(
             CableRouteModel.floor_plan_id == floor_plan_id,
             CableRouteModel.system_type == system_type,
-        ).delete(synchronize_session=False)
+        )
+        if subsystem_type:
+            query = query.filter(CableRouteModel.subsystem_type == subsystem_type)
+        query.delete(synchronize_session=False)
 
     def delete_zones_for_floor_plan(self, floor_plan_id: int) -> None:
         existing_zone_ids = [zone.id for zone in self.list_zones(floor_plan_id)]

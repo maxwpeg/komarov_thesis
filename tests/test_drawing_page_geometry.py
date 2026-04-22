@@ -28,6 +28,10 @@ from DrawingPage import (
     extract_wall_contours,
     find_room_badge_center,
     get_zkspc_style,
+    _find_room_badge_rect,
+    _place_plan_text_pdf,
+    _rects_intersect,
+    _resolve_zc_terminator_point_pdf,
     resolve_opening_wall,
     wall_polygon,
 )
@@ -471,6 +475,60 @@ def test_bottom_horizontal_dimension_label_keeps_visual_gap_from_line():
     assert text_y > dimension_y + (DIMENSION_TEXT_GAP + (DIMENSION_TEXT_FONT_SIZE * 0.4))
 
 
+def test_place_plan_text_pdf_returns_none_when_every_slot_is_blocked():
+    register_pdf_fonts()
+    canvas_obj = canvas.Canvas(io.BytesIO())
+
+    placement = _place_plan_text_pdf(
+        canvas_obj,
+        text="ARK",
+        font_size=10,
+        anchor=(40.0, 20.0),
+        obstacles=[{"x": 0.0, "y": 0.0, "width": 80.0, "height": 40.0}],
+        bounds={"x": 0.0, "y": 0.0, "width": 80.0, "height": 40.0},
+        strategy="anchor",
+        symbol_half_width=8.0,
+        symbol_half_height=8.0,
+    )
+
+    assert placement is None
+
+
+def test_room_badge_layout_avoids_existing_label_obstacles():
+    register_pdf_fonts()
+    canvas_obj = canvas.Canvas(io.BytesIO())
+    transform = PlanTransform(
+        image_width=120.0,
+        image_height=80.0,
+        scale=1.0,
+        offset_x=0.0,
+        offset_y=0.0,
+        scale_factor=10.0,
+    )
+    room = {
+        "id": 1,
+        "boundary_points": [[10, 10], [110, 10], [110, 70], [10, 70]],
+        "center_x": 60,
+        "center_y": 40,
+    }
+    blocking_label = {"x": 10.0, "y": 10.0, "width": 42.0, "height": 20.0}
+
+    badge_layout = _find_room_badge_rect(
+        canvas_obj,
+        room,
+        "1",
+        radius=8.0,
+        font_size=10.0,
+        transform=transform,
+        obstacles=[blocking_label],
+        bounds={"x": 0.0, "y": 0.0, "width": 120.0, "height": 80.0},
+    )
+
+    assert badge_layout is not None
+    assert badge_layout["rect"] is not None
+    assert not _rects_intersect(badge_layout["rect"], blocking_label)
+
+
 def test_display_cable_routes_pdf_spreads_overlapping_segments():
     transform = PlanTransform(
         image_width=200.0,
@@ -489,9 +547,48 @@ def test_display_cable_routes_pdf_spreads_overlapping_segments():
     display = build_display_cable_routes_pdf(routes, transform)
 
     assert display[1] != display[2]
-    assert display[1][0][0] != display[2][0][0]
-    assert display[1][1][0] == display[1][0][0]
-    assert display[2][1][0] == display[2][0][0]
+    assert display[1][0][0] == pytest.approx(9.2)
+    assert display[1][1][0] == pytest.approx(9.2)
+    assert display[2][0][0] == pytest.approx(10.8)
+    assert display[2][1][0] == pytest.approx(10.8)
+    assert display[1][2][1] == pytest.approx(59.2)
+    assert display[2][2][1] == pytest.approx(60.8)
+
+
+def test_display_cable_routes_pdf_spreads_four_overlapping_segments_symmetrically():
+    transform = PlanTransform(
+        image_width=200.0,
+        image_height=120.0,
+        scale=1.0,
+        offset_x=0.0,
+        offset_y=0.0,
+        scale_factor=10.0,
+    )
+
+    routes = [
+        {"id": 1, "route_number": 1, "polyline_points": [[10, 10], [10, 60]]},
+        {"id": 2, "route_number": 2, "polyline_points": [[10, 10], [10, 60]]},
+        {"id": 3, "route_number": 3, "polyline_points": [[10, 10], [10, 60]]},
+        {"id": 4, "route_number": 4, "polyline_points": [[10, 10], [10, 60]]},
+    ]
+
+    display = build_display_cable_routes_pdf(routes, transform)
+
+    assert display[1][0][0] == pytest.approx(7.6)
+    assert display[2][0][0] == pytest.approx(9.2)
+    assert display[3][0][0] == pytest.approx(10.8)
+    assert display[4][0][0] == pytest.approx(12.4)
+
+
+def test_resolve_zc_terminator_point_pdf_uses_side_candidate_when_forward_is_blocked():
+    zc_point = _resolve_zc_terminator_point_pdf(
+        {"device_ids": [11]},
+        [(0.0, 0.0), (26.0, 0.0), (40.0, 0.0), (59.4, 0.0)],
+        {11: (40.0, 0.0)},
+        [{"x": 48.0, "y": -8.0, "width": 20.0, "height": 16.0}],
+    )
+
+    assert zc_point == (40.0, -19.4)
 
 
 def test_generic_sheet_draws_ark_and_zc_labels_for_signal_design():

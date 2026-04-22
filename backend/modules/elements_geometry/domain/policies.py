@@ -145,7 +145,7 @@ class OpeningNormalizationPolicy:
             signed = ((center_x - wall.x1) * normal_x) + ((center_y - wall.y1) * normal_y)
             positive_offset, negative_offset = OpeningNormalizationPolicy.wall_normal_offsets_px(wall, scale_factor)
             thickness_px = max(1.0, (wall.thickness or 1.0) / scale_factor)
-            max_distance = max(thickness_px * 0.5, min(float(width), float(height), 40.0))
+            max_distance = max(thickness_px, min(float(width), float(height), 40.0))
             within_projection = -projection_margin <= along <= (length + projection_margin)
             within_thickness = (
                 signed >= (-negative_offset - max_distance)
@@ -234,5 +234,51 @@ class FireAlarmMetadataPolicy:
             "loop_number": int(data["loop_number"]) if data.get("loop_number") is not None else None,
             "device_number": int(data["device_number"]) if data.get("device_number") is not None else None,
             "zone": zone_number,
+            **metadata,
+        }
+
+
+class SoueDeviceMetadataPolicy:
+    """Normalizes SOUE device placement metadata."""
+
+    @staticmethod
+    def normalize(
+        *,
+        floor_plan_id: int,
+        data: dict[str, Any],
+        scale_factor: float,
+        rooms: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        x = float(data["x"])
+        y = float(data["y"])
+        metadata = locate_fire_alarm_metadata(x, y, rooms, scale_factor)
+        device_type = str(data.get("device_type") or "siren")
+        default_model = "Комптид-1" if device_type == "siren" else "Выход-12"
+        default_sound_pressure = 98.0 if device_type == "siren" else None
+        default_height = 2.3 if device_type == "exit_sign" else 2.4
+
+        return {
+            **data,
+            "floor_plan_id": floor_plan_id,
+            "x": x,
+            "y": y,
+            "device_type": device_type if device_type in {"siren", "exit_sign"} else "siren",
+            "device_model": (data.get("device_model") or default_model),
+            "sound_pressure_db": (
+                float(data["sound_pressure_db"])
+                if data.get("sound_pressure_db") is not None
+                else default_sound_pressure
+            ),
+            "mounting_height": (
+                float(data["mounting_height"])
+                if data.get("mounting_height") is not None
+                else default_height
+            ),
+            "system_type": data.get("system_type") if data.get("system_type") in {"addressable", "non_addressable", "common"} else "common",
+            "loop_kind": data.get("loop_kind"),
+            "loop_number": int(data["loop_number"]) if data.get("loop_number") is not None else None,
+            "device_number": int(data["device_number"]) if data.get("device_number") is not None else None,
+            "label_dx": float(data["label_dx"]) if data.get("label_dx") is not None else None,
+            "label_dy": float(data["label_dy"]) if data.get("label_dy") is not None else None,
             **metadata,
         }

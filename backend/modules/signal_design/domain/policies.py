@@ -5,7 +5,13 @@ from __future__ import annotations
 from typing import Any
 
 from backend.fire_alarm_placement import calculate_fire_alarm_layout
-from backend.signal_planning import calculate_zkspc_layout, recalculate_cable_routes, route_length_m
+from backend.signal_planning import (
+    calculate_soue_layout,
+    calculate_zkspc_layout,
+    recalculate_cable_routes,
+    recalculate_soue_cable_routes,
+    route_length_m,
+)
 
 
 class ZkspcPlanningPolicy:
@@ -29,6 +35,18 @@ class FireAlarmLayoutPolicy:
         )
 
 
+class SoueLayoutPolicy:
+    """Encapsulates automatic SOUE device layout preview."""
+
+    @staticmethod
+    def preview(plan_data: dict[str, Any], *, scale_factor: float, system_type: str) -> dict[str, Any]:
+        return calculate_soue_layout(
+            plan_data,
+            scale_factor=scale_factor,
+            system_type=system_type,
+        )
+
+
 class CableRoutingPolicy:
     """Encapsulates cable routing and length calculation."""
 
@@ -40,7 +58,16 @@ class CableRoutingPolicy:
         instrument: dict[str, Any],
         alarms: list[dict[str, Any]],
         use_shared_trunk: bool,
+        subsystem_type: str = "sps",
     ) -> list[dict[str, Any]]:
+        if subsystem_type == "soue":
+            return recalculate_soue_cable_routes(
+                plan_data,
+                system_type=system_type,
+                instrument=instrument,
+                devices=alarms,
+                use_shared_trunk=use_shared_trunk,
+            )
         return recalculate_cable_routes(
             plan_data,
             system_type=system_type,

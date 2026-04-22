@@ -34,7 +34,17 @@ from consts import (
 class FloorPlanPDFGenerator:
     """Generate fire alarm PDFs from floor plan data."""
     
-    def __init__(self, project_data: dict, floor_plans_data: list):
+    def __init__(
+        self,
+        project_data: dict,
+        floor_plans_data: list,
+        general_data: dict | None = None,
+        general_instructions: dict | None = None,
+        conventional_symbols: dict | None = None,
+        equipment_specification: dict | None = None,
+        power_consumption_calculation: dict | None = None,
+        additional_info: dict | None = None,
+    ):
         """
         Initialize PDF generator.
         
@@ -44,6 +54,12 @@ class FloorPlanPDFGenerator:
         """
         self.project_data = project_data
         self.floor_plans_data = floor_plans_data
+        self.general_data = general_data
+        self.general_instructions = general_instructions
+        self.conventional_symbols = conventional_symbols
+        self.equipment_specification = equipment_specification
+        self.power_consumption_calculation = power_consumption_calculation
+        self.additional_info = additional_info
     
     def create_pdf(self, output_path: str = None) -> str:
         """
@@ -76,7 +92,13 @@ class FloorPlanPDFGenerator:
             number=self.project_data.get("number", 1),
             year=self.project_data.get("year", datetime.datetime.now().year),
             creds=creds,
-            number_of_floors=len(self.floor_plans_data)
+            number_of_floors=len(self.floor_plans_data),
+            general_data=self.general_data,
+            general_instructions=self.general_instructions,
+            conventional_symbols=self.conventional_symbols,
+            equipment_specification=self.equipment_specification,
+            power_consumption_calculation=self.power_consumption_calculation,
+            additional_info=self.additional_info,
         )
         
         # Add title pages
@@ -257,7 +279,17 @@ class FloorPlanPDFGenerator:
             c.drawString(x, y, text)
 
 
-def generate_project_pdf(project_data: dict, floor_plans_data: list, output_dir: str = "outputs") -> str:
+def generate_project_pdf(
+    project_data: dict,
+    floor_plans_data: list,
+    general_data: dict | None = None,
+    general_instructions: dict | None = None,
+    conventional_symbols: dict | None = None,
+    equipment_specification: dict | None = None,
+    power_consumption_calculation: dict | None = None,
+    additional_info: dict | None = None,
+    output_dir: str = "outputs",
+) -> str:
     """
     Convenience function to generate PDF for a project.
     
@@ -291,7 +323,13 @@ def generate_project_pdf(project_data: dict, floor_plans_data: list, output_dir:
         year=project_data.get("year", datetime.datetime.now().year),
         creds=creds,
         number_of_floors=len(floor_plans_data),
-        floor_plans_data=floor_plans_data
+        floor_plans_data=floor_plans_data,
+        general_data=general_data,
+        general_instructions=general_instructions,
+        conventional_symbols=conventional_symbols,
+        equipment_specification=equipment_specification,
+        power_consumption_calculation=power_consumption_calculation,
+        additional_info=additional_info,
     )
     
     # Generate all pages using the new launch method

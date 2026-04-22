@@ -29,6 +29,7 @@ from backend.signal_planning import (
     calculate_zkspc_layout,
     recalculate_cable_routes,
     route_length_m,
+    should_show_zc_terminator,
 )
 from backend.services.pipeline_state_helpers import update_signal_branch_state
 
@@ -248,6 +249,14 @@ class SignalService:
         route = self._get_cable_route(route_id)
         route.polyline_points = payload.polyline_points
         route.is_manual = payload.is_manual
+        if should_show_zc_terminator({"system_type": route.system_type, "route_kind": route.route_kind}):
+            if payload.zc_label_dx is not None:
+                route.zc_label_dx = float(payload.zc_label_dx)
+            if payload.zc_label_dy is not None:
+                route.zc_label_dy = float(payload.zc_label_dy)
+        else:
+            route.zc_label_dx = None
+            route.zc_label_dy = None
         floor_plan = self._get_floor_plan(route.floor_plan_id)
         route.length_m = route_length_m(route.polyline_points or [], floor_plan.scale_factor)
         update_signal_branch_state(

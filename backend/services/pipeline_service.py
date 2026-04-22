@@ -7,13 +7,14 @@ from typing import Iterable
 
 import cv2
 import numpy as np
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from backend.errors import AppError
 from backend.models import (
     Dimension as DimensionModel,
     Door as DoorModel,
     FloorPlan as FloorPlanModel,
+    RecognitionActiveModel,
     Room as RoomModel,
     Wall as WallModel,
     Window as WindowModel,
@@ -34,11 +35,14 @@ from backend.schemas import (
 )
 from backend.modules.pipeline.application.errors import WallValidationError
 from backend.services.element_service import ElementService
+from backend.services.recognition_training_feedback_service import RecognitionTrainingFeedbackService
 from backend.services.signal_service import SignalService
 from backend.services.storage_service import StorageService
 from floorplan.floorplan_types import (
     Dimension as DetectedDimension,
     LineSegment,
+    Opening as DetectedOpening,
+    OpeningType,
     Room as DetectedRoom,
     Wall as DetectedWall,
 )
@@ -58,6 +62,7 @@ class PipelineService:
         self.element_service = ElementService(db)
         self.signal_service = SignalService(db)
         self.state_manager = PipelineStateManager()
+        self.training_feedback_service = RecognitionTrainingFeedbackService(db, storage)
 
     def get_pipeline_state(self, floor_plan_id: int) -> PipelineStateRead:
         floor_plan = self._get_floor_plan(floor_plan_id)
@@ -68,6 +73,8 @@ class PipelineService:
         floor_plan = self._get_floor_plan(floor_plan_id)
         binary, preprocessed = self._load_preprocessed_images(floor_plan)
         state = self._load_pipeline_state(floor_plan)
+        active_model = self._get_active_recognition_model("walls")
+        detector_version = self._active_detector_version("walls", active_model)
 
         existing_walls = (
             self.db.query(WallModel)
@@ -78,7 +85,11 @@ class PipelineService:
             wall for wall in existing_walls if wall.length_m and wall.length_source in {"manual", "ocr"}
         ]
 
-        detected_walls = detect_walls(binary)
+        detected_walls = (
+            self._detect_walls_with_active_model(floor_plan, active_model)
+            if active_model is not None
+            else detect_walls(binary)
+        )
         detected_dimensions = assign_dimensions(detect_text_dimensions(preprocessed), detected_walls, [])
         self.db.query(WallModel).filter(WallModel.floor_plan_id == floor_plan_id).delete()
         self.db.query(DimensionModel).filter(DimensionModel.floor_plan_id == floor_plan_id).delete()
@@ -133,6 +144,14 @@ class PipelineService:
             self.db.add(db_dim)
 
         self.element_service.relink_or_prune_openings(floor_plan_id, delete_invalid=True)
+        self.db.flush()
+        self.db.expire(floor_plan, ["walls", "dimensions", "doors", "windows"])
+        self.training_feedback_service.save_detection_snapshot(
+            floor_plan,
+            step="walls",
+            step_revision=self._next_step_revision(state, "walls"),
+            detector_version=detector_version,
+        )
 
         self._set_step_status(state, "walls", "draft", detected=True)
         self._mark_downstream_stale(state, "walls")
@@ -202,47 +221,17 @@ class PipelineService:
         floor_plan = self._get_floor_plan(floor_plan_id)
         state = self._load_pipeline_state(floor_plan)
         self._ensure_step_validated(state, "walls", "Walls must be validated before openings detection")
+        active_model = self._get_active_recognition_model("openings")
+        detector_version = self._active_detector_version("openings", active_model)
 
         binary, preprocessed = self._load_preprocessed_images(floor_plan)
         walls = self._load_detected_walls_from_db(floor_plan)
-        all_gaps = []
-        for wall in walls:
-            all_gaps.extend(find_gaps_along_wall(wall, binary))
-
-        openings = []
-        for gap in all_gaps:
-            wall = next((item for item in walls if item.id == gap.wall_id), None)
-            if wall is None:
-                continue
-            classified = classify_opening(gap, wall, binary, preprocessed)
-            if classified is None:
-                continue
-            opening_type, confidence, metadata = classified
-            x1, y1, x2, y2 = gap.bbox
-            openings.append(
-                {
-                    "type": opening_type.value,
-                    "wall_id": wall.id,
-                    "bbox": (x1, y1, x2, y2),
-                    "confidence": float(confidence),
-                }
-            )
-        openings = remove_duplicate_openings(
-            [
-                # lightweight adapter object expected by remove_duplicate_openings
-                type(
-                    "OpeningAdapter",
-                    (),
-                    {
-                        "type": type("OpeningTypeAdapter", (), {"value": item["type"]})(),
-                        "wall_id": item["wall_id"],
-                        "bbox": item["bbox"],
-                        "confidence": item["confidence"],
-                    },
-                )()
-                for item in openings
-            ]
+        openings = (
+            self._detect_openings_with_active_model(floor_plan, walls, active_model)
+            if active_model is not None
+            else self._detect_openings_legacy(binary, preprocessed, walls)
         )
+        openings = remove_duplicate_openings(openings)
 
         self.db.query(DoorModel).filter(DoorModel.floor_plan_id == floor_plan_id).delete()
         self.db.query(WindowModel).filter(WindowModel.floor_plan_id == floor_plan_id).delete()
@@ -274,6 +263,14 @@ class PipelineService:
                     )
                 )
 
+        self.db.flush()
+        self.db.expire(floor_plan, ["walls", "doors", "windows"])
+        self.training_feedback_service.save_detection_snapshot(
+            floor_plan,
+            step="openings",
+            step_revision=self._next_step_revision(state, "openings"),
+            detector_version=detector_version,
+        )
         self._set_step_status(state, "openings", "draft", detected=True)
         self._mark_downstream_stale(state, "openings")
         state = self._store_pipeline_state(floor_plan, state)
@@ -301,6 +298,31 @@ class PipelineService:
         self.db.commit()
         self.db.refresh(floor_plan)
         return floor_plan, self._state_read(floor_plan.id, state)
+
+    def submit_step_feedback(
+        self,
+        floor_plan_id: int,
+        step: str,
+        *,
+        step_revision: int,
+        issue_tags: list[str] | None = None,
+        notes: str | None = None,
+    ) -> dict:
+        result = self.training_feedback_service.submit_step_feedback(
+            floor_plan_id,
+            step=step,
+            step_revision=step_revision,
+            issue_tags=issue_tags,
+            notes=notes,
+        )
+        self.db.commit()
+        return result
+
+    def get_feedback_stats(self) -> dict:
+        return self.training_feedback_service.get_feedback_stats()
+
+    def export_feedback_batches(self, *, batch_id: str | None = None, output_root=None) -> dict:
+        return self.training_feedback_service.export_feedback_batches(batch_id=batch_id, output_root=output_root)
 
     def detect_rooms(self, floor_plan_id: int) -> tuple[FloorPlanModel, PipelineStateRead]:
         floor_plan = self._get_floor_plan(floor_plan_id)
@@ -429,10 +451,314 @@ class PipelineService:
         return room
 
     def _load_preprocessed_images(self, floor_plan: FloorPlanModel) -> tuple[np.ndarray, np.ndarray]:
+        image_path = self._get_floor_plan_image_path(floor_plan)
+        return preprocess(str(image_path), rectify=True, deskew_enabled=False)
+
+    def _get_floor_plan_image_path(self, floor_plan: FloorPlanModel):
         image_path = self.storage.absolute_path(floor_plan.original_image_path)
         if image_path is None or not image_path.exists():
             raise AppError(400, "floor_plan_image_missing", "Floor plan image not found")
-        return preprocess(str(image_path), rectify=True, deskew_enabled=False)
+        return image_path
+
+    def _get_active_recognition_model(self, step: str) -> RecognitionActiveModel | None:
+        return (
+            self.db.query(RecognitionActiveModel)
+            .options(joinedload(RecognitionActiveModel.training_run))
+            .filter(RecognitionActiveModel.step == step)
+            .first()
+        )
+
+    @staticmethod
+    def _active_detector_version(step: str, active_model: RecognitionActiveModel | None) -> str | None:
+        if active_model is None:
+            return None
+        run_id = active_model.training_run.run_id if active_model.training_run is not None else None
+        if run_id:
+            return f"active-model:{step}:{run_id}"
+        return f"active-model:{step}"
+
+    def _detect_openings_legacy(
+        self,
+        binary: np.ndarray,
+        preprocessed: np.ndarray,
+        walls: list[DetectedWall],
+    ) -> list[DetectedOpening]:
+        all_gaps = []
+        for wall in walls:
+            all_gaps.extend(find_gaps_along_wall(wall, binary))
+
+        openings: list[DetectedOpening] = []
+        for gap in all_gaps:
+            wall = next((item for item in walls if item.id == gap.wall_id), None)
+            if wall is None:
+                continue
+            classified = classify_opening(gap, wall, binary, preprocessed)
+            if classified is None:
+                continue
+            opening_type, confidence, metadata = classified
+            x1, y1, x2, y2 = gap.bbox
+            openings.append(
+                DetectedOpening(
+                    type=opening_type,
+                    wall_id=wall.id,
+                    bbox=(int(x1), int(y1), int(x2), int(y2)),
+                    confidence=float(confidence),
+                    center=((x1 + x2) / 2.0, (y1 + y2) / 2.0),
+                    metadata=metadata,
+                )
+            )
+        return openings
+
+    def _predict_step_with_active_model(
+        self,
+        active_model: RecognitionActiveModel,
+        floor_plan: FloorPlanModel,
+        *,
+        default_imgsz: int,
+    ):
+        try:
+            from ultralytics import YOLO
+        except Exception as exc:  # pragma: no cover - runtime dependency
+            raise AppError(
+                500,
+                "recognition_active_model_runtime_unavailable",
+                f"Ultralytics runtime is unavailable: {exc}",
+            ) from exc
+
+        model_path = str(active_model.artifact_path or "").strip()
+        if not model_path:
+            raise AppError(400, "recognition_active_model_missing", "Active model checkpoint path is empty")
+
+        model_file = self._coerce_existing_path(model_path)
+        if model_file is None:
+            checkpoint = self.storage.absolute_path(model_path)
+            model_file = checkpoint if checkpoint is not None and checkpoint.exists() else None
+        if model_file is None:
+            raise AppError(400, "recognition_active_model_missing", f"Active model checkpoint not found: {model_path}")
+
+        image_path = self._get_floor_plan_image_path(floor_plan)
+        imgsz = int((active_model.config_snapshot or {}).get("imgsz") or default_imgsz)
+        results = YOLO(str(model_file)).predict(
+            source=str(image_path),
+            imgsz=imgsz,
+            verbose=False,
+            save=False,
+            device="cpu",
+        )
+        return results[0] if results else None
+
+    @staticmethod
+    def _coerce_existing_path(path_value: str):
+        try:
+            from pathlib import Path
+        except Exception:  # pragma: no cover - stdlib import guard
+            return None
+        candidate = Path(path_value)
+        return candidate if candidate.exists() else None
+
+    def _detect_walls_with_active_model(
+        self,
+        floor_plan: FloorPlanModel,
+        active_model: RecognitionActiveModel,
+    ) -> list[DetectedWall]:
+        prediction = self._predict_step_with_active_model(active_model, floor_plan, default_imgsz=1024)
+        if prediction is None:
+            return []
+
+        boxes = getattr(prediction, "boxes", None)
+        confidences = []
+        if boxes is not None and getattr(boxes, "conf", None) is not None:
+            confidences = boxes.conf.cpu().tolist()
+
+        detected_walls: list[DetectedWall] = []
+        if getattr(prediction, "masks", None) is not None and getattr(prediction.masks, "xy", None) is not None:
+            for index, polygon in enumerate(prediction.masks.xy, start=1):
+                wall = self._polygon_to_detected_wall(
+                    index,
+                    polygon,
+                    confidence=float(confidences[index - 1]) if index - 1 < len(confidences) else 1.0,
+                )
+                if wall is not None:
+                    detected_walls.append(wall)
+            return detected_walls
+
+        if boxes is not None and getattr(boxes, "xyxy", None) is not None:
+            for index, bbox in enumerate(boxes.xyxy.cpu().tolist(), start=1):
+                wall = self._bbox_to_detected_wall(
+                    index,
+                    bbox,
+                    confidence=float(confidences[index - 1]) if index - 1 < len(confidences) else 1.0,
+                )
+                if wall is not None:
+                    detected_walls.append(wall)
+        return detected_walls
+
+    def _detect_openings_with_active_model(
+        self,
+        floor_plan: FloorPlanModel,
+        walls: list[DetectedWall],
+        active_model: RecognitionActiveModel,
+    ) -> list[DetectedOpening]:
+        prediction = self._predict_step_with_active_model(active_model, floor_plan, default_imgsz=1280)
+        if prediction is None or getattr(prediction, "boxes", None) is None:
+            return []
+
+        boxes = prediction.boxes
+        classes = boxes.cls.cpu().tolist() if getattr(boxes, "cls", None) is not None else []
+        confidences = boxes.conf.cpu().tolist() if getattr(boxes, "conf", None) is not None else []
+        coordinates = boxes.xyxy.cpu().tolist() if getattr(boxes, "xyxy", None) is not None else []
+        openings: list[DetectedOpening] = []
+        for index, bbox in enumerate(coordinates):
+            class_id = int(classes[index]) if index < len(classes) else -1
+            if class_id not in {0, 1}:
+                continue
+            x1, y1, x2, y2 = [int(round(value)) for value in bbox]
+            if x2 <= x1 or y2 <= y1:
+                continue
+            opening_type = OpeningType.DOOR if class_id == 0 else OpeningType.WINDOW
+            wall_id = self._match_opening_to_wall((x1, y1, x2, y2), walls)
+            openings.append(
+                DetectedOpening(
+                    type=opening_type,
+                    wall_id=wall_id,
+                    bbox=(x1, y1, x2, y2),
+                    confidence=float(confidences[index]) if index < len(confidences) else 1.0,
+                    center=((x1 + x2) / 2.0, (y1 + y2) / 2.0),
+                    metadata={"source": "active_model"},
+                )
+            )
+        return openings
+
+    def _polygon_to_detected_wall(
+        self,
+        wall_id: int,
+        polygon,
+        *,
+        confidence: float,
+    ) -> DetectedWall | None:
+        contour = np.asarray(polygon, dtype=np.float32).reshape(-1, 1, 2)
+        if contour.shape[0] < 3:
+            return None
+        rect = cv2.minAreaRect(contour)
+        box_points = cv2.boxPoints(rect)
+        midline = self._box_points_to_midline(box_points)
+        if midline is None:
+            return None
+        start, end, thickness = midline
+        length = math.hypot(end[0] - start[0], end[1] - start[1])
+        if length <= max(thickness * 1.1, 8.0):
+            return None
+        angle = math.degrees(math.atan2(end[1] - start[1], end[0] - start[0])) % 180.0
+        return DetectedWall(
+            id=wall_id,
+            midline=LineSegment(
+                x1=float(start[0]),
+                y1=float(start[1]),
+                x2=float(end[0]),
+                y2=float(end[1]),
+                length=float(length),
+                angle=float(angle),
+            ),
+            thickness_px=float(max(thickness, 1.0)),
+            angle_deg=float(angle),
+            confidence=float(confidence),
+        )
+
+    def _bbox_to_detected_wall(
+        self,
+        wall_id: int,
+        bbox,
+        *,
+        confidence: float,
+    ) -> DetectedWall | None:
+        x1, y1, x2, y2 = [float(value) for value in bbox]
+        width = max(1.0, x2 - x1)
+        height = max(1.0, y2 - y1)
+        if max(width, height) <= 8.0:
+            return None
+        if width >= height:
+            start = (x1, (y1 + y2) / 2.0)
+            end = (x2, (y1 + y2) / 2.0)
+            thickness = height
+        else:
+            start = ((x1 + x2) / 2.0, y1)
+            end = ((x1 + x2) / 2.0, y2)
+            thickness = width
+        length = math.hypot(end[0] - start[0], end[1] - start[1])
+        angle = math.degrees(math.atan2(end[1] - start[1], end[0] - start[0])) % 180.0
+        return DetectedWall(
+            id=wall_id,
+            midline=LineSegment(
+                x1=float(start[0]),
+                y1=float(start[1]),
+                x2=float(end[0]),
+                y2=float(end[1]),
+                length=float(length),
+                angle=float(angle),
+            ),
+            thickness_px=float(max(thickness, 1.0)),
+            angle_deg=float(angle),
+            confidence=float(confidence),
+        )
+
+    @staticmethod
+    def _box_points_to_midline(box_points: np.ndarray) -> tuple[tuple[float, float], tuple[float, float], float] | None:
+        if len(box_points) != 4:
+            return None
+        points = [tuple(map(float, point)) for point in box_points]
+        edge0 = math.hypot(points[1][0] - points[0][0], points[1][1] - points[0][1])
+        edge1 = math.hypot(points[2][0] - points[1][0], points[2][1] - points[1][1])
+        if edge0 <= 1e-6 and edge1 <= 1e-6:
+            return None
+        if edge0 >= edge1:
+            start = ((points[0][0] + points[3][0]) / 2.0, (points[0][1] + points[3][1]) / 2.0)
+            end = ((points[1][0] + points[2][0]) / 2.0, (points[1][1] + points[2][1]) / 2.0)
+            thickness = edge1
+        else:
+            start = ((points[0][0] + points[1][0]) / 2.0, (points[0][1] + points[1][1]) / 2.0)
+            end = ((points[2][0] + points[3][0]) / 2.0, (points[2][1] + points[3][1]) / 2.0)
+            thickness = edge0
+        return start, end, thickness
+
+    def _match_opening_to_wall(
+        self,
+        bbox: tuple[int, int, int, int],
+        walls: list[DetectedWall],
+    ) -> int | None:
+        if not walls:
+            return None
+        x1, y1, x2, y2 = bbox
+        center = ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
+        opening_span = max(float(x2 - x1), float(y2 - y1), 6.0)
+        best_wall_id = None
+        best_score = float("inf")
+        for wall in walls:
+            start = (float(wall.midline.x1), float(wall.midline.y1))
+            end = (float(wall.midline.x2), float(wall.midline.y2))
+            projected = self._project_point_to_segment(center, start, end)
+            distance = math.hypot(center[0] - projected[0], center[1] - projected[1])
+            score = distance / max(float(wall.thickness_px or 1.0), 1.0)
+            if distance > max(float(wall.thickness_px or 1.0) * 2.5, opening_span):
+                score += 100.0
+            if score < best_score:
+                best_score = score
+                best_wall_id = wall.id
+        return int(best_wall_id) if best_wall_id is not None else None
+
+    @staticmethod
+    def _project_point_to_segment(
+        point: tuple[float, float],
+        start: tuple[float, float],
+        end: tuple[float, float],
+    ) -> tuple[float, float]:
+        dx = end[0] - start[0]
+        dy = end[1] - start[1]
+        length_sq = dx * dx + dy * dy
+        if length_sq <= 1e-9:
+            return start
+        factor = ((point[0] - start[0]) * dx + (point[1] - start[1]) * dy) / length_sq
+        factor = min(1.0, max(0.0, factor))
+        return start[0] + dx * factor, start[1] + dy * factor
 
     def _load_detected_walls_from_db(self, floor_plan: FloorPlanModel) -> list[DetectedWall]:
         walls = self.db.query(WallModel).filter(WallModel.floor_plan_id == floor_plan.id).all()
@@ -498,6 +824,11 @@ class PipelineService:
                 return float(value)
         return float(pairs[-1][0])
 
+    @staticmethod
+    def _next_step_revision(state: dict, step_name: str) -> int:
+        model = PipelineStateModel.normalize(state)
+        return int(model.steps[step_name].revision or 0) + 1
+
     def _load_pipeline_state(self, floor_plan: FloorPlanModel) -> dict:
         return self.state_manager.load(floor_plan.pipeline_state, floor_plan.active_signal_system_type)
 
@@ -505,7 +836,19 @@ class PipelineService:
         return self.state_manager.store(floor_plan, state)
 
     def _state_read(self, floor_plan_id: int, state: dict) -> PipelineStateRead:
-        return self.state_manager.read(floor_plan_id, state)
+        read = self.state_manager.read(floor_plan_id, state)
+        for step_name in ("walls", "openings"):
+            step_state = read.steps[step_name]
+            feedback_state = self.training_feedback_service.get_feedback_step_state(
+                floor_plan_id,
+                step_name,
+                int(step_state.revision or 0),
+            )
+            step_state.feedback_status = feedback_state["feedback_status"]
+            step_state.feedback_example_id = feedback_state["feedback_example_id"]
+            step_state.feedback_submitted_at = feedback_state["feedback_submitted_at"]
+            step_state.feedback_submitted_revision = feedback_state["feedback_submitted_revision"]
+        return read
 
     def _set_step_status(
         self,

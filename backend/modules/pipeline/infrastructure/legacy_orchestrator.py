@@ -39,3 +39,14 @@ class LegacyPipelineOrchestrator(PipelineOrchestrator):
     def commit_zkspc(self, floor_plan_id: int, payload):
         return self._service.commit_zkspc(floor_plan_id, payload)
 
+    def submit_step_feedback(self, floor_plan_id: int, step: str, *, step_revision: int, issue_tags=None, notes=None):
+        return self._service.submit_step_feedback(
+            floor_plan_id,
+            step,
+            step_revision=step_revision,
+            issue_tags=issue_tags,
+            notes=notes,
+        )
+
+    def get_feedback_stats(self):
+        return self._service.get_feedback_stats()

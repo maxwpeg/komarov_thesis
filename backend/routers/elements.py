@@ -18,6 +18,7 @@ from backend.mappers import (
     floor_plan_read,
     room_read,
     signal_instrument_read,
+    soue_device_read,
     stair_read,
     wall_read,
     window_read,
@@ -46,9 +47,14 @@ from backend.schemas import (
     RoomCreate,
     RoomRead,
     RoomUpdate,
+    SignalBranchStepCommitRequest,
     SignalInstrumentCreate,
     SignalInstrumentRead,
     SignalInstrumentUpdate,
+    SoueDeviceAutoLayoutRead,
+    SoueDeviceCreate,
+    SoueDeviceRead,
+    SoueDeviceUpdate,
     StairCreate,
     StairRead,
     StairUpdate,
@@ -266,6 +272,57 @@ def delete_fire_alarm(
     return MessageRead(message="Fire alarm deleted")
 
 
+@router.post("/api/soue-devices", response_model=SoueDeviceRead)
+def create_soue_device(
+    payload: SoueDeviceCreate,
+    service: ElementsGeometryUseCases = Depends(get_elements_geometry_use_cases),
+) -> SoueDeviceRead:
+    return soue_device_read(service.create_soue_device(payload))
+
+
+@router.get("/api/floor-plans/{floor_plan_id}/soue-devices", response_model=list[SoueDeviceRead])
+def list_soue_devices(
+    floor_plan_id: int,
+    service: ElementsGeometryUseCases = Depends(get_elements_geometry_use_cases),
+) -> list[SoueDeviceRead]:
+    return [soue_device_read(item) for item in service.list_soue_devices(floor_plan_id)]
+
+
+@router.post(
+    "/api/floor-plans/{floor_plan_id}/soue-devices/auto-layout",
+    response_model=SoueDeviceAutoLayoutRead,
+)
+def auto_layout_soue_devices(
+    floor_plan_id: int,
+    system_type: str = Query("non_addressable"),
+    signal_service: SignalDesignUseCases = Depends(get_signal_design_use_cases),
+) -> SoueDeviceAutoLayoutRead:
+    layout = signal_service.auto_layout_soue_devices(floor_plan_id, system_type)
+    return SoueDeviceAutoLayoutRead(
+        devices=layout["devices"],
+        summary=layout["summary"],
+        warnings=layout.get("warnings", []),
+    )
+
+
+@router.patch("/api/soue-devices/{soue_device_id}", response_model=SoueDeviceRead)
+def update_soue_device(
+    soue_device_id: int,
+    payload: SoueDeviceUpdate,
+    service: ElementsGeometryUseCases = Depends(get_elements_geometry_use_cases),
+) -> SoueDeviceRead:
+    return soue_device_read(service.update_soue_device(soue_device_id, payload))
+
+
+@router.delete("/api/soue-devices/{soue_device_id}", response_model=MessageRead)
+def delete_soue_device(
+    soue_device_id: int,
+    service: ElementsGeometryUseCases = Depends(get_elements_geometry_use_cases),
+) -> MessageRead:
+    service.delete_soue_device(soue_device_id)
+    return MessageRead(message="SOUe device deleted")
+
+
 @router.post("/api/floor-plans/{floor_plan_id}/batch-save", response_model=BatchSaveResult)
 def batch_save_floor_plan(
     floor_plan_id: int,
@@ -360,22 +417,41 @@ def delete_signal_instrument(
     return MessageRead(message="Signal instrument deleted")
 
 
+@router.post("/api/floor-plans/{floor_plan_id}/signal-instruments/commit", response_model=MessageRead)
+def commit_signal_instruments_step(
+    floor_plan_id: int,
+    payload: SignalBranchStepCommitRequest,
+    service: SignalDesignUseCases = Depends(get_signal_design_use_cases),
+) -> MessageRead:
+    service.commit_signal_instruments_step(floor_plan_id, payload.system_type)
+    return MessageRead(message="Signal instruments step saved")
+
+
 @router.post("/api/signal-instruments/{instrument_id}/merge-routes", response_model=list[CableRouteRead])
 def merge_routes_for_instrument(
     instrument_id: int,
     payload: InstrumentCableMergeRequest,
     service: SignalDesignUseCases = Depends(get_signal_design_use_cases),
 ) -> list[CableRouteRead]:
-    return [cable_route_read(route) for route in service.merge_routes_for_instrument(instrument_id, payload.device_ids)]
+    return [
+        cable_route_read(route)
+        for route in service.merge_routes_for_instrument(
+            instrument_id,
+            payload.device_ids,
+            payload.subsystem_type,
+            payload.system_type,
+        )
+    ]
 
 
 @router.get("/api/floor-plans/{floor_plan_id}/cable-routes", response_model=list[CableRouteRead])
 def list_cable_routes(
     floor_plan_id: int,
     system_type: str | None = Query(None),
+    subsystem_type: str | None = Query(None),
     service: SignalDesignUseCases = Depends(get_signal_design_use_cases),
 ) -> list[CableRouteRead]:
-    return [cable_route_read(route) for route in service.list_cable_routes(floor_plan_id, system_type)]
+    return [cable_route_read(route) for route in service.list_cable_routes(floor_plan_id, system_type, subsystem_type)]
 
 
 @router.post("/api/floor-plans/{floor_plan_id}/cable-routes/recalculate", response_model=list[CableRouteRead])
@@ -384,7 +460,25 @@ def recalculate_cable_routes_api(
     payload: CableRoutesRecalculateRequest,
     service: SignalDesignUseCases = Depends(get_signal_design_use_cases),
 ) -> list[CableRouteRead]:
-    return [cable_route_read(route) for route in service.recalculate_routes(floor_plan_id, payload.system_type, payload.use_shared_trunk)]
+    return [
+        cable_route_read(route)
+        for route in service.recalculate_routes(
+            floor_plan_id,
+            payload.system_type,
+            payload.subsystem_type,
+            payload.use_shared_trunk,
+        )
+    ]
+
+
+@router.post("/api/floor-plans/{floor_plan_id}/cable-routes/commit", response_model=MessageRead)
+def commit_cable_routes_step(
+    floor_plan_id: int,
+    payload: CableRoutesRecalculateRequest,
+    service: SignalDesignUseCases = Depends(get_signal_design_use_cases),
+) -> MessageRead:
+    service.commit_routes_step(floor_plan_id, payload.system_type, payload.subsystem_type)
+    return MessageRead(message="Cable routes step saved")
 
 
 @router.patch("/api/cable-routes/{route_id}", response_model=CableRouteRead)

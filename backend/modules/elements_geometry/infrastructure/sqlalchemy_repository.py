@@ -13,6 +13,7 @@ from backend.modules.shared.infrastructure.persistence.models import (
     FloorPlan as FloorPlanModel,
     Room as RoomModel,
     SignalInstrument as SignalInstrumentModel,
+    SoueDevice as SoueDeviceModel,
     Stair as StairModel,
     Wall as WallModel,
     Window as WindowModel,
@@ -54,6 +55,9 @@ class SqlAlchemyElementsRepository(ElementsRepository):
     def get_fire_alarm(self, fire_alarm_id: int) -> FireAlarmModel:
         return self._get_or_404(FireAlarmModel, fire_alarm_id, "fire_alarm_not_found", "Fire alarm not found")
 
+    def get_soue_device(self, soue_device_id: int) -> SoueDeviceModel:
+        return self._get_or_404(SoueDeviceModel, soue_device_id, "soue_device_not_found", "SOUe device not found")
+
     def list_walls(self, floor_plan_id: int) -> list[WallModel]:
         return self.session.query(WallModel).filter(WallModel.floor_plan_id == floor_plan_id).all()
 
@@ -74,6 +78,9 @@ class SqlAlchemyElementsRepository(ElementsRepository):
 
     def list_fire_alarms(self, floor_plan_id: int) -> list[FireAlarmModel]:
         return self.session.query(FireAlarmModel).filter(FireAlarmModel.floor_plan_id == floor_plan_id).all()
+
+    def list_soue_devices(self, floor_plan_id: int) -> list[SoueDeviceModel]:
+        return self.session.query(SoueDeviceModel).filter(SoueDeviceModel.floor_plan_id == floor_plan_id).all()
 
     def list_signal_instruments(self, floor_plan_id: int, system_type: str | None = None) -> list[SignalInstrumentModel]:
         query = self.session.query(SignalInstrumentModel).filter(SignalInstrumentModel.floor_plan_id == floor_plan_id)
@@ -110,6 +117,9 @@ class SqlAlchemyElementsRepository(ElementsRepository):
     def create_fire_alarm(self, data: dict) -> FireAlarmModel:
         return FireAlarmModel(**data)
 
+    def create_soue_device(self, data: dict) -> SoueDeviceModel:
+        return SoueDeviceModel(**data)
+
     def create_cable_route(self, data: dict) -> CableRouteModel:
         return CableRouteModel(**data)
 
@@ -125,14 +135,20 @@ class SqlAlchemyElementsRepository(ElementsRepository):
     def refresh(self, entity) -> None:
         self.session.refresh(entity)
 
-    def delete_routes_for_instrument(self, instrument_id: int) -> None:
-        self.session.query(CableRouteModel).filter(CableRouteModel.instrument_id == instrument_id).delete(synchronize_session=False)
+    def delete_routes_for_instrument(self, instrument_id: int, subsystem_type: str | None = None) -> None:
+        query = self.session.query(CableRouteModel).filter(CableRouteModel.instrument_id == instrument_id)
+        if subsystem_type:
+            query = query.filter(CableRouteModel.subsystem_type == subsystem_type)
+        query.delete(synchronize_session=False)
 
-    def delete_routes_for_branch(self, floor_plan_id: int, system_type: str) -> None:
-        self.session.query(CableRouteModel).filter(
+    def delete_routes_for_branch(self, floor_plan_id: int, system_type: str, subsystem_type: str | None = None) -> None:
+        query = self.session.query(CableRouteModel).filter(
             CableRouteModel.floor_plan_id == floor_plan_id,
             CableRouteModel.system_type == system_type,
-        ).delete(synchronize_session=False)
+        )
+        if subsystem_type:
+            query = query.filter(CableRouteModel.subsystem_type == subsystem_type)
+        query.delete(synchronize_session=False)
 
     def get_optional_by_type(self, element_type: str, entity_id: int):
         model_map = {
@@ -141,6 +157,7 @@ class SqlAlchemyElementsRepository(ElementsRepository):
             "door": DoorModel,
             "window": WindowModel,
             "fire_alarm": FireAlarmModel,
+            "soue_device": SoueDeviceModel,
             "room": RoomModel,
             "dimension": DimensionModel,
         }

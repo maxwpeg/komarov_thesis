@@ -18,8 +18,8 @@ PAGESIZE_A3 = A3
 PAGESIZE_A3_LANDSCAPE = (A3[1], A3[0])  # Landscape orientation
 
 # Default constants for PDF page layout and styling
-DEFAULT_OUTER_BORDER_THICKNESS_MM = 0.8 * mm
-DEFAULT_INNER_BORDER_THICKNESS_MM = 0.5 * mm
+DEFAULT_OUTER_BORDER_THICKNESS_MM = 0.4 * mm
+DEFAULT_INNER_BORDER_THICKNESS_MM = 0.25 * mm
 
 # Default border sizes in millimeters
 DEFAULT_LEFT_BORDER_MM = 20.0 * mm
@@ -81,8 +81,9 @@ MAIN_TITLE_BOX_2_LINES: list[tuple[str, float, float, float, float]] = [
                 ("v", 30, 15, 15, DEFAULT_OUTER_BORDER_THICKNESS_MM),
                 ("v", 40, 15, 15, DEFAULT_OUTER_BORDER_THICKNESS_MM),
                 ("v", 55, 15, 15, DEFAULT_OUTER_BORDER_THICKNESS_MM),
+                ("v", 155, 15, 15, DEFAULT_OUTER_BORDER_THICKNESS_MM),
                 ("v", 170, 15, 15, DEFAULT_OUTER_BORDER_THICKNESS_MM),
-                ("h", 170, 10, 15, DEFAULT_OUTER_BORDER_THICKNESS_MM)
+                ("h", 155, 10, 30, DEFAULT_OUTER_BORDER_THICKNESS_MM)
 ]
 
 # Default main title text configurations for type '1'
@@ -109,7 +110,8 @@ MAIN_TITLE_BOX_2_TEXTS: list[tuple[str, float, float, float, float, str]] = [
         ("Nдок.", 30, 0, 10, 5, LEFT),
         ("Подпись", 40, 0, 15, 5, LEFT),
         ("Дата", 55, 0, 10, 5, LEFT),
-        ("Лист", 170, 10, 15, 5, CENTER),
+        ("Лист", 155, 10, 15, 5, CENTER),
+        ("Листов", 170, 10, 15, 5, CENTER),
     ]
 
 # Default project information
@@ -124,7 +126,7 @@ DEFAULT_PROJECT_NUMBER = 1
 DEFAULT_PROJECT_YEAR = 26
 DEFAULT_NUMBER_OF_FLOORS = 1
 DEFAULT_PROJECT_DESCRIPTION = "Система пожарной сигнализации и система оповещения и управления эвакуацией людей при пожаре"
-DEFAULT_STAGE = "«Р»"
+DEFAULT_STAGE = "\u00ab\u0420\u00bb"
 
 DEFAULT_CREDS: list[str] = [
     DEFAULT_CONTRACTOR_NAME,
@@ -164,8 +166,9 @@ MAIN_TITLE_BOX_1_FILLINGS_POSITIONINGS: dict[str, tuple[float, float, float, flo
 }
 
 MAIN_TITLE_BOX_2_FILLINGS_POSITIONINGS: dict[str, tuple[float, float, float, float, str]] = {
-    "Sheet Number": (170, 0, 15, 10, CENTER),
-    "Project Code": (65, 0, 105, 15, CENTER),
+    "Project Code": (65, 0, 90, 15, CENTER),
+    "Sheet Number": (155, 0, 15, 10, CENTER),
+    "Total Sheets": (170, 0, 15, 10, CENTER),
 }
 
 PROJECT_DESCRIPTION_BOX_HEIGHT_MM = 15 * mm

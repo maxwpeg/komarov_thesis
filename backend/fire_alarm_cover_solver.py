@@ -846,6 +846,9 @@ def solve_room_detector_positions(
 ) -> tuple[list[PointM], list[str]]:
     """Return detector positions in pixel coordinates for a room."""
 
+    if room.get("room_type") == "необслуживаемое":
+        return [], []
+
     if room.get("room_type") == "РЅРµРѕР±СЃР»СѓР¶РёРІР°РµРјРѕРµ":
         return [], []
 

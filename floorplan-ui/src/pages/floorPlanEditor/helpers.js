@@ -23,6 +23,8 @@ export function getWallBoundarySegments(x1, y1, x2, y2, thicknessPx) {
   };
 }
 
+export const COMMON_SIGNAL_SYSTEM = 'common';
+
 export function formatDimensionMeters(value) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) {
     return '—';
@@ -77,12 +79,14 @@ export function createEmptyBatchPayload() {
     create_doors: [],
     create_windows: [],
     create_fire_alarms: [],
+    create_soue_devices: [],
     update_walls: [],
     update_stairs: [],
     update_doors: [],
     update_windows: [],
     update_rooms: [],
     update_fire_alarms: [],
+    update_soue_devices: [],
   };
 }
 
@@ -230,6 +234,15 @@ export function getFireAlarmRoomCoordinates(alarm, rooms, scaleFactor) {
   };
 }
 
+export function shouldShowRouteTerminator(route) {
+  if (String(route?.subsystem_type || 'sps') !== 'sps') {
+    return false;
+  }
+  const systemType = String(route?.system_type || 'non_addressable');
+  const routeKind = String(route?.route_kind || '');
+  return systemType === 'non_addressable' && ['zone_loop', 'manual_line'].includes(routeKind);
+}
+
 export function roomContainsStair(room, stairs) {
   if (!room?.boundary_points?.length || !stairs?.length) {
     return false;
@@ -261,6 +274,13 @@ export const SIGNAL_INSTRUMENT_OPTIONS = [
   { key: 'loop_controller', label: 'Контроллер шлейфа', supportsMerge: true },
   { key: 'annunciator', label: 'Оповещатель', supportsMerge: false },
 ];
+
+export const SOUE_VISUAL_STYLE = {
+  base: '#0000FF',
+  hover: '#2a37ff',
+  selected: '#0000c7',
+  fill: '#ffffff',
+};
 
 function hexToRgb(hexColor) {
   const normalized = String(hexColor || '').replace('#', '');
@@ -433,11 +453,18 @@ export function buildZkspcStyleMap(zones = [], rooms = [], floorPlanId = 0) {
 }
 
 export function normalizeSignalSystemType(value) {
+  if (value === COMMON_SIGNAL_SYSTEM) {
+    return COMMON_SIGNAL_SYSTEM;
+  }
   return value === 'addressable' ? 'addressable' : 'non_addressable';
 }
 
 export function getSignalSystemLabel(value) {
-  return normalizeSignalSystemType(value) === 'addressable' ? 'Адресная' : 'Безадресная';
+  const normalized = normalizeSignalSystemType(value);
+  if (normalized === COMMON_SIGNAL_SYSTEM) {
+    return 'Общий контур';
+  }
+  return normalized === 'addressable' ? 'Адресная' : 'Безадресная';
 }
 
 export function formatCableMeters(value) {
@@ -479,17 +506,29 @@ export function getBranchFireAlarms(fireAlarms, systemType) {
   return (fireAlarms || []).filter((alarm) => normalizeSignalSystemType(alarm.system_type) === normalizeSignalSystemType(systemType));
 }
 
-export function getBranchCableRoutes(routes, systemType) {
-  return (routes || []).filter((route) => normalizeSignalSystemType(route.system_type) === normalizeSignalSystemType(systemType));
+export function getBranchSoueDevices(devices, systemType) {
+  return (devices || []).filter((device) => normalizeSignalSystemType(device.system_type) === normalizeSignalSystemType(systemType));
+}
+
+export function getBranchCableRoutes(routes, systemType, subsystemType = null) {
+  return (routes || []).filter((route) => {
+    if (normalizeSignalSystemType(route.system_type) !== normalizeSignalSystemType(systemType)) {
+      return false;
+    }
+    if (!subsystemType) {
+      return true;
+    }
+    return String(route.subsystem_type || 'sps') === String(subsystemType);
+  });
 }
 
 export function getBranchSignalInstruments(instruments, systemType) {
   return (instruments || []).filter((instrument) => normalizeSignalSystemType(instrument.system_type) === normalizeSignalSystemType(systemType));
 }
 
-export function getSignalBranchSummary({ fireAlarms = [], cableRoutes = [], systemType }) {
+export function getSignalBranchSummary({ fireAlarms = [], cableRoutes = [], systemType, subsystemType = 'sps' }) {
   const branchAlarms = getBranchFireAlarms(fireAlarms, systemType);
-  const branchRoutes = getBranchCableRoutes(cableRoutes, systemType);
+  const branchRoutes = getBranchCableRoutes(cableRoutes, systemType, subsystemType);
   return {
     detectorCount: branchAlarms.length,
     cableLengthM: branchRoutes.reduce((sum, route) => sum + Number(route.length_m || 0), 0),

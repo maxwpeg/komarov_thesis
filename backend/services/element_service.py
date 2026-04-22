@@ -707,7 +707,7 @@ class ElementService:
             signed = ((center_x - wall.x1) * normal_x) + ((center_y - wall.y1) * normal_y)
             positive_offset, negative_offset = self._wall_normal_offsets_px(wall, scale_factor)
             thickness_px = max(1.0, (wall.thickness or 1.0) / scale_factor)
-            max_distance = max(thickness_px * 0.5, min(float(width), float(height), 40.0))
+            max_distance = max(thickness_px, min(float(width), float(height), 40.0))
             within_projection = -projection_margin <= along <= (length + projection_margin)
             within_thickness = (
                 signed >= (-negative_offset - max_distance)

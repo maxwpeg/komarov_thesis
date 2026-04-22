@@ -48,6 +48,30 @@ class StorageService:
 
         return SavedUpload(relative_path=f"uploads/{filename}", width=width, height=height)
 
+    def save_equipment_upload(self, upload: UploadFile, equipment_id: int) -> SavedUpload:
+        extension = Path(upload.filename or "upload.bin").suffix or ".bin"
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
+        filename = f"equipment_{equipment_id}_{timestamp}{extension}"
+        target = settings.uploads_dir / filename
+        with target.open("wb") as buffer:
+            self._copy_stream(upload.file, buffer)
+
+        with Image.open(target) as image:
+            width = image.width
+            height = image.height
+
+        return SavedUpload(relative_path=f"uploads/{filename}", width=width, height=height)
+
+    def save_equipment_document_upload(self, upload: UploadFile, equipment_id: int, document_kind: str) -> str:
+        extension = Path(upload.filename or "document.pdf").suffix or ".pdf"
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
+        safe_kind = "".join(ch for ch in str(document_kind or "document") if ch.isalnum() or ch in {"_", "-"}) or "document"
+        filename = f"equipment_{equipment_id}_{safe_kind}_{timestamp}{extension}"
+        target = settings.uploads_dir / filename
+        with target.open("wb") as buffer:
+            self._copy_stream(upload.file, buffer)
+        return f"uploads/{filename}"
+
     def delete_relative_path(self, relative_path: str | None) -> None:
         path = self.absolute_path(relative_path)
         if path and path.exists():
@@ -85,4 +109,3 @@ class StorageService:
             if not chunk:
                 break
             destination.write(chunk)
-

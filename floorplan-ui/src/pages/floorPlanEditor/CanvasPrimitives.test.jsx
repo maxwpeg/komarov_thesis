@@ -28,9 +28,9 @@ jest.mock('react-konva', () => {
   };
 });
 
-test('delete button uses plain latin x label', () => {
-  render(<DeleteButton x={0} y={0} onClick={() => {}} />);
+test('delete button renders a vector cross instead of a broken text glyph', () => {
+  const { container } = render(<DeleteButton x={0} y={0} onClick={() => {}} />);
 
-  expect(screen.getByText('x')).toBeInTheDocument();
-  expect(screen.queryByText('Г—')).not.toBeInTheDocument();
+  expect(container.querySelectorAll('[data-konva="Line"]')).toHaveLength(2);
+  expect(screen.queryByText('Р“вЂ”')).not.toBeInTheDocument();
 });

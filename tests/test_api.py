@@ -151,6 +151,52 @@ def test_project_update_recalculates_code_when_year_changes(api_server: str):
     assert "/25-" in updated["code"]
 
 
+def test_project_case_fields_round_trip(api_server: str):
+    create_response = requests.post(
+        f"{api_server}/api/projects",
+        json={
+            "name": "Case Project",
+            "project_type": "PS",
+            "year": 2026,
+            "contractor": "Contractor",
+            "engineer": "Engineer",
+            "cpe": "CPE",
+            "checker": "Checker",
+            "facility": "Административное здание",
+            "facility_genitive": "Административного здания",
+            "facility_instrumental": "Административным зданием",
+            "facility_address": "Address",
+            "project_description": "Description",
+            "stage": "R",
+            "number_of_floors": 1,
+        },
+        timeout=10,
+    )
+    assert create_response.status_code == 200
+    project = create_response.json()
+    assert project["facility_genitive"] == "Административного здания"
+    assert project["facility_instrumental"] == "Административным зданием"
+
+    get_response = requests.get(f"{api_server}/api/projects/{project['id']}", timeout=10)
+    assert get_response.status_code == 200
+    fetched = get_response.json()
+    assert fetched["facility_genitive"] == "Административного здания"
+    assert fetched["facility_instrumental"] == "Административным зданием"
+
+    update_response = requests.patch(
+        f"{api_server}/api/projects/{project['id']}",
+        json={
+            "facility_genitive": "Нового административного здания",
+            "facility_instrumental": "Новым административным зданием",
+        },
+        timeout=10,
+    )
+    assert update_response.status_code == 200
+    updated = update_response.json()
+    assert updated["facility_genitive"] == "Нового административного здания"
+    assert updated["facility_instrumental"] == "Новым административным зданием"
+
+
 def test_project_numbers_are_counted_separately_per_year_and_reuse_smallest_free_on_year_change(api_server: str):
     payload = {
         "name": "Project",
@@ -397,6 +443,150 @@ def test_fire_alarm_auto_layout_preview_and_batch_create(api_server: str):
     assert fire_alarm["room_id"] is not None
     assert fire_alarm["offset_left_m"] == 2.0
     assert fire_alarm["offset_top_m"] == 3.0
+
+
+def test_doors_auto_fill_evacuation_exit_and_keep_manual_override(api_server: str):
+    project = create_project(api_server)
+    floor_plan = create_floor_plan(api_server, project["id"], scale_factor=100.0)
+
+    requests.post(
+        f"{api_server}/api/rooms",
+        json={
+            "floor_plan_id": floor_plan["id"],
+            "name": "Hall",
+            "room_type": "general",
+            "boundary_points": [[0, 0], [100, 0], [100, 100], [0, 100]],
+            "max_occupancy": 60,
+        },
+        timeout=10,
+    ).raise_for_status()
+    wall = requests.post(
+        f"{api_server}/api/walls",
+        json={
+            "floor_plan_id": floor_plan["id"],
+            "x1": 0,
+            "y1": 0,
+            "x2": 100,
+            "y2": 0,
+            "thickness": 200,
+            "is_load_bearing": False,
+            "length_m": 10.0,
+            "length_source": "manual",
+        },
+        timeout=10,
+    ).json()
+
+    auto_response = requests.post(
+        f"{api_server}/api/doors",
+        json={
+            "floor_plan_id": floor_plan["id"],
+            "x": 20,
+            "y": -5,
+            "width": 20,
+            "height": 10,
+            "wall_id": wall["id"],
+            "rotation_deg": 0,
+        },
+        timeout=10,
+    )
+    assert auto_response.status_code == 200
+    auto_door = auto_response.json()
+    assert auto_door["is_evacuation_exit"] is True
+
+    manual_response = requests.post(
+        f"{api_server}/api/doors",
+        json={
+            "floor_plan_id": floor_plan["id"],
+            "x": 50,
+            "y": -5,
+            "width": 20,
+            "height": 10,
+            "wall_id": wall["id"],
+            "rotation_deg": 0,
+            "is_evacuation_exit": False,
+        },
+        timeout=10,
+    )
+    assert manual_response.status_code == 200
+    manual_door = manual_response.json()
+    assert manual_door["is_evacuation_exit"] is False
+
+    batch_response = requests.post(
+        f"{api_server}/api/floor-plans/{floor_plan['id']}/batch-save",
+        json={
+            "create_doors": [
+                {
+                    "floor_plan_id": floor_plan["id"],
+                    "x": 80,
+                    "y": -5,
+                    "width": 20,
+                    "height": 10,
+                    "wall_id": wall["id"],
+                    "rotation_deg": 0,
+                }
+            ]
+        },
+        timeout=10,
+    )
+    assert batch_response.status_code == 200
+    created_doors = batch_response.json()["floor_plan"]["doors"]
+    assert any(door["id"] != manual_door["id"] and door["id"] != auto_door["id"] and door["is_evacuation_exit"] is True for door in created_doors)
+
+
+def test_soue_auto_layout_preview_returns_draft_devices(api_server: str):
+    project = create_project(api_server)
+    floor_plan = create_floor_plan(api_server, project["id"], scale_factor=100.0, ceiling_height_mm=2700.0)
+
+    requests.post(
+        f"{api_server}/api/rooms",
+        json={
+            "floor_plan_id": floor_plan["id"],
+            "name": "Hall",
+            "room_type": "general",
+            "boundary_points": [[0, 0], [120, 0], [120, 120], [0, 120]],
+            "max_occupancy": 60,
+        },
+        timeout=10,
+    ).raise_for_status()
+    wall = requests.post(
+        f"{api_server}/api/walls",
+        json={
+            "floor_plan_id": floor_plan["id"],
+            "x1": 0,
+            "y1": 0,
+            "x2": 120,
+            "y2": 0,
+            "thickness": 200,
+            "is_load_bearing": False,
+            "length_m": 12.0,
+            "length_source": "manual",
+        },
+        timeout=10,
+    ).json()
+    requests.post(
+        f"{api_server}/api/doors",
+        json={
+            "floor_plan_id": floor_plan["id"],
+            "x": 45,
+            "y": -5,
+            "width": 30,
+            "height": 10,
+            "wall_id": wall["id"],
+            "rotation_deg": 0,
+        },
+        timeout=10,
+    ).raise_for_status()
+
+    preview_response = requests.post(
+        f"{api_server}/api/floor-plans/{floor_plan['id']}/soue-devices/auto-layout?system_type=non_addressable",
+        timeout=10,
+    )
+    assert preview_response.status_code == 200
+    preview = preview_response.json()
+    assert preview["devices"]
+    assert all("id" not in device for device in preview["devices"])
+    assert all("floor_plan_id" not in device for device in preview["devices"])
+    assert any(device["device_type"] == "exit_sign" for device in preview["devices"])
 
 
 def test_stair_crud_and_batch_update(api_server: str):

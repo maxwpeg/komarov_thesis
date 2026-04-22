@@ -50,6 +50,8 @@ class SqlAlchemyProjectRepository(ProjectRepository):
             cpe=payload.cpe,
             checker=payload.checker,
             facility=payload.facility,
+            facility_genitive=payload.facility_genitive,
+            facility_instrumental=payload.facility_instrumental,
             facility_address=payload.facility_address,
             project_description=payload.project_description,
             stage=payload.stage,

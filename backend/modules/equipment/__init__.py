@@ -1,0 +1,2 @@
+"""Equipment catalog bounded context."""
+

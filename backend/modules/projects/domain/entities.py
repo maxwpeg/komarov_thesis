@@ -22,6 +22,8 @@ class ProjectRecord:
     cpe: str
     checker: str
     facility: str
+    facility_genitive: str | None = None
+    facility_instrumental: str | None = None
     facility_address: str | None = None
     project_description: str | None = None
     stage: str = "R"
@@ -43,6 +45,8 @@ class ProjectRecord:
             cpe=project.cpe,
             checker=project.checker,
             facility=project.facility,
+            facility_genitive=getattr(project, "facility_genitive", None),
+            facility_instrumental=getattr(project, "facility_instrumental", None),
             facility_address=project.facility_address,
             project_description=project.project_description,
             stage=project.stage,

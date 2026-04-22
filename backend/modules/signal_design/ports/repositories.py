@@ -14,6 +14,9 @@ class SignalDesignRepository(Protocol):
     def get_instrument(self, instrument_id: int):
         """Return a signal instrument model or raise."""
 
+    def get_soue_device(self, device_id: int):
+        """Return a SOUE device model or raise."""
+
     def get_route(self, route_id: int):
         """Return a cable route model or raise."""
 
@@ -23,7 +26,10 @@ class SignalDesignRepository(Protocol):
     def list_instruments(self, floor_plan_id: int, system_type: str | None = None) -> list:
         """List signal instruments."""
 
-    def list_routes(self, floor_plan_id: int, system_type: str | None = None) -> list:
+    def list_soue_devices(self, floor_plan_id: int, system_type: str | None = None) -> list:
+        """List SOUE devices."""
+
+    def list_routes(self, floor_plan_id: int, system_type: str | None = None, subsystem_type: str | None = None) -> list:
         """List cable routes."""
 
     def list_fire_alarms(self, floor_plan_id: int, system_type: str | None = None) -> list:
@@ -41,6 +47,9 @@ class SignalDesignRepository(Protocol):
     def create_instrument(self, data: dict):
         """Create a signal instrument persistence entity."""
 
+    def create_soue_device(self, data: dict):
+        """Create a SOUE device persistence entity."""
+
     def create_route(self, data: dict):
         """Create a cable route persistence entity."""
 
@@ -56,8 +65,8 @@ class SignalDesignRepository(Protocol):
     def refresh(self, entity) -> None:
         """Refresh an entity from persistence."""
 
-    def delete_routes_for_instrument(self, instrument_id: int) -> None:
+    def delete_routes_for_instrument(self, instrument_id: int, subsystem_type: str | None = None) -> None:
         """Delete persisted routes for one instrument."""
 
-    def delete_routes_for_branch(self, floor_plan_id: int, system_type: str) -> None:
+    def delete_routes_for_branch(self, floor_plan_id: int, system_type: str, subsystem_type: str | None = None) -> None:
         """Delete persisted routes for one branch."""

@@ -1,0 +1,16 @@
+[run]
+branch = True
+parallel = True
+source =
+    backend
+    floorplan
+    tests
+omit =
+    */__pycache__/*
+    */site-packages/*
+    */config-*.py
+
+[report]
+show_missing = True
+skip_covered = False
+precision = 2

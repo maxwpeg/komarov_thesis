@@ -24,7 +24,7 @@ class Page:
         self.page_width, self.page_height = page_format
         # Main title box configuration
         self.main_title_box_type = main_title_box_type
-        self.creds = creds
+        self.creds = creds.copy()
         self.page_number = page_number
         self.borders_mm = borders_mm
         self.main_title_box_x = self.page_width - self.borders_mm["right"] - MAIN_TITLE_BOX_DICT.get(
@@ -181,7 +181,8 @@ class Page:
 
     def fill_main_title_box(self, c: canvas.Canvas, box_type: str):
         """Fill in the main title box with project credentials."""
-        self.creds["Sheet Number"] = str(self.page_number)
+        if not str(self.creds.get("Sheet Number", "")).strip():
+            self.creds["Sheet Number"] = str(self.page_number)
         fillings = MAIN_TITLE_BOX_1_FILLINGS_POSITIONINGS if box_type == "1" else MAIN_TITLE_BOX_2_FILLINGS_POSITIONINGS
         for key, val in fillings.items():
             x_mm, y_mm, width_mm, height_mm, align = val

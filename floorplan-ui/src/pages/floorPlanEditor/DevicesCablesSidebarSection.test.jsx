@@ -3,9 +3,13 @@ import { fireEvent, render, screen } from '@testing-library/react';
 
 import DevicesCablesSidebarSection from './DevicesCablesSidebarSection';
 
-test('renders readable devices and cables heading and delete button label', () => {
-  const onSelectTool = jest.fn();
-  const onSelectInstrument = jest.fn();
+function getButtonByTextContent(...fragments) {
+  return screen.getAllByRole('button').find((button) => (
+    fragments.some((fragment) => button.textContent?.includes(fragment))
+  ));
+}
+
+test('renders the sidebar controls and uses the normalized delete cross label', () => {
   const onDeleteSignalInstrument = jest.fn();
 
   render(
@@ -14,17 +18,17 @@ test('renders readable devices and cables heading and delete button label', () =
       visibleSignalInstruments={[
         {
           id: 10,
-          name: 'РџРџРљРџ',
+          name: '\u041f\u041f\u041a\u041f',
           instrument_type: 'control_panel',
-          system_type: 'non_addressable',
+          system_type: 'common',
         },
       ]}
       visibleCableRoutes={[]}
       selectedElement={null}
       mergeInstrumentId={null}
       mergeSelectionCount={0}
-      onSelectTool={onSelectTool}
-      onSelectInstrument={onSelectInstrument}
+      onSelectTool={jest.fn()}
+      onSelectInstrument={jest.fn()}
       onStartMerge={jest.fn()}
       onApplyMerge={jest.fn()}
       onCancelMerge={jest.fn()}
@@ -32,11 +36,11 @@ test('renders readable devices and cables heading and delete button label', () =
     />,
   );
 
-  expect(screen.getByRole('heading', { name: 'РџСЂРёР±РѕСЂС‹ Рё РєР°Р±РµР»Рё' })).toBeInTheDocument();
-  expect(screen.queryByText('\\u041f\\u0440\\u0438\\u0431\\u043e\\u0440\\u044b')).not.toBeInTheDocument();
+  expect(screen.getByRole('heading', { name: /\u041f\u0440\u0438\u0431\u043e\u0440\u044b \u0438 \u043a\u0430\u0431\u0435\u043b\u0438/i })).toBeInTheDocument();
+  expect(getButtonByTextContent('\u0412\u044b\u0431\u0440\u0430\u0442\u044c')).toBeTruthy();
 
-  fireEvent.click(screen.getByRole('button', { name: 'Г—' }));
-  expect(onDeleteSignalInstrument).toHaveBeenCalledWith(10, 'non_addressable');
+  fireEvent.click(screen.getByRole('button', { name: '\u00d7' }));
+  expect(onDeleteSignalInstrument).toHaveBeenCalledWith(10, 'common');
 });
 
 test('shows merge actions for merge-capable instrument', () => {
@@ -50,9 +54,9 @@ test('shows merge actions for merge-capable instrument', () => {
       visibleSignalInstruments={[
         {
           id: 10,
-          name: 'РџРџРљРџ',
+          name: '\u041f\u041f\u041a\u041f',
           instrument_type: 'control_panel',
-          system_type: 'non_addressable',
+          system_type: 'common',
         },
       ]}
       visibleCableRoutes={[]}
@@ -68,7 +72,7 @@ test('shows merge actions for merge-capable instrument', () => {
     />,
   );
 
-  fireEvent.click(screen.getByRole('button', { name: 'РЎРІРµСЃС‚Рё РґР°С‚С‡РёРєРё' }));
+  fireEvent.click(getButtonByTextContent('\u0421\u0432\u0435\u0441\u0442\u0438 \u0438\u0437\u0432\u0435\u0449\u0430\u0442\u0435\u043b\u0438'));
   expect(onStartMerge).toHaveBeenCalled();
 
   rerender(
@@ -77,9 +81,9 @@ test('shows merge actions for merge-capable instrument', () => {
       visibleSignalInstruments={[
         {
           id: 10,
-          name: 'РџРџРљРџ',
+          name: '\u041f\u041f\u041a\u041f',
           instrument_type: 'control_panel',
-          system_type: 'non_addressable',
+          system_type: 'common',
         },
       ]}
       visibleCableRoutes={[]}
@@ -95,8 +99,9 @@ test('shows merge actions for merge-capable instrument', () => {
     />,
   );
 
-  fireEvent.click(screen.getAllByRole('button', { name: 'РџСЂРёРјРµРЅРёС‚СЊ' })[0]);
+  expect(screen.getByText(/\u0412\u044b\u0431\u0440\u0430\u043d\u043e \u0438\u0437\u0432\u0435\u0449\u0430\u0442\u0435\u043b\u0435\u0439:\s*2/i)).toBeInTheDocument();
+  fireEvent.click(getButtonByTextContent('\u041f\u0440\u0438\u043c\u0435\u043d\u0438\u0442\u044c'));
   expect(onApplyMerge).toHaveBeenCalled();
-  fireEvent.click(screen.getByRole('button', { name: 'РћС‚РјРµРЅР°' }));
+  fireEvent.click(getButtonByTextContent('\u041e\u0442\u043c\u0435\u043d\u0430'));
   expect(onCancelMerge).toHaveBeenCalled();
 });

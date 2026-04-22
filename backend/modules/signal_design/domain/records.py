@@ -29,5 +29,9 @@ class SignalInstrumentRecord(PayloadRecord):
     """Signal instrument read model."""
 
 
+class SoueDeviceRecord(PayloadRecord):
+    """SOUe device read model."""
+
+
 class CableRouteRecord(PayloadRecord):
     """Cable route read model."""

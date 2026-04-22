@@ -9,11 +9,14 @@ from backend.models import (
     CableRoute,
     Dimension,
     Door,
+    EquipmentItem,
     FireAlarm,
     FloorPlan,
     FloorplanRecognition,
     Project,
+    ProjectEquipmentSelection,
     Room,
+    SoueDevice,
     SignalInstrument,
     Stair,
     Wall,
@@ -34,6 +37,43 @@ def _payload(instance: Any, **kwargs) -> dict[str, Any]:
 
 def project_read(project: Project) -> schemas.ProjectRead:
     return schemas.ProjectRead.model_validate(_payload(project))
+
+
+def equipment_item_read(item: EquipmentItem) -> schemas.EquipmentItemRead:
+    return schemas.EquipmentItemRead.model_validate(_payload(item))
+
+
+def project_equipment_selections_read(selections: ProjectEquipmentSelection | Any) -> schemas.ProjectEquipmentSelectionsRead:
+    return schemas.ProjectEquipmentSelectionsRead.model_validate(_payload(selections))
+
+
+def project_equipment_list_read(project_id: int, items: list[Any]) -> schemas.ProjectEquipmentListRead:
+    return schemas.ProjectEquipmentListRead(
+        project_id=project_id,
+        items=[equipment_item_read(item) for item in items],
+    )
+
+
+def equipment_specification_read(specification: dict[str, Any]) -> schemas.EquipmentSpecificationRead:
+    return schemas.EquipmentSpecificationRead.model_validate(specification)
+
+
+def power_consumption_calculation_read(
+    calculation: dict[str, Any],
+) -> schemas.PowerConsumptionCalculationRead:
+    return schemas.PowerConsumptionCalculationRead.model_validate(calculation)
+
+
+def general_instructions_read(payload: dict[str, Any]) -> schemas.GeneralInstructionsRead:
+    return schemas.GeneralInstructionsRead.model_validate(payload)
+
+
+def general_data_read(payload: dict[str, Any]) -> schemas.GeneralDataRead:
+    return schemas.GeneralDataRead.model_validate(payload)
+
+
+def additional_info_read(payload: dict[str, Any]) -> schemas.AdditionalInfoRead:
+    return schemas.AdditionalInfoRead.model_validate(payload)
 
 
 def wall_read(wall: Wall) -> schemas.WallRead:
@@ -62,6 +102,10 @@ def dimension_read(dimension: Dimension) -> schemas.DimensionRead:
 
 def fire_alarm_read(fire_alarm: FireAlarm) -> schemas.FireAlarmRead:
     return schemas.FireAlarmRead.model_validate(fire_alarm.to_dict())
+
+
+def soue_device_read(device: SoueDevice) -> schemas.SoueDeviceRead:
+    return schemas.SoueDeviceRead.model_validate(device.to_dict())
 
 
 def zkspc_zone_read(zone: ZkspcZone) -> schemas.ZkspcZoneRead:

@@ -47,3 +47,7 @@ class DimensionRecord(PayloadRecord):
 
 class FireAlarmRecord(PayloadRecord):
     """Fire alarm read model."""
+
+
+class SoueDeviceRecord(PayloadRecord):
+    """SOUe device read model."""

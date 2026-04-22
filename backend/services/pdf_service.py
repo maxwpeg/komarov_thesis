@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from backend.modules.documents.application.use_cases import DocumentsUseCases
 from backend.modules.documents.infrastructure.pdf_adapter import PdfGeneratorAdapter
 from backend.modules.documents.infrastructure.sqlalchemy_repository import SqlAlchemyDocumentReadRepository
+from backend.modules.shared.infrastructure.runtime import SqlAlchemyUnitOfWork
 
 
 class PdfService:
@@ -15,6 +16,7 @@ class PdfService:
     def __init__(self, db: Session):
         self._use_cases = DocumentsUseCases(
             repository=SqlAlchemyDocumentReadRepository(db),
+            uow=SqlAlchemyUnitOfWork(db),
             pdf_port=PdfGeneratorAdapter(),
         )
 

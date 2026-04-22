@@ -16,6 +16,8 @@ function CreateProject() {
     cpe: 'Гостев В.В.',
     checker: 'Комаров С.Л.',
     facility: '',
+    facility_genitive: '',
+    facility_instrumental: '',
     facility_address: '',
     project_description: 'Система пожарной сигнализации и система оповещения и управления эвакуацией людей при пожаре',
     stage: 'Р',
@@ -29,10 +31,21 @@ function CreateProject() {
       ? (value === '' ? '' : Number(value))
       : value;
 
-    setFormData((prev) => ({
-      ...prev,
-      [name]: nextValue,
-    }));
+    setFormData((prev) => {
+      const nextState = {
+        ...prev,
+        [name]: nextValue,
+      };
+      if (name === 'facility') {
+        if (!prev.facility_genitive || prev.facility_genitive === prev.facility) {
+          nextState.facility_genitive = value;
+        }
+        if (!prev.facility_instrumental || prev.facility_instrumental === prev.facility) {
+          nextState.facility_instrumental = value;
+        }
+      }
+      return nextState;
+    });
   };
 
   const handleSubmit = async (event) => {
@@ -73,6 +86,26 @@ function CreateProject() {
             value={formData.facility}
             onChange={handleChange}
             required
+          />
+        </div>
+
+        <div className="form-group">
+          <label>Название объекта (родительный падеж)</label>
+          <input
+            type="text"
+            name="facility_genitive"
+            value={formData.facility_genitive}
+            onChange={handleChange}
+          />
+        </div>
+
+        <div className="form-group">
+          <label>Название объекта (творительный падеж)</label>
+          <input
+            type="text"
+            name="facility_instrumental"
+            value={formData.facility_instrumental}
+            onChange={handleChange}
           />
         </div>
 

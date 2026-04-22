@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends, HTTPException
 
 from backend.dependencies import get_pipeline_use_cases
@@ -12,6 +14,8 @@ from backend.schemas import (
     PipelineCommitResult,
     PipelineDetectResult,
     PipelineOpeningsCommitRequest,
+    PipelineStepFeedbackRead,
+    PipelineStepFeedbackRequest,
     PipelineRoomsCommitRequest,
     PipelineStateRead,
     PipelineWallsCommitRequest,
@@ -20,6 +24,23 @@ from backend.schemas import (
 
 
 router = APIRouter(tags=["pipeline"])
+
+
+def _submit_step_feedback(
+    floor_plan_id: int,
+    step: Literal["walls", "openings"],
+    payload: PipelineStepFeedbackRequest,
+    service: PipelineUseCases,
+) -> PipelineStepFeedbackRead:
+    return PipelineStepFeedbackRead.model_validate(
+        service.submit_step_feedback(
+            floor_plan_id,
+            step,
+            step_revision=payload.step_revision,
+            issue_tags=payload.issue_tags,
+            notes=payload.notes,
+        )
+    )
 
 
 @router.get("/api/floor-plans/{floor_plan_id}/pipeline-state", response_model=PipelineStateRead)
@@ -91,6 +112,34 @@ def commit_openings(
         floor_plan=floor_plan_read(floor_plan, include_elements=True),
         pipeline_state=state,
     )
+
+
+@router.post("/api/floor-plans/{floor_plan_id}/pipeline/walls/feedback", response_model=PipelineStepFeedbackRead)
+def submit_walls_feedback(
+    floor_plan_id: int,
+    payload: PipelineStepFeedbackRequest,
+    service: PipelineUseCases = Depends(get_pipeline_use_cases),
+) -> PipelineStepFeedbackRead:
+    return _submit_step_feedback(floor_plan_id, "walls", payload, service)
+
+
+@router.post("/api/floor-plans/{floor_plan_id}/pipeline/openings/feedback", response_model=PipelineStepFeedbackRead)
+def submit_openings_feedback(
+    floor_plan_id: int,
+    payload: PipelineStepFeedbackRequest,
+    service: PipelineUseCases = Depends(get_pipeline_use_cases),
+) -> PipelineStepFeedbackRead:
+    return _submit_step_feedback(floor_plan_id, "openings", payload, service)
+
+
+@router.post("/api/floor-plans/{floor_plan_id}/pipeline/{step}/feedback", response_model=PipelineStepFeedbackRead)
+def submit_step_feedback(
+    floor_plan_id: int,
+    step: Literal["walls", "openings"],
+    payload: PipelineStepFeedbackRequest,
+    service: PipelineUseCases = Depends(get_pipeline_use_cases),
+) -> PipelineStepFeedbackRead:
+    return _submit_step_feedback(floor_plan_id, step, payload, service)
 
 
 @router.post("/api/floor-plans/{floor_plan_id}/pipeline/rooms/detect", response_model=PipelineDetectResult)

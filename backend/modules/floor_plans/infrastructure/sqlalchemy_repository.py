@@ -89,6 +89,7 @@ class SqlAlchemyFloorPlanRepository(FloorPlanRepository):
                 selectinload(FloorPlanModel.rooms),
                 selectinload(FloorPlanModel.dimensions),
                 selectinload(FloorPlanModel.fire_alarms),
+                selectinload(FloorPlanModel.soue_devices),
                 selectinload(FloorPlanModel.zkspc_zones).selectinload(ZkspcZoneModel.room_links),
                 selectinload(FloorPlanModel.signal_instruments),
                 selectinload(FloorPlanModel.cable_routes),

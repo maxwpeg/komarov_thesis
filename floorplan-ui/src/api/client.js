@@ -66,6 +66,140 @@ export const projectsApi = {
       rawResponse: true,
     });
   },
+  getEquipmentSpecification(projectId) {
+    return apiRequest(`/api/projects/${projectId}/equipment-specification`);
+  },
+  updateEquipmentSpecification(projectId, payload) {
+    return apiRequest(`/api/projects/${projectId}/equipment-specification`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  },
+  getGeneralData(projectId) {
+    return apiRequest(`/api/projects/${projectId}/general-data`);
+  },
+  updateGeneralData(projectId, payload) {
+    return apiRequest(`/api/projects/${projectId}/general-data`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  },
+  getGeneralInstructions(projectId) {
+    return apiRequest(`/api/projects/${projectId}/general-instructions`);
+  },
+  updateGeneralInstructions(projectId, payload) {
+    return apiRequest(`/api/projects/${projectId}/general-instructions`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  },
+  getPowerConsumptionCalculation(projectId) {
+    return apiRequest(`/api/projects/${projectId}/power-consumption-calculation`);
+  },
+  updatePowerConsumptionCalculation(projectId, payload) {
+    return apiRequest(`/api/projects/${projectId}/power-consumption-calculation`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  },
+  getAdditionalInfo(projectId) {
+    return apiRequest(`/api/projects/${projectId}/additional-info`);
+  },
+  updateAdditionalInfo(projectId, payload) {
+    return apiRequest(`/api/projects/${projectId}/additional-info`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  },
+  listEquipment(projectId) {
+    return apiRequest(`/api/projects/${projectId}/equipment`);
+  },
+  attachEquipment(projectId, payload) {
+    return apiRequest(`/api/projects/${projectId}/equipment`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  },
+  createAndAttachEquipment(projectId, payload) {
+    return apiRequest(`/api/projects/${projectId}/equipment/create`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  },
+  removeEquipment(projectId, equipmentId) {
+    return apiRequest(`/api/projects/${projectId}/equipment/${equipmentId}`, {
+      method: 'DELETE',
+    });
+  },
+  getEquipmentSelections(projectId) {
+    return apiRequest(`/api/projects/${projectId}/equipment-selections`);
+  },
+  updateEquipmentSelections(projectId, payload) {
+    return apiRequest(`/api/projects/${projectId}/equipment-selections`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  },
+};
+
+export const equipmentApi = {
+  list() {
+    return apiRequest('/api/equipment');
+  },
+  get(equipmentId) {
+    return apiRequest(`/api/equipment/${equipmentId}`);
+  },
+  create(payload) {
+    return apiRequest('/api/equipment', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  },
+  update(equipmentId, payload) {
+    return apiRequest(`/api/equipment/${equipmentId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  },
+  remove(equipmentId) {
+    return apiRequest(`/api/equipment/${equipmentId}`, {
+      method: 'DELETE',
+    });
+  },
+  uploadImage(equipmentId, file) {
+    const formData = new FormData();
+    formData.append('image', file);
+    return apiRequest(`/api/equipment/${equipmentId}/image`, {
+      method: 'POST',
+      body: formData,
+    });
+  },
+  uploadLabelPdf(equipmentId, file) {
+    const formData = new FormData();
+    formData.append('file', file);
+    return apiRequest(`/api/equipment/${equipmentId}/label-pdf`, {
+      method: 'POST',
+      body: formData,
+    });
+  },
+  uploadManualPdf(equipmentId, file) {
+    const formData = new FormData();
+    formData.append('file', file);
+    return apiRequest(`/api/equipment/${equipmentId}/manual-pdf`, {
+      method: 'POST',
+      body: formData,
+    });
+  },
 };
 
 export const floorPlansApi = {
@@ -103,6 +237,11 @@ export const floorPlansApi = {
       method: 'POST',
     });
   },
+  autoLayoutSoueDevices(floorPlanId, systemType = 'non_addressable') {
+    return apiRequest(`/api/floor-plans/${floorPlanId}/soue-devices/auto-layout?system_type=${systemType}`, {
+      method: 'POST',
+    });
+  },
 };
 
 export const pipelineApi = {
@@ -132,6 +271,16 @@ export const pipelineApi = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
+  },
+  submitStepFeedback(floorPlanId, step, payload) {
+    return apiRequest(`/api/floor-plans/${floorPlanId}/pipeline/${step}/feedback`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  },
+  getFeedbackStats() {
+    return apiRequest('/api/recognition-feedback/stats');
   },
   detectRooms(floorPlanId) {
     return apiRequest(`/api/floor-plans/${floorPlanId}/pipeline/rooms/detect`, {
@@ -173,6 +322,64 @@ export const recognitionApi = {
   },
 };
 
+export const recognitionTrainingApi = {
+  getOverview() {
+    return apiRequest('/api/recognition-training/overview');
+  },
+  listExamples(filters = {}) {
+    const params = new URLSearchParams();
+    Object.entries(filters).forEach(([key, value]) => {
+      if (value === undefined || value === null || value === '' || value === false) {
+        return;
+      }
+      params.set(key, String(value));
+    });
+    const suffix = params.toString() ? `?${params.toString()}` : '';
+    return apiRequest(`/api/recognition-training/examples${suffix}`);
+  },
+  getExample(exampleId) {
+    return apiRequest(`/api/recognition-training/examples/${exampleId}`);
+  },
+  updateExample(exampleId, payload) {
+    return apiRequest(`/api/recognition-training/examples/${exampleId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  },
+  bulkCurate(payload) {
+    return apiRequest('/api/recognition-training/examples/bulk-curate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  },
+  listRuns() {
+    return apiRequest('/api/recognition-training/runs');
+  },
+  getRun(runId) {
+    return apiRequest(`/api/recognition-training/runs/${runId}`);
+  },
+  listActiveModels() {
+    return apiRequest('/api/recognition-training/active-models');
+  },
+  getRunLog(runId, tail = 200) {
+    return apiRequest(`/api/recognition-training/runs/${runId}/log?tail=${tail}`);
+  },
+  createRun(payload) {
+    return apiRequest('/api/recognition-training/runs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  },
+  activateRun(runId) {
+    return apiRequest(`/api/recognition-training/runs/${runId}/activate`, {
+      method: 'POST',
+    });
+  },
+};
+
 export const elementsApi = {
   createStair(payload) {
     return apiRequest('/api/stairs', {
@@ -197,6 +404,20 @@ export const elementsApi = {
   },
   createFireAlarm(payload) {
     return apiRequest('/api/fire-alarms', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  },
+  createSoueDevice(payload) {
+    return apiRequest('/api/soue-devices', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  },
+  createRoom(payload) {
+    return apiRequest('/api/rooms', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -247,6 +468,13 @@ export const elementsApi = {
       body: JSON.stringify(payload),
     });
   },
+  commitSignalInstrumentsStep(floorPlanId, payload) {
+    return apiRequest(`/api/floor-plans/${floorPlanId}/signal-instruments/commit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  },
   listSignalInstruments(floorPlanId, systemType) {
     const suffix = systemType ? `?system_type=${systemType}` : '';
     return apiRequest(`/api/floor-plans/${floorPlanId}/signal-instruments${suffix}`);
@@ -274,8 +502,26 @@ export const elementsApi = {
     const suffix = systemType ? `?system_type=${systemType}` : '';
     return apiRequest(`/api/floor-plans/${floorPlanId}/cable-routes${suffix}`);
   },
+  listCableRoutesBySubsystem(floorPlanId, systemType, subsystemType = 'sps') {
+    const params = new URLSearchParams();
+    if (systemType) {
+      params.set('system_type', systemType);
+    }
+    if (subsystemType) {
+      params.set('subsystem_type', subsystemType);
+    }
+    const suffix = params.toString() ? `?${params.toString()}` : '';
+    return apiRequest(`/api/floor-plans/${floorPlanId}/cable-routes${suffix}`);
+  },
   recalculateCableRoutes(floorPlanId, payload) {
     return apiRequest(`/api/floor-plans/${floorPlanId}/cable-routes/recalculate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  },
+  commitCableRoutesStep(floorPlanId, payload) {
+    return apiRequest(`/api/floor-plans/${floorPlanId}/cable-routes/commit`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),

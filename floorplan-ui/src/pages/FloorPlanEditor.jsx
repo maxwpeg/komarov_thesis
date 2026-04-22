@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { Stage, Layer, Line, Rect, Circle, Text, Arc, Group } from 'react-konva';
-import { elementsApi, floorPlansApi, pipelineApi, recognitionApi } from '../api/client';
+import { elementsApi, equipmentApi, floorPlansApi, pipelineApi, projectsApi, recognitionApi } from '../api/client';
 import {
   clampViewportPan,
   clampHoverPanelPosition,
@@ -28,28 +28,50 @@ import {
   DeleteButton as DeleteButtonPrimitive,
   FireAlarmSymbol as FireAlarmSymbolPrimitive,
   SignalInstrumentSymbol as SignalInstrumentSymbolPrimitive,
+  SoueDeviceSymbol as SoueDeviceSymbolPrimitive,
 } from './floorPlanEditor/CanvasPrimitives';
-import CableRoutesLayer from './floorPlanEditor/CableRoutesLayer';
+import CableRoutesLayer, { buildDisplayCableRoutes } from './floorPlanEditor/CableRoutesLayer';
+import AdditionalInfoPreview from './floorPlanEditor/AdditionalInfoPreview';
 import DevicesCablesSidebarSection from './floorPlanEditor/DevicesCablesSidebarSection';
+import EquipmentSpecificationPreview from './floorPlanEditor/EquipmentSpecificationPreview';
+import GeneralDataPreview from './floorPlanEditor/GeneralDataPreview';
+import GeneralInstructionsPreview from './floorPlanEditor/GeneralInstructionsPreview';
+import PowerConsumptionCalculationPreview from './floorPlanEditor/PowerConsumptionCalculationPreview';
 import SignalSystemSidebarSection from './floorPlanEditor/SignalSystemSidebarSection';
 import ZkspcSidebarSection from './floorPlanEditor/ZkspcSidebarSection';
 import {
+  COMMON_SIGNAL_SYSTEM,
   SIGNAL_INSTRUMENT_OPTIONS,
-  SIGNAL_SYSTEM_OPTIONS,
   buildZkspcStyleMap,
   buildRoomZoneMap,
   formatCableMeters,
   getBranchCableRoutes,
   getBranchFireAlarms,
   getBranchSignalInstruments,
+  getBranchSoueDevices,
   getSignalBranchSummary,
   getSignalInstrumentDefinition,
-  getSignalSystemLabel,
+  shouldShowRouteTerminator,
+  SOUE_VISUAL_STYLE,
   getZkspcStyle,
   groupFireAlarmsByZone,
   normalizeSignalSystemType,
   polylineToKonvaPoints,
 } from './floorPlanEditor/helpers';
+import {
+  FIRE_ALARM_EQUIPMENT_CATEGORIES,
+  SIGNAL_INSTRUMENT_EQUIPMENT_CATEGORIES,
+  SOUE_DEVICE_EQUIPMENT_CATEGORIES,
+} from './equipmentCatalog/constants';
+import {
+  buildPlanDrawingBounds,
+  buildPointObstacle,
+  buildPolylineObstacles,
+  measureTextRectAtTopLeft,
+  mergeBounds,
+  placePlanText,
+  placementToObstacles,
+} from './floorPlanEditor/textPlacement';
 import { useSignalBranchState } from './floorPlanEditor/useSignalBranchState';
 
 // Delete Button Component for Canvas
@@ -60,6 +82,10 @@ function DeleteButton({ x, y, onClick }) {
 // Background Image Component
 function BackgroundImage({ src, grayscale = true, onImageLoad }) {
   return <BackgroundImagePrimitive src={src} grayscale={grayscale} onImageLoad={onImageLoad} />;
+}
+
+function SoueDeviceSymbol(props) {
+  return <SoueDeviceSymbolPrimitive {...props} />;
 }
 
 function getWallThicknessPx(wall, scaleFactor) {
@@ -141,12 +167,14 @@ function createEmptyBatchPayload() {
     create_doors: [],
     create_windows: [],
     create_fire_alarms: [],
+    create_soue_devices: [],
     update_walls: [],
     update_stairs: [],
     update_doors: [],
     update_windows: [],
     update_rooms: [],
     update_fire_alarms: [],
+    update_soue_devices: [],
   };
 }
 
@@ -220,28 +248,192 @@ function areViewportStatesEqual(left, right) {
 }
 
 function estimateTextRect(text, x, y, fontSize = 10) {
-  const content = String(text || '');
-  const width = Math.max(fontSize, content.length * fontSize * 0.62);
-  const height = Math.max(fontSize + 2, fontSize * 1.2);
+  return measureTextRectAtTopLeft(text, x, y, fontSize, { fontFamily: CANVAS_FONT_FAMILY });
+}
+
+function createStepFeedbackUiState() {
   return {
-    x,
-    y,
-    width,
-    height,
+    walls: { submitting: false, status: 'idle', error: '', message: '', nextBatchHint: null },
+    openings: { submitting: false, status: 'idle', error: '', message: '', nextBatchHint: null },
+  };
+}
+
+const STEP_FEEDBACK_COPY = {
+  walls: {
+    button: 'Отправить подтвержденные стены для обучения',
+    success: 'Подтвержденные стены добавлены в обучающую выборку.',
+    error: 'Не удалось отправить подтвержденные стены для обучения.',
+    waiting: 'Для отправки подтвердите стены и сохраните локальные изменения.',
+  },
+  openings: {
+    button: 'Отправить подтвержденные проемы для обучения',
+    success: 'Подтвержденные проемы добавлены в обучающую выборку.',
+    error: 'Не удалось отправить подтвержденные проемы для обучения.',
+    waiting: 'Для отправки подтвердите проемы и сохраните локальные изменения.',
+  },
+};
+
+const BRANCH_STEP_ORDER = ['signal_instruments', 'fire_alarms', 'devices_cables', 'soue_devices', 'soue_cables'];
+const SHARED_SIGNAL_STEPS = new Set(['signal_instruments', 'soue_devices', 'soue_cables']);
+const GENERAL_DATA_STEP_KEY = 'general_data';
+const GENERAL_INSTRUCTIONS_STEP_KEY = 'general_instructions';
+const POWER_CONSUMPTION_STEP_KEY = 'power_consumption_calculation';
+const EQUIPMENT_SPECIFICATION_STEP_KEY = 'equipment_specification';
+const ADDITIONAL_INFO_STEP_KEY = 'additional_info';
+const DIRECT_LINK_EDITOR_STEPS = new Set([
+  GENERAL_DATA_STEP_KEY,
+  GENERAL_INSTRUCTIONS_STEP_KEY,
+  POWER_CONSUMPTION_STEP_KEY,
+  EQUIPMENT_SPECIFICATION_STEP_KEY,
+  ADDITIONAL_INFO_STEP_KEY,
+]);
+const EQUIPMENT_SPECIFICATION_ROW_FIELDS = [
+  'position',
+  'technical_name',
+  'type_mark',
+  'code',
+  'manufacturer',
+  'unit',
+  'quantity',
+  'unit_mass_kg',
+  'note',
+];
+const POWER_CONSUMPTION_ROW_FIELDS = [
+  'number',
+  'equipment_name',
+  'unit',
+  'quantity',
+  'standby_current',
+  'alarm_current',
+];
+const POWER_CONSUMPTION_EDITABLE_SUMMARY_KEYS = new Set(['operation_time', 'correction_factor']);
+
+function cloneEquipmentSpecification(specification) {
+  return specification ? JSON.parse(JSON.stringify(specification)) : null;
+}
+
+function clonePowerConsumptionCalculation(calculation) {
+  return calculation ? JSON.parse(JSON.stringify(calculation)) : null;
+}
+
+function cloneGeneralInstructions(instructions) {
+  return instructions ? JSON.parse(JSON.stringify(instructions)) : null;
+}
+
+function cloneGeneralData(generalData) {
+  return generalData ? JSON.parse(JSON.stringify(generalData)) : null;
+}
+
+function cloneAdditionalInfo(additionalInfo) {
+  return additionalInfo ? JSON.parse(JSON.stringify(additionalInfo)) : null;
+}
+
+function isSharedSignalStep(stepKey) {
+  return SHARED_SIGNAL_STEPS.has(String(stepKey || ''));
+}
+
+function getBranchSystemForStep(stepKey, currentSignalSystem) {
+  return isSharedSignalStep(stepKey) ? COMMON_SIGNAL_SYSTEM : normalizeSignalSystemType(currentSignalSystem);
+}
+
+function createBranchStepState(status = 'locked') {
+  return {
+    status,
+    revision: 0,
+    detected_at: null,
+    committed_at: null,
+  };
+}
+
+function normalizeEditorBranchState(branchState, { zkspcValidated = false } = {}) {
+  const normalized = {
+    active_step: branchState?.active_step || 'signal_instruments',
+    steps: {
+      signal_instruments: { ...createBranchStepState(zkspcValidated ? 'draft' : 'locked'), ...(branchState?.steps?.signal_instruments || {}) },
+      fire_alarms: { ...createBranchStepState('locked'), ...(branchState?.steps?.fire_alarms || {}) },
+      devices_cables: { ...createBranchStepState('locked'), ...(branchState?.steps?.devices_cables || {}) },
+      soue_devices: { ...createBranchStepState('locked'), ...(branchState?.steps?.soue_devices || {}) },
+      soue_cables: { ...createBranchStepState('locked'), ...(branchState?.steps?.soue_cables || {}) },
+    },
+  };
+  if (normalized.steps.signal_instruments.status === 'validated' && normalized.steps.fire_alarms.status === 'locked') {
+    normalized.steps.fire_alarms.status = 'draft';
+  }
+  if (normalized.steps.fire_alarms.status === 'validated' && normalized.steps.devices_cables.status === 'locked') {
+    normalized.steps.devices_cables.status = 'draft';
+  }
+  if (normalized.steps.devices_cables.status === 'validated' && normalized.steps.soue_devices.status === 'locked') {
+    normalized.steps.soue_devices.status = 'draft';
+  }
+  if (normalized.steps.soue_devices.status === 'validated' && normalized.steps.soue_cables.status === 'locked') {
+    normalized.steps.soue_cables.status = 'draft';
+  }
+  const activeStepUnlocked = normalized.steps[normalized.active_step]?.status !== 'locked';
+  const missingSignalInstrumentStep = !branchState?.steps?.signal_instruments;
+  if (!activeStepUnlocked || (missingSignalInstrumentStep && normalized.steps.signal_instruments.status !== 'validated')) {
+    normalized.active_step = BRANCH_STEP_ORDER.find((step) => normalized.steps[step].status === 'draft')
+      || BRANCH_STEP_ORDER.find((step) => normalized.steps[step].status === 'validated')
+      || 'signal_instruments';
+  }
+  return normalized;
+}
+
+function buildCompositeBranchState(commonBranchState, systemBranchState, { zkspcValidated = false } = {}) {
+  const common = normalizeEditorBranchState(commonBranchState, { zkspcValidated });
+  const system = normalizeEditorBranchState(systemBranchState, { zkspcValidated: false });
+  const steps = {
+    signal_instruments: common.steps.signal_instruments,
+    fire_alarms: {
+      ...createBranchStepState(common.steps.signal_instruments.status === 'validated' ? 'draft' : 'locked'),
+      ...system.steps.fire_alarms,
+    },
+    devices_cables: {
+      ...createBranchStepState('locked'),
+      ...system.steps.devices_cables,
+    },
+    soue_devices: {
+      ...createBranchStepState(common.steps.signal_instruments.status === 'validated' ? 'draft' : 'locked'),
+      ...common.steps.soue_devices,
+    },
+    soue_cables: {
+      ...createBranchStepState(common.steps.soue_devices.status === 'validated' ? 'draft' : 'locked'),
+      ...common.steps.soue_cables,
+    },
+  };
+
+  if (steps.fire_alarms.status === 'validated' && steps.devices_cables.status === 'locked') {
+    steps.devices_cables.status = 'draft';
+  }
+  if (steps.soue_devices.status === 'validated' && steps.soue_cables.status === 'locked') {
+    steps.soue_cables.status = 'draft';
+  }
+
+  return {
+    active_step: BRANCH_STEP_ORDER.find((step) => steps[step].status === 'draft')
+      || BRANCH_STEP_ORDER.find((step) => steps[step].status === 'validated')
+      || 'signal_instruments',
+    steps,
   };
 }
 
 const CANVAS_FONT_FAMILY = 'GOST A';
 
-function getInstrumentLabelText(instrument) {
+export function getInstrumentLabelText(instrument) {
   if (!instrument) {
     return null;
+  }
+  if (instrument.instrument_type === 'control_panel') {
+    return 'ARK';
+  }
+  const equipmentName = String(instrument.equipment_name || '').trim();
+  if (equipmentName) {
+    return equipmentName;
   }
   const explicitName = String(instrument.name || '').trim();
   if (explicitName) {
     return explicitName;
   }
-  return instrument.instrument_type === 'control_panel' ? 'ARK' : null;
+  return null;
 }
 
 function getSignalInstrumentBounds(instrument) {
@@ -259,16 +451,65 @@ function getSignalInstrumentBounds(instrument) {
   };
 }
 
+const FIRE_ALARM_SYMBOL_SIZE = 28;
+const FIRE_ALARM_MIN_EDGE_GAP = FIRE_ALARM_SYMBOL_SIZE / 2;
+const SIREN_FOOTPRINT = { minX: -10.2, maxX: 9.6, minY: -22, maxY: 22 };
+const EXIT_SIGN_FOOTPRINT = { minX: -13, maxX: 13, minY: -13, maxY: 13 };
+
 function getFireAlarmBounds(alarm) {
   if (!alarm) {
     return null;
   }
   return {
-    x: alarm.x - 14,
-    y: alarm.y - 14,
-    width: 28,
-    height: 28,
+    x: alarm.x - (FIRE_ALARM_SYMBOL_SIZE / 2),
+    y: alarm.y - (FIRE_ALARM_SYMBOL_SIZE / 2),
+    width: FIRE_ALARM_SYMBOL_SIZE,
+    height: FIRE_ALARM_SYMBOL_SIZE,
   };
+}
+
+function getFireAlarmSpacingObstacle(alarm) {
+  const bounds = getFireAlarmBounds(alarm);
+  return bounds ? padRect(bounds, FIRE_ALARM_MIN_EDGE_GAP) : null;
+}
+
+function getSoueDeviceCodePrefix(deviceType) {
+  return deviceType === 'siren' ? 'BIAS1' : 'BIAL2';
+}
+
+function getSoueDeviceDisplayCode(device, floorNumber, fallbackNumber = 1, overrides = {}) {
+  const planFloor = floorNumber !== null && floorNumber !== undefined ? String(floorNumber) : '1';
+  const deviceNumber = String(overrides.deviceNumber ?? device?.device_number ?? fallbackNumber).trim() || String(fallbackNumber);
+  return `${planFloor}${getSoueDeviceCodePrefix(device?.device_type)}.${deviceNumber}`;
+}
+
+function getSoueDeviceBounds(device) {
+  if (!device) {
+    return null;
+  }
+  const footprint = device.device_type === 'siren' ? SIREN_FOOTPRINT : EXIT_SIGN_FOOTPRINT;
+  const rotationDeg = normalizeAngle360(Number(device.rotation_deg || 0));
+  const angleRad = (rotationDeg * Math.PI) / 180;
+  const sin = Math.sin(angleRad);
+  const cos = Math.cos(angleRad);
+  const corners = [
+    { x: footprint.minX, y: footprint.minY },
+    { x: footprint.maxX, y: footprint.minY },
+    { x: footprint.maxX, y: footprint.maxY },
+    { x: footprint.minX, y: footprint.maxY },
+  ].map((corner) => ({
+    x: device.x + (corner.x * cos) - (corner.y * sin),
+    y: device.y + (corner.x * sin) + (corner.y * cos),
+  }));
+  return getBoundingBox(corners.map((corner) => [corner.x, corner.y]));
+}
+
+function getSoueNearEdgeDistance(deviceType) {
+  return deviceType === 'siren' ? Math.abs(SIREN_FOOTPRINT.minX) : Math.abs(EXIT_SIGN_FOOTPRINT.minX);
+}
+
+function getFootprintPadding(deviceType) {
+  return deviceType === 'siren' ? 2 : 0;
 }
 
 function getDoorSymbolSegmentsForOpening(opening) {
@@ -416,6 +657,11 @@ function resolveRectAgainstObstacles(rect, obstacles = [], bounds = null, thresh
   return clampRectToBounds(nextRect, bounds);
 }
 
+function rectOverlapsAny(rect, obstacles = [], threshold = 0) {
+  const expandedRect = threshold ? padRect(rect, threshold) : rect;
+  return obstacles.filter(Boolean).some((obstacle) => rectsIntersect(expandedRect, obstacle));
+}
+
 function getOpeningBounds(opening) {
   if (!opening) {
     return null;
@@ -429,6 +675,25 @@ function getLabelRectFromOffset(anchorX, anchorY, text, fontSize, dx, dy) {
     return null;
   }
   return estimateTextRect(text, anchorX + dx, anchorY + dy, fontSize);
+}
+
+function comparePlacementAnchors(left, right) {
+  const leftManual = left?.hasManualOffset ? 0 : 1;
+  const rightManual = right?.hasManualOffset ? 0 : 1;
+  if (leftManual !== rightManual) {
+    return leftManual - rightManual;
+  }
+  if ((left?.anchor?.y ?? 0) !== (right?.anchor?.y ?? 0)) {
+    return (left?.anchor?.y ?? 0) - (right?.anchor?.y ?? 0);
+  }
+  if ((left?.anchor?.x ?? 0) !== (right?.anchor?.x ?? 0)) {
+    return (left?.anchor?.x ?? 0) - (right?.anchor?.x ?? 0);
+  }
+  return String(left?.stableKey ?? '').localeCompare(String(right?.stableKey ?? ''));
+}
+
+function collectPlacementObstacles(layouts = []) {
+  return layouts.flatMap((layout) => placementToObstacles(layout));
 }
 
 function getSegmentOrientation(start, end) {
@@ -555,6 +820,49 @@ function translateInstrumentRouteStart(polyline, fromPoint, toPoint) {
   return normalizeOrthogonalPolyline(nextPoints);
 }
 
+function buildOrthogonalBridge(startPoint, endPoint, preferredOrientation = 'horizontal') {
+  const start = [Number(startPoint?.[0] || 0), Number(startPoint?.[1] || 0)];
+  const end = [Number(endPoint?.[0] || 0), Number(endPoint?.[1] || 0)];
+  if (start[0] === end[0] || start[1] === end[1]) {
+    return [end];
+  }
+  const corner = preferredOrientation === 'vertical'
+    ? [start[0], end[1]]
+    : [end[0], start[1]];
+  if ((corner[0] === start[0] && corner[1] === start[1]) || (corner[0] === end[0] && corner[1] === end[1])) {
+    return [end];
+  }
+  return [corner, end];
+}
+
+export function deleteOrthogonalSegment(polyline, segmentIndex) {
+  const points = normalizeOrthogonalPolyline(polyline).map((point) => [Number(point[0] || 0), Number(point[1] || 0)]);
+  const safeSegmentIndex = Number(segmentIndex);
+  if (!Number.isInteger(safeSegmentIndex) || safeSegmentIndex < 0 || safeSegmentIndex >= points.length - 1 || points.length < 3) {
+    return points;
+  }
+
+  const startIndex = Math.max(0, safeSegmentIndex - 1);
+  const endIndex = Math.min(points.length - 1, safeSegmentIndex + 2);
+  const prefix = points.slice(0, startIndex + 1);
+  const bridgeStart = prefix[prefix.length - 1];
+  const bridgeEnd = points[endIndex];
+  if (!bridgeStart || !bridgeEnd) {
+    return points;
+  }
+
+  const preferredOrientation = getSegmentOrientation(points[safeSegmentIndex], points[safeSegmentIndex + 1])
+    || getSegmentOrientation(bridgeStart, bridgeEnd)
+    || 'horizontal';
+  const bridge = buildOrthogonalBridge(bridgeStart, bridgeEnd, preferredOrientation);
+  const nextPoints = normalizeOrthogonalPolyline([
+    ...prefix,
+    ...bridge,
+    ...points.slice(endIndex + 1),
+  ]);
+  return nextPoints.length >= 2 ? nextPoints : points;
+}
+
 function getRotatedBounds(rect) {
   if (!rect) {
     return null;
@@ -602,8 +910,44 @@ function getRoomMetadataForPoint(point, rooms, scaleFactor) {
   };
 }
 
+function getNearestRoomMeasurementGuide(room, point, scaleFactor) {
+  const bounds = getBoundingBox(room?.boundary_points || []);
+  if (!bounds || point?.x === null || point?.x === undefined || point?.y === null || point?.y === undefined) {
+    return null;
+  }
+
+  const leftDistancePx = Math.max(0, point.x - bounds.x);
+  const rightDistancePx = Math.max(0, (bounds.x + bounds.width) - point.x);
+  const topDistancePx = Math.max(0, point.y - bounds.y);
+  const bottomDistancePx = Math.max(0, (bounds.y + bounds.height) - point.y);
+
+  const verticalWallX = leftDistancePx <= rightDistancePx ? bounds.x : bounds.x + bounds.width;
+  const horizontalWallY = topDistancePx <= bottomDistancePx ? bounds.y : bounds.y + bounds.height;
+  const horizontalDistanceM = pxToMeters(Math.abs(point.x - verticalWallX), scaleFactor);
+  const verticalDistanceM = pxToMeters(Math.abs(point.y - horizontalWallY), scaleFactor);
+
+  return {
+    horizontalLine: [verticalWallX, point.y, point.x, point.y],
+    verticalLine: [point.x, horizontalWallY, point.x, point.y],
+    horizontalLabel: {
+      x: Math.min(verticalWallX, point.x) + 4,
+      y: point.y - 18,
+      text: `${Number(horizontalDistanceM || 0).toFixed(2)} м`,
+    },
+    verticalLabel: {
+      x: point.x + 6,
+      y: Math.min(horizontalWallY, point.y) + 4,
+      text: `${Number(verticalDistanceM || 0).toFixed(2)} м`,
+    },
+  };
+}
+
 function createFireAlarmDraftId() {
   return `temp_fire_alarm_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function createSoueDeviceDraftId() {
+  return `temp_soue_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
 function getFireAlarmDisplayLabel(deviceType) {
@@ -741,7 +1085,7 @@ function getRoomDisplayCenter(room) {
   };
 }
 
-const HOVER_PANEL_SIZE = { width: 360, height: 280 };
+const HOVER_PANEL_SIZE = { width: 360, height: 360 };
 const HOVER_PANEL_SECTION_STYLE = { display: 'flex', flexDirection: 'column', gap: '10px' };
 const HOVER_PANEL_FIELD_ROW_STYLE = { display: 'flex', alignItems: 'center', gap: '10px' };
 const HOVER_PANEL_LABEL_STYLE = {
@@ -777,6 +1121,8 @@ const INTERACTIVE_TYPES_BY_STEP = {
   zkspc: ['room'],
   fire_alarms: ['fire-alarm', 'new-fire-alarm'],
   devices_cables: ['signal-instrument', 'cable-route', 'fire-alarm', 'new-fire-alarm'],
+  soue_devices: ['soue-device', 'new-soue-device'],
+  soue_cables: ['signal-instrument', 'cable-route', 'soue-device', 'new-soue-device'],
 };
 const DEFAULT_WALL_THICKNESS_MM = 200;
 const DEFAULT_WALL_THICKNESS_M = '0.20';
@@ -794,6 +1140,8 @@ const WALL_ALIGNMENT_OPTIONS = [
 function FloorPlanEditor() {
   const { floorPlanId } = useParams();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const requestedViewStep = searchParams.get('step');
   const WALL_COLOR = '#39FF14';
   const stageRef = useRef(null);
   const stageContainerRef = useRef(null);
@@ -806,6 +1154,7 @@ function FloorPlanEditor() {
   const [rooms, setRooms] = useState([]);
   const [dimensions, setDimensions] = useState([]);
   const [fireAlarms, setFireAlarms] = useState([]);
+  const [soueDevices, setSoueDevices] = useState([]);
   const [zkspcZones, setZkspcZones] = useState([]);
   const [zkspcDraftZones, setZkspcDraftZones] = useState([]);
   const [signalInstruments, setSignalInstruments] = useState([]);
@@ -815,11 +1164,18 @@ function FloorPlanEditor() {
     non_addressable: [],
     addressable: [],
   });
+  const [newSoueDevicesBySystem, setNewSoueDevicesBySystem] = useState({
+    [COMMON_SIGNAL_SYSTEM]: [],
+  });
   const [fireAlarmWarningsBySystem, setFireAlarmWarningsBySystem] = useState({
     non_addressable: [],
     addressable: [],
   });
+  const [soueWarningsBySystem, setSoueWarningsBySystem] = useState({
+    [COMMON_SIGNAL_SYSTEM]: [],
+  });
   const [fireAlarmActionLoading, setFireAlarmActionLoading] = useState(false);
+  const [soueActionLoading, setSoueActionLoading] = useState(false);
   const [signalBranchActionLoading, setSignalBranchActionLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [selectedTool, setSelectedTool] = useState('select');
@@ -845,6 +1201,7 @@ function FloorPlanEditor() {
   const [recognitionFeedbackSubmitting, setRecognitionFeedbackSubmitting] = useState(false);
   const [recognitionFeedbackStatus, setRecognitionFeedbackStatus] = useState('idle');
   const [recognitionFeedbackError, setRecognitionFeedbackError] = useState('');
+  const [stepFeedbackState, setStepFeedbackState] = useState(createStepFeedbackUiState);
   const [debugImages, setDebugImages] = useState([]);
   const [selectedDebugImagePath, setSelectedDebugImagePath] = useState(null);
   const [showDebugPanel, setShowDebugPanel] = useState(false);
@@ -877,13 +1234,51 @@ function FloorPlanEditor() {
   const [newWallAlignment, setNewWallAlignment] = useState('center');
   const [newWallThicknessDraft, setNewWallThicknessDraft] = useState(DEFAULT_WALL_THICKNESS_M);
   const [wallAutoSnapEnabled, setWallAutoSnapEnabled] = useState(true);
-  const [openingSizeDraft, setOpeningSizeDraft] = useState({ width: '', height: '', wallId: '' });
+  const [openingSizeDraft, setOpeningSizeDraft] = useState({ width: '', height: '', wallId: '', isEvacuationExit: false });
   const [stairDraft, setStairDraft] = useState({ width: '', height: '' });
-  const [roomDraft, setRoomDraft] = useState({ name: '', type: 'базовое', length: '', width: '' });
-  const [fireAlarmDraft, setFireAlarmDraft] = useState({ zone: '', address: '' });
-  const [signalInstrumentDraft, setSignalInstrumentDraft] = useState({ name: '', instrumentType: 'control_panel' });
+  const [roomDraft, setRoomDraft] = useState({ name: '', type: 'базовое', length: '', width: '', maxOccupancy: '' });
+  const [fireAlarmDraft, setFireAlarmDraft] = useState({ zone: '', address: '', equipmentId: '' });
+  const [soueDeviceDraft, setSoueDeviceDraft] = useState({
+    deviceModel: '',
+    soundPressureDb: '',
+    mountingHeight: '',
+    labelDx: '',
+    labelDy: '',
+    equipmentId: '',
+  });
+  const [signalInstrumentDraft, setSignalInstrumentDraft] = useState({ name: '', instrumentType: 'control_panel', equipmentId: '' });
+  const [projectEquipmentItems, setProjectEquipmentItems] = useState([]);
+  const [projectEquipmentSelections, setProjectEquipmentSelections] = useState({});
+  const [generalData, setGeneralData] = useState(null);
+  const [generalDataLoading, setGeneralDataLoading] = useState(false);
+  const [generalDataSaving, setGeneralDataSaving] = useState(false);
+  const [generalDataError, setGeneralDataError] = useState('');
+  const [generalDataDirty, setGeneralDataDirty] = useState(false);
+  const [generalInstructions, setGeneralInstructions] = useState(null);
+  const [generalInstructionsLoading, setGeneralInstructionsLoading] = useState(false);
+  const [generalInstructionsSaving, setGeneralInstructionsSaving] = useState(false);
+  const [generalInstructionsError, setGeneralInstructionsError] = useState('');
+  const [generalInstructionsDirty, setGeneralInstructionsDirty] = useState(false);
+  const [powerConsumptionCalculation, setPowerConsumptionCalculation] = useState(null);
+  const [powerConsumptionCalculationLoading, setPowerConsumptionCalculationLoading] = useState(false);
+  const [powerConsumptionCalculationSaving, setPowerConsumptionCalculationSaving] = useState(false);
+  const [powerConsumptionCalculationError, setPowerConsumptionCalculationError] = useState('');
+  const [powerConsumptionCalculationDirty, setPowerConsumptionCalculationDirty] = useState(false);
+  const [equipmentSpecification, setEquipmentSpecification] = useState(null);
+  const [equipmentSpecificationLoading, setEquipmentSpecificationLoading] = useState(false);
+  const [equipmentSpecificationSaving, setEquipmentSpecificationSaving] = useState(false);
+  const [equipmentSpecificationError, setEquipmentSpecificationError] = useState('');
+  const [equipmentSpecificationDirty, setEquipmentSpecificationDirty] = useState(false);
+  const [additionalInfo, setAdditionalInfo] = useState(null);
+  const [additionalInfoLoading, setAdditionalInfoLoading] = useState(false);
+  const [additionalInfoSaving, setAdditionalInfoSaving] = useState(false);
+  const [additionalInfoError, setAdditionalInfoError] = useState('');
+  const [additionalInfoDirty, setAdditionalInfoDirty] = useState(false);
+  const [equipmentCatalogItems, setEquipmentCatalogItems] = useState([]);
   const [mergeInstrumentId, setMergeInstrumentId] = useState(null);
-  const [viewStep, setViewStep] = useState(null);
+  const [viewStep, setViewStep] = useState(() => (
+    DIRECT_LINK_EDITOR_STEPS.has(requestedViewStep) ? requestedViewStep : null
+  ));
   const [planMetaDraft, setPlanMetaDraft] = useState({ name: '', floor_number: '', ceiling_height_m: '' });
   const [savingPlanMeta, setSavingPlanMeta] = useState(false);
   const [selectedElements, setSelectedElements] = useState([]);
@@ -892,9 +1287,12 @@ function FloorPlanEditor() {
   const [isSelecting, setIsSelecting] = useState(false);
   const [isRoomZoneDrawing, setIsRoomZoneDrawing] = useState(false);
   const [roomZoneRect, setRoomZoneRect] = useState(null);
+  const [isRoomCreationDrawing, setIsRoomCreationDrawing] = useState(false);
+  const [roomCreationRect, setRoomCreationRect] = useState(null);
   const [placementDraft, setPlacementDraft] = useState(null);
   const [activeDrag, setActiveDrag] = useState(null);
   const [activeCableHandle, setActiveCableHandle] = useState(null);
+  const [selectedCableSegment, setSelectedCableSegment] = useState(null);
   const [calibrationDraft, setCalibrationDraft] = useState({ start: null, end: null, distance_m: '' });
   const setStageContainerNodeRef = useCallback((node) => {
     stageContainerRef.current = node;
@@ -923,7 +1321,32 @@ function FloorPlanEditor() {
       [systemType]: typeof updater === 'function' ? updater(prev[systemType] || []) : updater,
     }));
   }, [activeSignalSystemType]);
+  const newSoueDevices = useMemo(
+    () => newSoueDevicesBySystem[COMMON_SIGNAL_SYSTEM] || [],
+    [newSoueDevicesBySystem],
+  );
+  const setNewSoueDevices = useCallback((updater) => {
+    setNewSoueDevicesBySystem((prev) => ({
+      ...prev,
+      [COMMON_SIGNAL_SYSTEM]: typeof updater === 'function'
+        ? updater(prev[COMMON_SIGNAL_SYSTEM] || [])
+        : updater,
+    }));
+  }, []);
+  const soueWarnings = useMemo(
+    () => soueWarningsBySystem[COMMON_SIGNAL_SYSTEM] || [],
+    [soueWarningsBySystem],
+  );
+  const setSoueWarnings = useCallback((updater) => {
+    setSoueWarningsBySystem((prev) => ({
+      ...prev,
+      [COMMON_SIGNAL_SYSTEM]: typeof updater === 'function'
+        ? updater(prev[COMMON_SIGNAL_SYSTEM] || [])
+        : updater,
+    }));
+  }, []);
   const currentSignalSystem = normalizeSignalSystemType(activeSignalSystemType || floorPlan?.active_signal_system_type);
+  const currentSharedSignalSystem = COMMON_SIGNAL_SYSTEM;
   const currentWallDraftThicknessMm = useMemo(() => {
     const parsedValue = Number(newWallThicknessDraft);
     return parsedValue > 0 ? parsedValue * 1000 : DEFAULT_WALL_THICKNESS_MM;
@@ -931,11 +1354,191 @@ function FloorPlanEditor() {
   const flipWallAlignment = useCallback(() => 'center', []);
   const currentZkspcZones = zkspcDraftZones.length ? zkspcDraftZones : zkspcZones;
   const roomZoneMap = useMemo(() => buildRoomZoneMap(currentZkspcZones), [currentZkspcZones]);
+  const projectEquipmentById = useMemo(
+    () => Object.fromEntries(projectEquipmentItems.map((item) => [item.id, item])),
+    [projectEquipmentItems],
+  );
+  const equipmentCatalogById = useMemo(
+    () => Object.fromEntries(equipmentCatalogItems.map((item) => [item.id, item])),
+    [equipmentCatalogItems],
+  );
+  const getEquipmentNameById = useCallback((equipmentId, fallback = '') => {
+    if (equipmentId === null || equipmentId === undefined || equipmentId === '') {
+      return fallback || '';
+    }
+    return projectEquipmentById[equipmentId]?.name
+      || equipmentCatalogById[equipmentId]?.name
+      || fallback
+      || '';
+  }, [equipmentCatalogById, projectEquipmentById]);
+  const attachEquipmentName = useCallback((item, fallbackName = '') => {
+    if (!item) {
+      return item;
+    }
+    const equipmentName = getEquipmentNameById(item.equipment_id, fallbackName || item.equipment_name || item.name || '');
+    return {
+      ...item,
+      equipment_name: equipmentName || null,
+    };
+  }, [getEquipmentNameById]);
+  const getProjectEquipmentOptions = useCallback((categories = []) => (
+    projectEquipmentItems.filter((item) => categories.includes(item.category))
+  ), [projectEquipmentItems]);
+  const getCatalogEquipmentOptions = useCallback((categories = []) => (
+    equipmentCatalogItems.filter((item) => categories.includes(item.category))
+  ), [equipmentCatalogItems]);
+  const linkedCableOptions = useMemo(
+    () => projectEquipmentItems.filter((item) => item.category === 'cable'),
+    [projectEquipmentItems],
+  );
+  const getSelectedProjectCableName = useCallback((role, fallbackLabel = 'Кабеля') => {
+    const selectedId = projectEquipmentSelections?.[role];
+    if (selectedId !== null && selectedId !== undefined && selectedId !== '') {
+      const selectedName = getEquipmentNameById(selectedId, '');
+      if (selectedName) {
+        return selectedName;
+      }
+    }
+    if (linkedCableOptions.length === 1) {
+      return linkedCableOptions[0].name;
+    }
+    return fallbackLabel;
+  }, [getEquipmentNameById, linkedCableOptions, projectEquipmentSelections]);
+  const promptEquipmentSelection = useCallback((title, options) => {
+    if (!options.length) {
+      return null;
+    }
+    const promptText = [
+      title,
+      '',
+      ...options.map((option, index) => `${index + 1}. ${option.label}`),
+    ].join('\n');
+    const response = window.prompt(promptText, '1');
+    if (response === null) {
+      return null;
+    }
+    const selectedIndex = Number(response) - 1;
+    if (!Number.isInteger(selectedIndex) || selectedIndex < 0 || selectedIndex >= options.length) {
+      return null;
+    }
+    return options[selectedIndex];
+  }, []);
+  const resolveProjectEquipmentSelection = useCallback((categories, title) => {
+    const options = getProjectEquipmentOptions(categories);
+    if (!options.length) {
+      return null;
+    }
+    if (options.length === 1) {
+      return options[0].id;
+    }
+    const selected = promptEquipmentSelection(
+      title,
+      options.map((item) => ({
+        id: item.id,
+        label: `${item.name} (${item.category})`,
+      })),
+    );
+    return selected?.id ?? null;
+  }, [getProjectEquipmentOptions, promptEquipmentSelection]);
+  const resolveInstrumentEquipmentSelection = useCallback(async (instrumentType) => {
+    const categories = SIGNAL_INSTRUMENT_EQUIPMENT_CATEGORIES[instrumentType] || ['instrument', 'keyboard'];
+    const linkedOptions = getProjectEquipmentOptions(categories);
+    const linkedIds = new Set(linkedOptions.map((item) => item.id));
+    const catalogOptions = getCatalogEquipmentOptions(categories).filter((item) => !linkedIds.has(item.id));
+
+    if (!linkedOptions.length && !catalogOptions.length) {
+      alert('Для этого прибора в проекте и каталоге нет подходящего оборудования.');
+      return null;
+    }
+
+    if (linkedOptions.length === 1 && catalogOptions.length === 0) {
+      return linkedOptions[0].id;
+    }
+
+    const selected = promptEquipmentSelection(
+      'Выберите оборудование для прибора',
+      [
+        ...linkedOptions.map((item) => ({
+          source: 'project',
+          item,
+          label: `[Проект] ${item.name} (${item.category})`,
+        })),
+        ...catalogOptions.map((item) => ({
+          source: 'catalog',
+          item,
+          label: `[Каталог] ${item.name} (${item.category})`,
+        })),
+      ],
+    );
+
+    if (!selected) {
+      return null;
+    }
+    if (selected.source === 'catalog' && floorPlan?.project_id) {
+      const response = await projectsApi.attachEquipment(floorPlan.project_id, { equipment_id: selected.item.id });
+      setProjectEquipmentItems(response?.items || []);
+    }
+    return selected.item.id;
+  }, [floorPlan?.project_id, getCatalogEquipmentOptions, getProjectEquipmentOptions, promptEquipmentSelection]);
   const branchFireAlarms = useMemo(
     () => getBranchFireAlarms(fireAlarms, currentSignalSystem),
     [fireAlarms, currentSignalSystem],
   );
+  const branchSoueDevices = useMemo(
+    () => getBranchSoueDevices(soueDevices, currentSharedSignalSystem),
+    [soueDevices, currentSharedSignalSystem],
+  );
   const updateLocalSignalBranchState = useSignalBranchState(setPipelineState);
+  const getRouteZcLabelPayload = useCallback((route) => (
+    shouldShowRouteTerminator(route)
+      ? {
+        zc_label_dx: route.zc_label_dx ?? null,
+        zc_label_dy: route.zc_label_dy ?? null,
+      }
+      : {
+        zc_label_dx: null,
+        zc_label_dy: null,
+      }
+  ), []);
+  const handleSelectCableRoute = useCallback((route, segmentIndex = null) => {
+    setSelectedElement({ type: 'cable-route', id: route.id, data: route });
+    setSelectedElements([{ type: 'cable-route', id: route.id }]);
+    setSelectedCableSegment(Number.isInteger(segmentIndex) ? { routeId: route.id, segmentIndex } : null);
+  }, []);
+  const handleDeleteSelectedCableSegment = useCallback(async () => {
+    if (!selectedCableSegment) {
+      return;
+    }
+    const route = cableRoutes.find((item) => item.id === selectedCableSegment.routeId);
+    if (!route) {
+      setSelectedCableSegment(null);
+      return;
+    }
+    const nextPoints = deleteOrthogonalSegment(route.polyline_points || [], selectedCableSegment.segmentIndex);
+    const currentPoints = normalizeOrthogonalPolyline(route.polyline_points || []);
+    if (JSON.stringify(nextPoints) === JSON.stringify(currentPoints)) {
+      return;
+    }
+    try {
+      const updated = await elementsApi.updateCableRoute(route.id, {
+        polyline_points: nextPoints,
+        is_manual: true,
+        ...getRouteZcLabelPayload(route),
+      });
+      setCableRoutes((prev) => prev.map((item) => (item.id === updated.id ? updated : item)));
+      handleSelectCableRoute(updated);
+      updateLocalSignalBranchState(route.system_type, buildCableRouteStepUpdate(route));
+    } catch (error) {
+      console.error('Error deleting cable route segment:', error);
+      alert('РќРµ СѓРґР°Р»РѕСЃСЊ СѓРґР°Р»РёС‚СЊ СЃРµРіРјРµРЅС‚ РєР°Р±РµР»СЏ.');
+    }
+  }, [
+    cableRoutes,
+    getRouteZcLabelPayload,
+    handleSelectCableRoute,
+    selectedCableSegment,
+    updateLocalSignalBranchState,
+  ]);
 
   // Zoom constants
   const MIN_ZOOM = 0.1;
@@ -1069,6 +1672,131 @@ function FloorPlanEditor() {
     }
   };
 
+  const loadGeneralData = useCallback(async (projectId) => {
+    if (!projectId) {
+      setGeneralData(null);
+      setGeneralDataError('');
+      setGeneralDataDirty(false);
+      return null;
+    }
+    try {
+      setGeneralDataLoading(true);
+      setGeneralDataError('');
+      const generalDataResponse = await projectsApi.getGeneralData(projectId);
+      const nextGeneralData = cloneGeneralData(generalDataResponse);
+      setGeneralData(nextGeneralData);
+      setGeneralDataDirty(false);
+      return nextGeneralData;
+    } catch (error) {
+      console.error('Error loading general data:', error);
+      setGeneralData(null);
+      setGeneralDataError('Не удалось загрузить общие данные.');
+      return null;
+    } finally {
+      setGeneralDataLoading(false);
+    }
+  }, []);
+
+  const loadGeneralInstructions = useCallback(async (projectId) => {
+    if (!projectId) {
+      setGeneralInstructions(null);
+      setGeneralInstructionsError('');
+      setGeneralInstructionsDirty(false);
+      return null;
+    }
+    try {
+      setGeneralInstructionsLoading(true);
+      setGeneralInstructionsError('');
+      const generalInstructionsResponse = await projectsApi.getGeneralInstructions(projectId);
+      const nextGeneralInstructions = cloneGeneralInstructions(generalInstructionsResponse);
+      setGeneralInstructions(nextGeneralInstructions);
+      setGeneralInstructionsDirty(false);
+      return nextGeneralInstructions;
+    } catch (error) {
+      console.error('Error loading general instructions:', error);
+      setGeneralInstructions(null);
+      setGeneralInstructionsError('Не удалось загрузить общие указания.');
+      return null;
+    } finally {
+      setGeneralInstructionsLoading(false);
+    }
+  }, []);
+
+  const loadPowerConsumptionCalculation = useCallback(async (projectId) => {
+    if (!projectId) {
+      setPowerConsumptionCalculation(null);
+      setPowerConsumptionCalculationError('');
+      setPowerConsumptionCalculationDirty(false);
+      return null;
+    }
+    try {
+      setPowerConsumptionCalculationLoading(true);
+      setPowerConsumptionCalculationError('');
+      const calculationResponse = await projectsApi.getPowerConsumptionCalculation(projectId);
+      const nextCalculation = clonePowerConsumptionCalculation(calculationResponse);
+      setPowerConsumptionCalculation(nextCalculation);
+      setPowerConsumptionCalculationDirty(false);
+      return nextCalculation;
+    } catch (error) {
+      console.error('Error loading power consumption calculation:', error);
+      setPowerConsumptionCalculation(null);
+      setPowerConsumptionCalculationError('Не удалось загрузить расчет токопотребления.');
+      return null;
+    } finally {
+      setPowerConsumptionCalculationLoading(false);
+    }
+  }, []);
+
+  const loadEquipmentSpecification = useCallback(async (projectId) => {
+    if (!projectId) {
+      setEquipmentSpecification(null);
+      setEquipmentSpecificationError('');
+      setEquipmentSpecificationDirty(false);
+      return null;
+    }
+    try {
+      setEquipmentSpecificationLoading(true);
+      setEquipmentSpecificationError('');
+      const specificationResponse = await projectsApi.getEquipmentSpecification(projectId);
+      const nextSpecification = cloneEquipmentSpecification(specificationResponse);
+      setEquipmentSpecification(nextSpecification);
+      setEquipmentSpecificationDirty(false);
+      return nextSpecification;
+    } catch (error) {
+      console.error('Error loading equipment specification:', error);
+      setEquipmentSpecification(null);
+      setEquipmentSpecificationError('Не удалось загрузить спецификацию оборудования.');
+      return null;
+    } finally {
+      setEquipmentSpecificationLoading(false);
+    }
+  }, []);
+
+  const loadAdditionalInfo = useCallback(async (projectId) => {
+    if (!projectId) {
+      setAdditionalInfo(null);
+      setAdditionalInfoError('');
+      setAdditionalInfoDirty(false);
+      return null;
+    }
+    try {
+      setAdditionalInfoLoading(true);
+      setAdditionalInfoError('');
+      const additionalInfoResponse = await projectsApi.getAdditionalInfo(projectId);
+      const nextAdditionalInfo = cloneAdditionalInfo(additionalInfoResponse);
+      setAdditionalInfo(nextAdditionalInfo);
+      setAdditionalInfoDirty(false);
+      return nextAdditionalInfo;
+    } catch (error) {
+      console.error('Error loading additional info:', error);
+      setAdditionalInfo(null);
+      setAdditionalInfoError('Не удалось загрузить доп. сведения.');
+      return null;
+    } finally {
+      setAdditionalInfoLoading(false);
+    }
+  }, []);
+
   const applyFloorPlanData = useCallback((data) => {
     setFloorPlan(data);
     setWalls(data.walls || []);
@@ -1078,6 +1806,7 @@ function FloorPlanEditor() {
     setRooms(data.rooms || []);
     setDimensions(data.dimensions || []);
     setFireAlarms(data.fire_alarms || []);
+    setSoueDevices(data.soue_devices || []);
     setZkspcZones(data.zkspc_zones || []);
     setZkspcDraftZones(data.zkspc_zones || []);
     setSignalInstruments(data.signal_instruments || []);
@@ -1101,8 +1830,46 @@ function FloorPlanEditor() {
     try {
       const data = await floorPlansApi.get(floorPlanId, true);
       applyFloorPlanData(data);
-      const state = await pipelineApi.getState(floorPlanId);
+      const [
+        state,
+        catalogItems,
+        projectEquipment,
+        projectSelections,
+        generalDataResponse,
+        generalInstructionsResponse,
+        powerCalculationResponse,
+        specificationResponse,
+        additionalInfoResponse,
+      ] = await Promise.all([
+        pipelineApi.getState(floorPlanId),
+        equipmentApi.list(),
+        data?.project_id ? projectsApi.listEquipment(data.project_id) : Promise.resolve({ items: [] }),
+        data?.project_id ? projectsApi.getEquipmentSelections(data.project_id) : Promise.resolve({ selections: {} }),
+        data?.project_id ? projectsApi.getGeneralData(data.project_id).catch(() => null) : Promise.resolve(null),
+        data?.project_id ? projectsApi.getGeneralInstructions(data.project_id).catch(() => null) : Promise.resolve(null),
+        data?.project_id ? projectsApi.getPowerConsumptionCalculation(data.project_id).catch(() => null) : Promise.resolve(null),
+        data?.project_id ? projectsApi.getEquipmentSpecification(data.project_id).catch(() => null) : Promise.resolve(null),
+        data?.project_id ? projectsApi.getAdditionalInfo(data.project_id).catch(() => null) : Promise.resolve(null),
+      ]);
       setPipelineState(state);
+      setEquipmentCatalogItems(catalogItems || []);
+      setProjectEquipmentItems(projectEquipment?.items || []);
+      setProjectEquipmentSelections(projectSelections?.selections || {});
+      setGeneralData(cloneGeneralData(generalDataResponse));
+      setGeneralDataError('');
+      setGeneralDataDirty(false);
+      setGeneralInstructions(cloneGeneralInstructions(generalInstructionsResponse));
+      setGeneralInstructionsError('');
+      setGeneralInstructionsDirty(false);
+      setPowerConsumptionCalculation(clonePowerConsumptionCalculation(powerCalculationResponse));
+      setPowerConsumptionCalculationError('');
+      setPowerConsumptionCalculationDirty(false);
+      setEquipmentSpecification(cloneEquipmentSpecification(specificationResponse));
+      setEquipmentSpecificationError('');
+      setEquipmentSpecificationDirty(false);
+      setAdditionalInfo(cloneAdditionalInfo(additionalInfoResponse));
+      setAdditionalInfoError('');
+      setAdditionalInfoDirty(false);
       try {
         const recognitionData = await recognitionApi.get(floorPlanId);
         setRecognitionMeta(recognitionData);
@@ -1115,6 +1882,11 @@ function FloorPlanEditor() {
       setLoading(false);
     } catch (error) {
       console.error('Error fetching floor plan:', error);
+      setGeneralDataError('Не удалось загрузить данные плана проекта.');
+      setGeneralInstructionsError('Не удалось загрузить данные плана проекта.');
+      setPowerConsumptionCalculationError('Не удалось загрузить данные плана проекта.');
+      setEquipmentSpecificationError('Не удалось загрузить данные плана проекта.');
+      setAdditionalInfoError('Не удалось загрузить данные плана проекта.');
       setLoading(false);
     }
   }, [applyFloorPlanData, floorPlanId]);
@@ -1146,7 +1918,12 @@ function FloorPlanEditor() {
       const normalizedSystem = normalizeSignalSystemType(
         pipelineState.active_signal_system_type || activeSignalSystemType || floorPlan?.active_signal_system_type,
       );
-      setViewStep(pipelineState?.branches?.[normalizedSystem]?.active_step || 'fire_alarms');
+      const branchState = buildCompositeBranchState(
+        pipelineState?.branches?.[COMMON_SIGNAL_SYSTEM],
+        pipelineState?.branches?.[normalizedSystem],
+        { zkspcValidated: true },
+      );
+      setViewStep(branchState.active_step || 'signal_instruments');
     } else if (pipelineState?.steps?.rooms?.status === 'validated') {
       setViewStep('zkspc');
     } else if (pipelineState?.active_step) {
@@ -1154,7 +1931,14 @@ function FloorPlanEditor() {
     } else {
       setViewStep('original');
     }
-  }, [pipelineState, viewStep, activeSignalSystemType, floorPlan?.active_signal_system_type]);
+  }, [activeSignalSystemType, floorPlan?.active_signal_system_type, pipelineState, viewStep]);
+
+  useEffect(() => {
+    if (!requestedViewStep || !DIRECT_LINK_EDITOR_STEPS.has(requestedViewStep) || viewStep === requestedViewStep) {
+      return;
+    }
+    setViewStep(requestedViewStep);
+  }, [requestedViewStep, viewStep]);
 
   useEffect(() => {
     if (selectedElement?.type === 'room' && selectedElement?.data) {
@@ -1260,8 +2044,8 @@ function FloorPlanEditor() {
     return {
       ...entity,
       ...modifications,
-      x: placement.x,
-      y: placement.y,
+      x,
+      y,
       label_dx: modifications.label_dx !== undefined ? modifications.label_dx : entity.label_dx,
       label_dy: modifications.label_dy !== undefined ? modifications.label_dy : entity.label_dy,
       room_id: metadata.roomId ?? entity.room_id ?? null,
@@ -1270,6 +2054,32 @@ function FloorPlanEditor() {
       room_name: metadata.room?.name || null,
     };
   }, [fireAlarms, newFireAlarms, modifiedElements, rooms, floorPlan?.scale_factor]);
+  const getSoueDeviceCurrentGeometry = useCallback((kind, deviceId, fallbackEntity = null) => {
+    const collection = kind === 'soue-devices' ? soueDevices : newSoueDevices;
+    const entity = fallbackEntity || collection.find((item) => item.id === deviceId);
+    if (!entity) {
+      return null;
+    }
+    const modifications = kind === 'soue-devices'
+      ? (modifiedElements[`soue-devices-${entity.id}`] || {})
+      : {};
+    const x = modifications.x !== undefined ? modifications.x : entity.x;
+    const y = modifications.y !== undefined ? modifications.y : entity.y;
+    const metadata = getRoomMetadataForPoint({ x, y }, rooms, floorPlan?.scale_factor);
+    return {
+      ...entity,
+      ...modifications,
+      x,
+      y,
+      rotation_deg: modifications.rotation_deg !== undefined ? modifications.rotation_deg : (entity.rotation_deg ?? 0),
+      label_dx: modifications.label_dx !== undefined ? modifications.label_dx : entity.label_dx,
+      label_dy: modifications.label_dy !== undefined ? modifications.label_dy : entity.label_dy,
+      room_id: metadata.roomId ?? entity.room_id ?? null,
+      offset_left_m: metadata.offsetLeftM ?? entity.offset_left_m ?? null,
+      offset_top_m: metadata.offsetTopM ?? entity.offset_top_m ?? null,
+      room_name: metadata.room?.name || null,
+    };
+  }, [soueDevices, newSoueDevices, modifiedElements, rooms, floorPlan?.scale_factor]);
 
   const placementBounds = useMemo(() => ({
     x: 0,
@@ -1325,7 +2135,7 @@ function FloorPlanEditor() {
       }
     });
     signalInstruments
-      .filter((instrument) => normalizeSignalSystemType(instrument.system_type) === currentSignalSystem)
+      .filter((instrument) => normalizeSignalSystemType(instrument.system_type) === currentSharedSignalSystem)
       .forEach((instrument) => {
         if (instrument.id === excludeInstrumentId) {
           return;
@@ -1339,7 +2149,7 @@ function FloorPlanEditor() {
   }, [
     activeWallGeometries,
     branchFireAlarms,
-    currentSignalSystem,
+    currentSharedSignalSystem,
     doors,
     floorPlan?.scale_factor,
     getFireAlarmCurrentGeometry,
@@ -1351,18 +2161,289 @@ function FloorPlanEditor() {
     windows,
   ]);
 
-  const resolveDevicePlacementPoint = useCallback((point, getBoundsForCenter, exclude = {}) => {
+  const collectFireAlarmSpacingObstacles = useCallback((deviceType, exclude = {}) => {
+    if (currentSignalSystem !== 'non_addressable' || deviceType !== 'smoke_detector') {
+      return [];
+    }
+    const { excludeFireAlarmId = null } = exclude;
+    const obstacles = [];
+    branchFireAlarms.forEach((alarm) => {
+      if (alarm.id === excludeFireAlarmId || alarm.device_type !== 'smoke_detector') {
+        return;
+      }
+      const current = getFireAlarmCurrentGeometry('fire-alarms', alarm.id, alarm);
+      const bounds = getFireAlarmSpacingObstacle(current);
+      if (bounds) {
+        obstacles.push(bounds);
+      }
+    });
+    newFireAlarms.forEach((alarm) => {
+      if (alarm.id === excludeFireAlarmId || alarm.device_type !== 'smoke_detector') {
+        return;
+      }
+      const current = getFireAlarmCurrentGeometry('new-fire-alarms', alarm.id, alarm);
+      const bounds = getFireAlarmSpacingObstacle(current);
+      if (bounds) {
+        obstacles.push(bounds);
+      }
+    });
+    return obstacles;
+  }, [branchFireAlarms, currentSignalSystem, getFireAlarmCurrentGeometry, newFireAlarms]);
+
+  const collectSouePlacementObstacles = useCallback((exclude = {}) => {
+    const { excludeSoueDeviceId = null } = exclude;
+    const obstacles = [];
+    branchSoueDevices.forEach((device) => {
+      if (device.id === excludeSoueDeviceId) {
+        return;
+      }
+      const current = getSoueDeviceCurrentGeometry('soue-devices', device.id, device);
+      const bounds = getSoueDeviceBounds(current ? { ...current, rotation_deg: getSoueDisplayRotation(current) } : null);
+      if (bounds) {
+        obstacles.push(bounds);
+      }
+    });
+    newSoueDevices.forEach((device) => {
+      if (device.id === excludeSoueDeviceId) {
+        return;
+      }
+      const current = getSoueDeviceCurrentGeometry('new-soue-devices', device.id, device);
+      const bounds = getSoueDeviceBounds(current ? { ...current, rotation_deg: getSoueDisplayRotation(current) } : null);
+      if (bounds) {
+        obstacles.push(bounds);
+      }
+    });
+    return obstacles;
+  }, [branchSoueDevices, getSoueDeviceCurrentGeometry, getSoueDisplayRotation, newSoueDevices]);
+
+  function getSoueClearancePx() {
+    return Math.max(6, 120 / Math.max(floorPlan?.scale_factor || 1, 1e-6));
+  }
+
+  function getSoueDisplayRotation(device) {
+    if (!device || device.device_type !== 'siren') {
+      return normalizeAngle360(Number(device?.rotation_deg || 0));
+    }
+    if (device.rotation_deg !== null && device.rotation_deg !== undefined) {
+      return normalizeAngle360(Number(device.rotation_deg || 0));
+    }
+    const maxWallGap = getSoueClearancePx() + 18;
+    let bestCandidate = null;
+    activeWallGeometries.forEach((wall) => {
+      const axis = getWallAxisData(wall);
+      const projection = axis ? projectPointToWall(device, wall) : null;
+      if (!axis || !projection) {
+        return;
+      }
+      const along = Math.max(0, Math.min(axis.length, projection.along));
+      const wallThicknessPx = Math.max(4, millimetersToPx(wall?.thickness ?? 200, floorPlan?.scale_factor) || 0);
+      const wallGap = Math.abs(projection.normal) - (wallThicknessPx / 2) - getSoueNearEdgeDistance('siren');
+      if (wallGap < -4 || wallGap > maxWallGap) {
+        return;
+      }
+      const direction = projection.normal >= 0 ? 1 : -1;
+      const rotationDeg = normalizeAngle360((Math.atan2(axis.ny * direction, axis.nx * direction) * 180) / Math.PI);
+      const score = Math.abs(wallGap - getSoueClearancePx()) + Math.abs(projection.along - along);
+      if (!bestCandidate || score < bestCandidate.score) {
+        bestCandidate = { score, rotationDeg };
+      }
+    });
+    return bestCandidate?.rotationDeg ?? 0;
+  }
+
+  const resolveDevicePlacementPoint = useCallback((point, getBoundsForCenter, exclude = {}, options = {}) => {
+    const {
+      extraObstacles = [],
+      threshold = 8,
+    } = options;
     const bounds = getBoundsForCenter(point);
     const nextBounds = resolveRectAgainstObstacles(
       bounds,
-      collectDevicePlacementObstacles(exclude),
+      [
+        ...collectDevicePlacementObstacles(exclude),
+        ...extraObstacles,
+      ],
       placementBounds,
-      8,
+      threshold,
     );
     return rectCenter(nextBounds || bounds);
   }, [collectDevicePlacementObstacles, placementBounds]);
 
+  const resolveSoueDevicePlacement = useCallback((deviceType, point, exclude = {}) => {
+    const visibleRooms = rooms.filter((room) => !deletedElements.some((del) => del.type === 'rooms' && del.id === room.id));
+    const visibleDoorGeometries = [...doors, ...newDoors]
+      .map((door) => getOpeningCurrentGeometry(
+        String(door.id).startsWith('temp_') ? 'new-doors' : 'doors',
+        door.id,
+        door,
+      ))
+      .filter((door) => door?.wall_id);
+    const clearancePx = getSoueClearancePx();
+    const symbolBoundsForCenter = (center, rotationDeg = 0) => getSoueDeviceBounds({
+      device_type: deviceType,
+      x: center.x,
+      y: center.y,
+      rotation_deg: rotationDeg,
+    });
+    const symbolBounds = symbolBoundsForCenter(point);
+    const targetRoom = visibleRooms.find((room) => pointInPolygon([point.x, point.y], room.boundary_points || [])) || null;
+    const sampleOffsetPx = Math.max(10, 240 / Math.max(floorPlan?.scale_factor || 1, 1e-6));
+    const doorSnapDistance = Math.max(24, 420 / Math.max(floorPlan?.scale_factor || 1, 1e-6));
+    const doorCandidates = deviceType === 'exit_sign'
+      ? visibleDoorGeometries
+        .map((door) => {
+          const center = {
+            x: door.x + (door.width / 2),
+            y: door.y + (door.height / 2),
+            rotation_deg: 0,
+          };
+          const roomPenalty = targetRoom?.boundary_points?.length && !pointInPolygon([center.x, center.y], targetRoom.boundary_points)
+            ? 1
+            : 0;
+          return {
+            candidate: center,
+            distance: Math.hypot(point.x - center.x, point.y - center.y),
+            roomPenalty,
+          };
+        })
+        .filter((candidate) => candidate.distance <= doorSnapDistance)
+        .sort((left, right) => (
+          left.roomPenalty - right.roomPenalty
+          || left.distance - right.distance
+        ))
+      : [];
+    const wallCandidates = activeWallGeometries
+      .map((wall) => {
+        const axis = getWallAxisData(wall);
+        const projection = axis ? projectPointToWall(point, wall) : null;
+        if (!axis || !projection) {
+          return [];
+        }
+        const along = Math.max(0, Math.min(axis.length, projection.along));
+        const anchor = {
+          x: axis.x1 + (axis.ux * along),
+          y: axis.y1 + (axis.uy * along),
+        };
+        const wallThicknessPx = Math.max(4, millimetersToPx(wall?.thickness ?? 200, floorPlan?.scale_factor) || 0);
+        const baseOffsetPx = (wallThicknessPx / 2) + getSoueNearEdgeDistance(deviceType) + clearancePx;
+        const wallShiftStep = Math.max(8, Math.min(32, Math.max(symbolBounds.width, symbolBounds.height) / 3));
+        return [1, -1].flatMap((direction) => {
+          const rotationDeg = deviceType === 'siren'
+            ? normalizeAngle360((Math.atan2(axis.ny * direction, axis.nx * direction) * 180) / Math.PI)
+            : 0;
+          return [0, 1, -1, 2, -2, 3, -3].map((shiftMultiplier) => {
+            const shiftAlongWall = shiftMultiplier * wallShiftStep;
+            const shiftedAlong = Math.max(0, Math.min(axis.length, along + shiftAlongWall));
+            const shiftedAnchor = {
+              x: axis.x1 + (axis.ux * shiftedAlong),
+              y: axis.y1 + (axis.uy * shiftedAlong),
+            };
+            const candidate = {
+              x: shiftedAnchor.x + (axis.nx * baseOffsetPx * direction),
+              y: shiftedAnchor.y + (axis.ny * baseOffsetPx * direction),
+              rotation_deg: rotationDeg,
+            };
+            const samplePoint = {
+              x: shiftedAnchor.x + (axis.nx * (baseOffsetPx + sampleOffsetPx) * direction),
+              y: shiftedAnchor.y + (axis.ny * (baseOffsetPx + sampleOffsetPx) * direction),
+            };
+            const matchesTargetRoom = targetRoom?.boundary_points?.length
+              ? pointInPolygon([samplePoint.x, samplePoint.y], targetRoom.boundary_points)
+              : true;
+            const staysInsideAnyRoom = visibleRooms.some((room) => pointInPolygon([samplePoint.x, samplePoint.y], room.boundary_points || []));
+            return {
+              candidate,
+              roomPenalty: matchesTargetRoom ? 0 : (staysInsideAnyRoom ? 1 : 2),
+              distance: Math.hypot(point.x - candidate.x, point.y - candidate.y),
+              wallDistance: Math.abs(projection.normal) + Math.abs(shiftAlongWall),
+            };
+          });
+        });
+      })
+      .flat()
+      .sort((left, right) => (
+        left.roomPenalty - right.roomPenalty
+        || left.distance - right.distance
+        || left.wallDistance - right.wallDistance
+      ));
+
+    const obstacles = [
+      ...collectDevicePlacementObstacles(exclude),
+      ...collectSouePlacementObstacles(exclude),
+    ];
+    const freeRotationDeg = deviceType === 'siren'
+      ? (exclude.rotation_deg ?? getSoueDisplayRotation({ device_type: deviceType, x: point.x, y: point.y }))
+      : 0;
+    const freeBounds = symbolBoundsForCenter(point, freeRotationDeg);
+    if (
+      doorCandidates.length === 0
+      &&
+      isRectInsideBounds(freeBounds, placementBounds)
+      && !rectOverlapsAny(padRect(freeBounds, getFootprintPadding(deviceType)), obstacles)
+      && (!targetRoom?.boundary_points?.length || pointInPolygon([point.x, point.y], targetRoom.boundary_points))
+    ) {
+      return { x: point.x, y: point.y, rotation_deg: freeRotationDeg };
+    }
+    for (const option of doorCandidates) {
+      const candidateBounds = symbolBoundsForCenter(option.candidate, option.candidate.rotation_deg || 0);
+      if (!isRectInsideBounds(candidateBounds, placementBounds)) {
+        continue;
+      }
+      return {
+        x: option.candidate.x,
+        y: option.candidate.y,
+        rotation_deg: option.candidate.rotation_deg || 0,
+      };
+    }
+    for (const option of wallCandidates) {
+      const optionBounds = symbolBoundsForCenter(option.candidate, option.candidate.rotation_deg || 0);
+      const resolved = resolveRectAgainstObstacles(optionBounds, obstacles, placementBounds, 0);
+      const center = rectCenter(resolved || optionBounds);
+      const candidateBounds = symbolBoundsForCenter(center, option.candidate.rotation_deg || 0);
+      if (targetRoom?.boundary_points?.length && !pointInPolygon([center.x, center.y], targetRoom.boundary_points)) {
+        continue;
+      }
+      if (!rectOverlapsAny(padRect(candidateBounds, getFootprintPadding(deviceType)), obstacles)) {
+        return {
+          x: center.x,
+          y: center.y,
+          rotation_deg: option.candidate.rotation_deg || 0,
+        };
+      }
+    }
+    const fallback = resolveDevicePlacementPoint(point, (center) => symbolBoundsForCenter(center, freeRotationDeg), exclude, { threshold: 0 });
+    if (!fallback) {
+      return null;
+    }
+    const fallbackBounds = symbolBoundsForCenter(fallback, freeRotationDeg);
+    if (rectOverlapsAny(padRect(fallbackBounds, getFootprintPadding(deviceType)), obstacles)) {
+      return null;
+    }
+    return { x: fallback.x, y: fallback.y, rotation_deg: freeRotationDeg };
+  }, [
+    activeWallGeometries,
+    collectDevicePlacementObstacles,
+    collectSouePlacementObstacles,
+    deletedElements,
+    doors,
+    floorPlan?.scale_factor,
+    getSoueClearancePx,
+    getSoueDisplayRotation,
+    getOpeningCurrentGeometry,
+    newDoors,
+    placementBounds,
+    resolveDevicePlacementPoint,
+    rooms,
+  ]);
+
   const resolveManualCallPointPlacement = useCallback((point) => {
+    const visibleRooms = rooms.filter((room) => !deletedElements.some((del) => del.type === 'rooms' && del.id === room.id));
+    const stairGeometries = [
+      ...stairs
+        .filter((stair) => !deletedElements.some((del) => del.type === 'stairs' && del.id === stair.id))
+        .map((stair) => getStairCurrentGeometry(stair.id, stair)),
+      ...newStairs,
+    ].filter(Boolean);
     const candidateDoors = [...doors, ...newDoors]
       .map((door) => (
         door.id?.toString?.().startsWith('temp_')
@@ -1372,84 +2453,132 @@ function FloorPlanEditor() {
       .filter(Boolean)
       .filter((door) => door.wall_id);
     if (!candidateDoors.length) {
-      return point;
-    }
-    const nearestDoor = [...candidateDoors].sort((left, right) => {
-      const leftCenterX = left.x + (left.width / 2);
-      const leftCenterY = left.y + (left.height / 2);
-      const rightCenterX = right.x + (right.width / 2);
-      const rightCenterY = right.y + (right.height / 2);
-      return Math.hypot(point.x - leftCenterX, point.y - leftCenterY) - Math.hypot(point.x - rightCenterX, point.y - rightCenterY);
-    })[0];
-    const wall = activeWallGeometries.find((item) => item.id === nearestDoor.wall_id);
-    const axis = wall ? getWallAxisData(wall) : null;
-    if (!wall || !axis) {
-      return point;
-    }
-    const center = {
-      x: nearestDoor.x + (nearestDoor.width / 2),
-      y: nearestDoor.y + (nearestDoor.height / 2),
-    };
-    const centerProjection = projectPointToWall(center, wall);
-    if (!centerProjection) {
-      return point;
+      return null;
     }
     const scale = floorPlan?.scale_factor && floorPlan.scale_factor > 0 ? floorPlan.scale_factor : 1;
+    const sampleOffsetPx = Math.max(6, 750 / scale);
     const placementOffsetPx = Math.max(4, 300 / scale);
     const tangentClearancePx = Math.max(8, 180 / scale);
-    const halfSpan = Math.max(6, Number(nearestDoor.width || 0) / 2);
-    const doorStart = Math.max(0, centerProjection.along - halfSpan);
-    const doorEnd = Math.min(axis.length, centerProjection.along + halfSpan);
-    let leftLimit = 0;
-    let rightLimit = axis.length;
-    candidateDoors
-      .filter((door) => door.wall_id === nearestDoor.wall_id && door.id !== nearestDoor.id)
-      .forEach((door) => {
-        const doorCenter = {
+    const candidates = candidateDoors
+      .map((door) => {
+        const wall = activeWallGeometries.find((item) => item.id === door.wall_id);
+        const axis = wall ? getWallAxisData(wall) : null;
+        if (!wall || !axis) {
+          return null;
+        }
+        const center = {
           x: door.x + (door.width / 2),
           y: door.y + (door.height / 2),
         };
-        const projection = projectPointToWall(doorCenter, wall);
-        if (!projection) {
-          return;
+        const positiveSample = {
+          x: center.x + (axis.nx * sampleOffsetPx),
+          y: center.y + (axis.ny * sampleOffsetPx),
+        };
+        const negativeSample = {
+          x: center.x - (axis.nx * sampleOffsetPx),
+          y: center.y - (axis.ny * sampleOffsetPx),
+        };
+        const positiveRoom = visibleRooms.find((room) => pointInPolygon([positiveSample.x, positiveSample.y], room.boundary_points || [])) || null;
+        const negativeRoom = visibleRooms.find((room) => pointInPolygon([negativeSample.x, negativeSample.y], room.boundary_points || [])) || null;
+        const positiveOutside = !positiveRoom;
+        const negativeOutside = !negativeRoom;
+        if (positiveOutside === negativeOutside) {
+          return null;
         }
-        const otherHalfSpan = Math.max(6, Number(door.width || 0) / 2);
-        const otherStart = Math.max(0, projection.along - otherHalfSpan);
-        const otherEnd = Math.min(axis.length, projection.along + otherHalfSpan);
-        if (otherEnd <= doorStart && otherEnd > leftLimit) {
-          leftLimit = otherEnd;
+
+        const positiveStairRoom = roomContainsStair(positiveRoom, stairGeometries);
+        const negativeStairRoom = roomContainsStair(negativeRoom, stairGeometries);
+        const positiveAllowed = Boolean(
+          positiveRoom && ((positiveRoom.room_type || '') !== 'необслуживаемое' || positiveStairRoom)
+        );
+        const negativeAllowed = Boolean(
+          negativeRoom && ((negativeRoom.room_type || '') !== 'необслуживаемое' || negativeStairRoom)
+        );
+        const normalSign = positiveOutside
+          ? (negativeAllowed ? -1 : null)
+          : (positiveAllowed ? 1 : null);
+        if (normalSign === null) {
+          return null;
         }
-        if (otherStart >= doorEnd && otherStart < rightLimit) {
-          rightLimit = otherStart;
+
+        const centerProjection = projectPointToWall(center, wall);
+        if (!centerProjection) {
+          return null;
         }
-      });
-    const availableLeft = Math.max(0, doorStart - leftLimit);
-    const availableRight = Math.max(0, rightLimit - doorEnd);
-    const alongSign = availableRight >= availableLeft ? 1 : -1;
-    const availableSpan = alongSign > 0 ? availableRight : availableLeft;
-    const shiftAlongWall = halfSpan + Math.min(
-      Math.max(0, availableSpan - 2),
-      Math.max(tangentClearancePx, halfSpan + (tangentClearancePx * 0.35)),
-    );
-    const projected = Math.max(0, Math.min(axis.length, centerProjection.along + (alongSign * shiftAlongWall)));
-    const sideDot = ((point.x - center.x) * axis.nx) + ((point.y - center.y) * axis.ny);
-    const normalSign = sideDot >= 0 ? 1 : -1;
-    return {
-      x: axis.x1 + (axis.ux * projected) + (axis.nx * placementOffsetPx * normalSign),
-      y: axis.y1 + (axis.uy * projected) + (axis.ny * placementOffsetPx * normalSign),
-    };
-  }, [activeWallGeometries, doors, floorPlan?.scale_factor, getOpeningCurrentGeometry, newDoors]);
+        const halfSpan = Math.max(6, Number(door.width || 0) / 2);
+        const doorStart = Math.max(0, centerProjection.along - halfSpan);
+        const doorEnd = Math.min(axis.length, centerProjection.along + halfSpan);
+        let leftLimit = 0;
+        let rightLimit = axis.length;
+        candidateDoors
+          .filter((item) => item.wall_id === door.wall_id && item.id !== door.id)
+          .forEach((item) => {
+            const doorCenter = {
+              x: item.x + (item.width / 2),
+              y: item.y + (item.height / 2),
+            };
+            const projection = projectPointToWall(doorCenter, wall);
+            if (!projection) {
+              return;
+            }
+            const otherHalfSpan = Math.max(6, Number(item.width || 0) / 2);
+            const otherStart = Math.max(0, projection.along - otherHalfSpan);
+            const otherEnd = Math.min(axis.length, projection.along + otherHalfSpan);
+            if (otherEnd <= doorStart && otherEnd > leftLimit) {
+              leftLimit = otherEnd;
+            }
+            if (otherStart >= doorEnd && otherStart < rightLimit) {
+              rightLimit = otherStart;
+            }
+          });
+
+        const availableLeft = Math.max(0, doorStart - leftLimit);
+        const availableRight = Math.max(0, rightLimit - doorEnd);
+        const alongSign = availableRight >= availableLeft ? 1 : -1;
+        const availableSpan = alongSign > 0 ? availableRight : availableLeft;
+        const shiftAlongWall = halfSpan + Math.min(
+          Math.max(0, availableSpan - 2),
+          Math.max(tangentClearancePx, halfSpan + (tangentClearancePx * 0.35)),
+        );
+        const projected = Math.max(0, Math.min(axis.length, centerProjection.along + (alongSign * shiftAlongWall)));
+        return {
+          placement: {
+            x: axis.x1 + (axis.ux * projected) + (axis.nx * placementOffsetPx * normalSign),
+            y: axis.y1 + (axis.uy * projected) + (axis.ny * placementOffsetPx * normalSign),
+          },
+          center,
+        };
+      })
+      .filter(Boolean);
+
+    if (!candidates.length) {
+      return null;
+    }
+
+    return [...candidates]
+      .sort((left, right) => (
+        Math.hypot(point.x - left.center.x, point.y - left.center.y)
+        - Math.hypot(point.x - right.center.x, point.y - right.center.y)
+      ))[0]
+      .placement;
+  }, [activeWallGeometries, deletedElements, doors, floorPlan?.scale_factor, getOpeningCurrentGeometry, getStairCurrentGeometry, newDoors, newStairs, rooms, stairs]);
 
   const resolveFireAlarmPlacement = useCallback((deviceType, point, exclude = {}) => {
     const basePoint = deviceType === 'manual_call_point'
       ? resolveManualCallPointPlacement(point)
       : point;
+    if (!basePoint) {
+      return null;
+    }
     return resolveDevicePlacementPoint(
       basePoint,
       (center) => getFireAlarmBounds({ x: center.x, y: center.y }),
       exclude,
+      {
+        extraObstacles: collectFireAlarmSpacingObstacles(deviceType, exclude),
+      },
     );
-  }, [resolveDevicePlacementPoint, resolveManualCallPointPlacement]);
+  }, [collectFireAlarmSpacingObstacles, resolveDevicePlacementPoint, resolveManualCallPointPlacement]);
 
   const resolveInstrumentPlacement = useCallback((point, exclude = {}) => (
     resolveDevicePlacementPoint(
@@ -1635,22 +2764,52 @@ function FloorPlanEditor() {
   const clearCanvasSelection = useCallback(() => {
     setSelectedElement(null);
     setSelectedElements([]);
+    setSelectedCableSegment(null);
   }, []);
+
+  useEffect(() => {
+    if (!selectedCableSegment) {
+      return;
+    }
+    if (selectedElement?.type !== 'cable-route' || selectedElement?.id !== selectedCableSegment.routeId) {
+      setSelectedCableSegment(null);
+    }
+  }, [selectedCableSegment, selectedElement]);
+
+  useEffect(() => {
+    if (!selectedCableSegment) {
+      return;
+    }
+    const route = cableRoutes.find((item) => item.id === selectedCableSegment.routeId);
+    const pointCount = normalizeOrthogonalPolyline(route?.polyline_points || []).length;
+    if (!route || selectedCableSegment.segmentIndex >= pointCount - 1) {
+      setSelectedCableSegment(null);
+    }
+  }, [cableRoutes, selectedCableSegment]);
 
   const isElementSelected = useCallback((type, id) => (
     (selectedElement?.type === type && selectedElement?.id === id)
       || selectedElements.some((item) => item.type === type && item.id === id)
   ), [selectedElement, selectedElements]);
 
-  const selectionLockActive = Boolean(selectedElement || selectedElements.length > 0);
   const interactionViewStep = viewStep
     || (pipelineState?.steps?.zkspc?.status === 'validated'
-      ? (pipelineState?.branches?.[currentSignalSystem]?.active_step || 'fire_alarms')
+      ? (
+        buildCompositeBranchState(
+          pipelineState?.branches?.[COMMON_SIGNAL_SYSTEM],
+          pipelineState?.branches?.[currentSignalSystem],
+          { zkspcValidated: true },
+        ).active_step || 'signal_instruments'
+      )
       : (pipelineState?.steps?.rooms?.status === 'validated'
         ? 'zkspc'
         : (pipelineState?.active_step || 'original')));
   const drawingToolActive = !['select', 'multi-select', 'room-zone'].includes(selectedTool);
-  const mergeModeActive = interactionViewStep === 'devices_cables' && mergeInstrumentId !== null;
+  const mergeSelectableElementTypes = interactionViewStep === 'soue_cables'
+    ? new Set(['soue-device', 'new-soue-device'])
+    : new Set(['fire-alarm', 'new-fire-alarm']);
+  const mergeModeActive = ['devices_cables', 'soue_cables'].includes(interactionViewStep) && mergeInstrumentId !== null;
+  const selectionLockActive = Boolean(selectedElement || selectedElements.length > 0);
 
   const isElementInteractionBlocked = useCallback((type, id) => (
     ((INTERACTIVE_TYPES_BY_STEP[interactionViewStep] || []).length > 0
@@ -1718,7 +2877,7 @@ function FloorPlanEditor() {
       }
       return;
     }
-    if (!['wall', 'new-wall', 'door', 'window', 'new-door', 'new-window', 'stair', 'new-stair', 'room', 'fire-alarm', 'new-fire-alarm', 'signal-instrument', 'cable-route'].includes(hoveredElement.type)) {
+    if (!['wall', 'new-wall', 'door', 'window', 'new-door', 'new-window', 'stair', 'new-stair', 'room', 'fire-alarm', 'new-fire-alarm', 'soue-device', 'new-soue-device', 'signal-instrument', 'cable-route'].includes(hoveredElement.type)) {
       if (!hoverPanelMouseInsideRef.current) {
         setHoverPanel(null);
       }
@@ -1772,6 +2931,7 @@ function FloorPlanEditor() {
             ? String((pxToMeters(data.height, floorPlan?.scale_factor) ?? 0).toFixed(2))
             : '',
           wallId: data.wall_id !== null && data.wall_id !== undefined ? String(data.wall_id) : '',
+          isEvacuationExit: Boolean(data.is_evacuation_exit),
         });
       }
     } else if (hoveredElement.type === 'stair' || hoveredElement.type === 'new-stair') {
@@ -1797,30 +2957,56 @@ function FloorPlanEditor() {
           type: unserviceableRoomIds.has(data.id) ? 'необслуживаемое' : (data.room_type || 'базовое'),
           length: data.length_m !== null && data.length_m !== undefined ? String(data.length_m) : '',
           width: data.width_m !== null && data.width_m !== undefined ? String(data.width_m) : '',
+          maxOccupancy: data.max_occupancy !== null && data.max_occupancy !== undefined ? String(data.max_occupancy) : '',
         });
       }
     } else if (hoveredElement.type === 'fire-alarm' || hoveredElement.type === 'new-fire-alarm') {
       const kind = hoveredElement.type === 'fire-alarm' ? 'fire-alarms' : 'new-fire-alarms';
-      data = getFireAlarmCurrentGeometry(kind, hoveredElement.id);
+      data = attachEquipmentName(getFireAlarmCurrentGeometry(kind, hoveredElement.id));
       if (data) {
         setFireAlarmDraft({
           zone: data.zone !== null && data.zone !== undefined ? String(data.zone) : '1',
           address: data.address !== null && data.address !== undefined ? String(data.address) : '',
+          equipmentId: data.equipment_id !== null && data.equipment_id !== undefined ? String(data.equipment_id) : '',
+        });
+      }
+    } else if (hoveredElement.type === 'soue-device' || hoveredElement.type === 'new-soue-device') {
+      const kind = hoveredElement.type === 'soue-device' ? 'soue-devices' : 'new-soue-devices';
+      data = attachEquipmentName(getSoueDeviceCurrentGeometry(kind, hoveredElement.id));
+      if (data) {
+        setSoueDeviceDraft({
+          deviceModel: data.device_model || '',
+          soundPressureDb: data.sound_pressure_db !== null && data.sound_pressure_db !== undefined
+            ? String(data.sound_pressure_db)
+            : '',
+          mountingHeight: data.mounting_height !== null && data.mounting_height !== undefined
+            ? String(data.mounting_height)
+            : '',
+          labelDx: data.label_dx !== null && data.label_dx !== undefined ? String(data.label_dx) : '',
+          labelDy: data.label_dy !== null && data.label_dy !== undefined ? String(data.label_dy) : '',
+          equipmentId: data.equipment_id !== null && data.equipment_id !== undefined ? String(data.equipment_id) : '',
         });
       }
     } else if (hoveredElement.type === 'signal-instrument') {
       data = signalInstruments.find((item) => (
-        normalizeSignalSystemType(item.system_type) === currentSignalSystem && item.id === hoveredElement.id
+        normalizeSignalSystemType(item.system_type) === currentSharedSignalSystem && item.id === hoveredElement.id
       )) || null;
       if (data) {
+        const equipmentName = getEquipmentNameById(
+          data.equipment_id,
+          data.name || getSignalInstrumentDefinition(data.instrument_type).label,
+        );
+        data = { ...data, equipment_name: equipmentName || null };
         setSignalInstrumentDraft({
-          name: data.name || '',
+          name: equipmentName || data.name || '',
           instrumentType: data.instrument_type || 'control_panel',
+          equipmentId: data.equipment_id !== null && data.equipment_id !== undefined ? String(data.equipment_id) : '',
         });
       }
     } else if (hoveredElement.type === 'cable-route') {
+      const hoveredRouteSystem = interactionViewStep === 'soue_cables' ? currentSharedSignalSystem : currentSignalSystem;
       data = cableRoutes.find((item) => (
-        normalizeSignalSystemType(item.system_type) === currentSignalSystem && item.id === hoveredElement.id
+        normalizeSignalSystemType(item.system_type) === hoveredRouteSystem && item.id === hoveredElement.id
       )) || null;
     }
 
@@ -1830,7 +3016,7 @@ function FloorPlanEditor() {
       x: hoveredElement.x || 0,
       y: hoveredElement.y || 0,
     });
-  }, [hoveredElement, walls, doors, windows, newWalls, newDoors, newWindows, stairs, newStairs, rooms, floorPlan?.scale_factor, modifiedWalls, modifiedElements, getOpeningCurrentGeometry, getStairCurrentGeometry, getFireAlarmCurrentGeometry, unserviceableRoomIds, signalInstruments, cableRoutes, currentSignalSystem]);
+  }, [hoveredElement, walls, doors, windows, newWalls, newDoors, newWindows, stairs, newStairs, rooms, floorPlan?.scale_factor, modifiedWalls, modifiedElements, getOpeningCurrentGeometry, getStairCurrentGeometry, getFireAlarmCurrentGeometry, getSoueDeviceCurrentGeometry, unserviceableRoomIds, signalInstruments, cableRoutes, currentSharedSignalSystem, currentSignalSystem, interactionViewStep, attachEquipmentName, getEquipmentNameById]);
 
   useEffect(() => {
     if (!hoverPanel?.id) {
@@ -2011,10 +3197,11 @@ function FloorPlanEditor() {
       newDoors: [...newDoors],
       newWindows: [...newWindows],
       newFireAlarms: [...newFireAlarms],
+      newSoueDevices: [...newSoueDevices],
       modifiedWalls: { ...modifiedWalls },
       modifiedElements: { ...modifiedElements }
     }]);
-  }, [deletedElements, newWalls, newStairs, newDoors, newWindows, newFireAlarms, modifiedWalls, modifiedElements]);
+  }, [deletedElements, newWalls, newStairs, newDoors, newWindows, newFireAlarms, newSoueDevices, modifiedWalls, modifiedElements]);
 
   const handleDeleteElement = useCallback((type, id) => {
     // Сохраняем состояние в историю
@@ -2025,6 +3212,7 @@ function FloorPlanEditor() {
       newDoors: [...newDoors],
       newWindows: [...newWindows],
       newFireAlarms: [...newFireAlarms],
+      newSoueDevices: [...newSoueDevices],
       modifiedWalls: { ...modifiedWalls },
       modifiedElements: { ...modifiedElements }
     }]);
@@ -2053,7 +3241,7 @@ function FloorPlanEditor() {
     setSelectedElement(null);
     setSelectedElements(prev => prev.filter(item => item.id !== id));
     setHasUnsavedChanges(true);
-  }, [deletedElements, newWalls, newStairs, newDoors, newWindows, newFireAlarms, modifiedWalls, modifiedElements]);
+  }, [deletedElements, newWalls, newStairs, newDoors, newWindows, newFireAlarms, newSoueDevices, modifiedWalls, modifiedElements]);
 
   // Обработка клавиатурных событий
   useEffect(() => {
@@ -2084,7 +3272,10 @@ function FloorPlanEditor() {
       }
       
       // Delete для удаления выделенных элементов
-      if (e.key === 'Delete' && selectedElements.length > 0) {
+      if (e.key === 'Delete' && selectedCableSegment) {
+        e.preventDefault();
+        void handleDeleteSelectedCableSegment();
+      } else if (e.key === 'Delete' && selectedElements.length > 0) {
         e.preventDefault();
         saveToHistory();
         const removedNewWalls = selectedElements.filter((element) => element.type === 'new-wall').length;
@@ -2092,7 +3283,8 @@ function FloorPlanEditor() {
         const removedNewDoors = selectedElements.filter((element) => element.type === 'new-door').length;
         const removedNewWindows = selectedElements.filter((element) => element.type === 'new-window').length;
         const removedNewFireAlarms = selectedElements.filter((element) => element.type === 'new-fire-alarm').length;
-        const removedPersistedElements = selectedElements.some((element) => !['new-wall', 'new-stair', 'new-door', 'new-window', 'new-fire-alarm'].includes(element.type));
+        const removedNewSoueDevices = selectedElements.filter((element) => element.type === 'new-soue-device').length;
+        const removedPersistedElements = selectedElements.some((element) => !['new-wall', 'new-stair', 'new-door', 'new-window', 'new-fire-alarm', 'new-soue-device'].includes(element.type));
         selectedElements.forEach((element) => {
           if (element.type === 'new-wall') {
             setNewWalls((prev) => prev.filter((item) => item.id !== element.id));
@@ -2112,8 +3304,12 @@ function FloorPlanEditor() {
           if (element.type === 'window') handleDeleteElement('windows', element.id);
           if (element.type === 'room') handleDeleteElement('rooms', element.id);
           if (element.type === 'fire-alarm') handleDeleteElement('fire-alarms', element.id);
+          if (element.type === 'soue-device') handleDeleteElement('soue-devices', element.id);
           if (element.type === 'new-fire-alarm') {
             setNewFireAlarms((prev) => prev.filter((item) => item.id !== element.id));
+          }
+          if (element.type === 'new-soue-device') {
+            setNewSoueDevices((prev) => prev.filter((item) => item.id !== element.id));
           }
         });
         setSelectedElement(null);
@@ -2125,6 +3321,7 @@ function FloorPlanEditor() {
           (newDoors.length - removedNewDoors) > 0 ||
           (newWindows.length - removedNewWindows) > 0 ||
           (newFireAlarms.length - removedNewFireAlarms) > 0 ||
+          (newSoueDevices.length - removedNewSoueDevices) > 0 ||
           deletedElements.length > 0 ||
           Object.keys(modifiedWalls).length > 0 ||
           Object.keys(modifiedElements).length > 0,
@@ -2136,6 +3333,7 @@ function FloorPlanEditor() {
                      selectedElement.type === 'new-window' ? 'new-windows' :
                      selectedElement.type === 'new-stair' ? 'new-stairs' :
                      selectedElement.type === 'new-fire-alarm' ? 'new-fire-alarms' :
+                     selectedElement.type === 'new-soue-device' ? 'new-soue-devices' :
                      selectedElement.type === 'fire-alarm' ? 'fire-alarms' : 
                      selectedElement.type + 's';
         if (type === 'new-walls') {
@@ -2163,6 +3361,11 @@ function FloorPlanEditor() {
           setSelectedElement(null);
           setSelectedElements([]);
           setHasUnsavedChanges(newWalls.length > 0 || newStairs.length > 0 || newDoors.length > 0 || newWindows.length > 0 || newFireAlarms.length > 1 || deletedElements.length > 0 || Object.keys(modifiedWalls).length > 0 || Object.keys(modifiedElements).length > 0);
+        } else if (type === 'new-soue-devices') {
+          setNewSoueDevices((prev) => prev.filter((item) => item.id !== selectedElement.id));
+          setSelectedElement(null);
+          setSelectedElements([]);
+          setHasUnsavedChanges(newWalls.length > 0 || newStairs.length > 0 || newDoors.length > 0 || newWindows.length > 0 || newFireAlarms.length > 0 || newSoueDevices.length > 1 || deletedElements.length > 0 || Object.keys(modifiedWalls).length > 0 || Object.keys(modifiedElements).length > 0);
         } else {
           handleDeleteElement(type, selectedElement.id);
         }
@@ -2179,6 +3382,7 @@ function FloorPlanEditor() {
           setNewDoors(previousState.newDoors || []);
           setNewWindows(previousState.newWindows || []);
           setNewFireAlarms(previousState.newFireAlarms || []);
+          setNewSoueDevices(previousState.newSoueDevices || []);
           setModifiedWalls(previousState.modifiedWalls);
           setModifiedElements(previousState.modifiedElements);
           setUndoHistory(prev => prev.slice(0, -1));
@@ -2190,6 +3394,7 @@ function FloorPlanEditor() {
                            (previousState.newDoors?.length || 0) > 0 ||
                            (previousState.newWindows?.length || 0) > 0 ||
                            (previousState.newFireAlarms?.length || 0) > 0 ||
+                           (previousState.newSoueDevices?.length || 0) > 0 ||
                            Object.keys(previousState.modifiedWalls).length > 0 ||
                            Object.keys(previousState.modifiedElements).length > 0;
           setHasUnsavedChanges(hasChanges);
@@ -2215,6 +3420,7 @@ function FloorPlanEditor() {
   }, [
     selectedElement,
     selectedElements,
+    selectedCableSegment,
     undoHistory,
     deletedElements,
     newWalls,
@@ -2222,15 +3428,18 @@ function FloorPlanEditor() {
     newDoors,
     newWindows,
     newFireAlarms,
+    newSoueDevices,
     modifiedWalls,
     modifiedElements,
     saveToHistory,
     handleDeleteElement,
     setNewFireAlarms,
+    setNewSoueDevices,
     drawingWall,
     placementDraft,
     calibrationDraft,
     selectedTool,
+    handleDeleteSelectedCableSegment,
   ]);
 
   // eslint-disable-next-line no-unused-vars
@@ -2375,6 +3584,7 @@ function FloorPlanEditor() {
       height: door.height,
       rotation_deg: door.rotation_deg || 0,
       wall_id: door.wall_id,
+      is_evacuation_exit: door.is_evacuation_exit ?? null,
     }));
     payload.create_windows = newWindows.map((windowItem) => ({
       floor_plan_id: parseInt(floorPlanId, 10),
@@ -2436,6 +3646,7 @@ function FloorPlanEditor() {
         coverage_radius: current.coverage_radius ?? null,
         mounting_height: current.mounting_height ?? null,
         system_type: currentSignalSystem,
+        equipment_id: current.equipment_id ?? null,
         zkspc_zone_id: current.zkspc_zone_id ?? roomZoneMap[current.room_id]?.id ?? null,
         loop_kind: current.loop_kind ?? null,
         loop_number: current.loop_number ?? null,
@@ -2464,11 +3675,66 @@ function FloorPlanEditor() {
           data: {
             ...data,
             system_type: currentSignalSystem,
+            equipment_id: data.equipment_id ?? null,
           },
         };
       });
     return payload;
   }, [branchFireAlarms, deletedElements, newFireAlarms, floorPlanId, modifiedElements, getFireAlarmCurrentGeometry, currentSignalSystem, roomZoneMap]);
+  const buildSoueDevicesPayload = useCallback(() => {
+    const payload = createEmptyBatchPayload();
+    const activeBranchIds = new Set(branchSoueDevices.map((device) => device.id));
+    const deletedDeviceIds = new Set();
+    payload.deleted = deletedElements
+      .filter((element) => element.type === 'soue-devices' && activeBranchIds.has(element.id))
+      .map((element) => {
+        deletedDeviceIds.add(element.id);
+        return { element_type: element.type, id: element.id };
+      });
+    payload.create_soue_devices = newSoueDevices.map((device) => {
+      const current = getSoueDeviceCurrentGeometry('new-soue-devices', device.id, device) || device;
+      return {
+        floor_plan_id: parseInt(floorPlanId, 10),
+        x: current.x,
+        y: current.y,
+        rotation_deg: current.rotation_deg ?? 0,
+        device_type: current.device_type,
+        device_model: current.device_model || null,
+        sound_pressure_db: current.sound_pressure_db ?? null,
+        mounting_height: current.mounting_height ?? null,
+        system_type: currentSharedSignalSystem,
+        equipment_id: current.equipment_id ?? null,
+        loop_kind: current.loop_kind ?? null,
+        loop_number: current.loop_number ?? null,
+        device_number: current.device_number ?? null,
+        room_id: current.room_id ?? null,
+        offset_left_m: current.offset_left_m ?? null,
+        offset_top_m: current.offset_top_m ?? null,
+        label_dx: current.label_dx ?? null,
+        label_dy: current.label_dy ?? null,
+      };
+    });
+    payload.update_soue_devices = Object.entries(modifiedElements)
+      .filter(([key]) => {
+        if (!key.startsWith('soue-devices-')) {
+          return false;
+        }
+        const { id } = parseModifiedElementKey(key);
+        return activeBranchIds.has(id) && !deletedDeviceIds.has(id);
+      })
+      .map(([key, data]) => {
+        const { id } = parseModifiedElementKey(key);
+        return {
+          id,
+          data: {
+            ...data,
+            system_type: currentSharedSignalSystem,
+            equipment_id: data.equipment_id ?? null,
+          },
+        };
+      });
+    return payload;
+  }, [branchSoueDevices, currentSharedSignalSystem, deletedElements, floorPlanId, getSoueDeviceCurrentGeometry, modifiedElements, newSoueDevices]);
 
   const draftStateByStep = useMemo(() => ({
     walls:
@@ -2496,7 +3762,17 @@ function FloorPlanEditor() {
         const { id } = parseModifiedElementKey(key);
         return branchFireAlarms.some((alarm) => alarm.id === id);
       }),
-  }), [deletedElements, newWalls.length, newStairs.length, newDoors.length, newWindows.length, newFireAlarms.length, modifiedWalls, modifiedElements, zkspcDraftZones, zkspcZones, branchFireAlarms]);
+    soue_devices:
+      deletedElements.some((item) => item.type === 'soue-devices' && branchSoueDevices.some((device) => device.id === item.id))
+      || newSoueDevices.length > 0
+      || Object.keys(modifiedElements).some((key) => {
+        if (!key.startsWith('soue-devices-')) {
+          return false;
+        }
+        const { id } = parseModifiedElementKey(key);
+        return branchSoueDevices.some((device) => device.id === id);
+      }),
+  }), [deletedElements, newWalls.length, newStairs.length, newDoors.length, newWindows.length, newFireAlarms.length, newSoueDevices.length, modifiedWalls, modifiedElements, zkspcDraftZones, zkspcZones, branchFireAlarms, branchSoueDevices]);
 
   const hasLocalDraftChanges = useMemo(
     () => Object.values(draftStateByStep).some(Boolean),
@@ -2511,6 +3787,8 @@ function FloorPlanEditor() {
       zkspc: ['walls', 'openings', 'rooms'],
       fire_alarms: ['fire_alarms'],
       devices_cables: ['fire_alarms'],
+      soue_devices: ['soue_devices'],
+      soue_cables: ['soue_devices'],
     };
     return (dependencyMap[step] || []).some((stepKey) => draftStateByStep[stepKey]);
   }, [draftStateByStep]);
@@ -2547,10 +3825,17 @@ function FloorPlanEditor() {
       setModifiedElements((prev) => Object.fromEntries(
         Object.entries(prev).filter(([key]) => !key.startsWith('fire-alarms-'))
       ));
+    } else if (step === 'soue_devices') {
+      setDeletedElements((prev) => prev.filter((item) => item.type !== 'soue-devices'));
+      setNewSoueDevices([]);
+      setSoueWarnings([]);
+      setModifiedElements((prev) => Object.fromEntries(
+        Object.entries(prev).filter(([key]) => !key.startsWith('soue-devices-'))
+      ));
     }
     setSelectedElements([]);
     setSelectedElement(null);
-  }, [setFireAlarmWarnings, setNewFireAlarms, zkspcZones]);
+  }, [setFireAlarmWarnings, setNewFireAlarms, setNewSoueDevices, setSoueWarnings, zkspcZones]);
 
   const clearLocalDraftChanges = useCallback(() => {
     setDeletedElements([]);
@@ -2559,7 +3844,9 @@ function FloorPlanEditor() {
     setNewDoors([]);
     setNewWindows([]);
     setNewFireAlarmsBySystem({ non_addressable: [], addressable: [] });
+    setNewSoueDevicesBySystem({ non_addressable: [], addressable: [] });
     setFireAlarmWarningsBySystem({ non_addressable: [], addressable: [] });
+    setSoueWarningsBySystem({ non_addressable: [], addressable: [] });
     setModifiedWalls({});
     setModifiedElements({});
     setZkspcDraftZones(zkspcZones);
@@ -2569,6 +3856,29 @@ function FloorPlanEditor() {
     setHasUnsavedChanges(false);
     setUndoHistory([]);
   }, [zkspcZones]);
+
+  const resetStepFeedbackUiState = useCallback((step) => {
+    if (!['walls', 'openings'].includes(step)) {
+      return;
+    }
+    setStepFeedbackState((prev) => ({
+      ...prev,
+      [step]: createStepFeedbackUiState()[step],
+    }));
+  }, []);
+
+  const patchStepFeedbackUiState = useCallback((step, updates) => {
+    if (!['walls', 'openings'].includes(step)) {
+      return;
+    }
+    setStepFeedbackState((prev) => ({
+      ...prev,
+      [step]: {
+        ...prev[step],
+        ...updates,
+      },
+    }));
+  }, []);
 
   const applyPipelineResponse = useCallback((response, stepToClear = null) => {
     if (response?.floor_plan) {
@@ -2623,6 +3933,7 @@ function FloorPlanEditor() {
       }
       if (response) {
         applyPipelineResponse(response);
+        resetStepFeedbackUiState(step);
       }
     } catch (error) {
       console.error(`Error detecting ${step}:`, error);
@@ -2631,7 +3942,7 @@ function FloorPlanEditor() {
     } finally {
       setPipelineActionLoading(false);
     }
-  }, [applyPipelineResponse, floorPlanId, hasBlockingDraftChangesForStep]);
+  }, [applyPipelineResponse, floorPlanId, hasBlockingDraftChangesForStep, resetStepFeedbackUiState]);
 
   const handleCommitStep = useCallback(async (step) => {
     try {
@@ -2640,6 +3951,9 @@ function FloorPlanEditor() {
       let response = null;
       const prospectiveScaleFactor = Number(buildPlanMetaPayload()?.scale_factor ?? floorPlan?.scale_factor ?? 0);
       if (step === 'walls' && !(prospectiveScaleFactor > 1.000001)) {
+        alert('Перед подтверждением стен задайте масштаб на шаге 1.');
+        setPipelineActionLoading(false);
+        return false;
         alert('РџРµСЂРµРґ РїРѕРґС‚РІРµСЂР¶РґРµРЅРёРµРј СЃС‚РµРЅ Р·Р°РґР°Р№С‚Рµ РјР°СЃС€С‚Р°Р± РЅР° С€Р°РіРµ 1.');
         setPipelineActionLoading(false);
         return false;
@@ -2722,6 +4036,7 @@ function FloorPlanEditor() {
 
       if (response) {
         applyPipelineResponse(response, step);
+        resetStepFeedbackUiState(step);
         if (step === 'rooms') {
           setViewStep('zkspc');
         } else if (step === 'zkspc') {
@@ -2761,7 +4076,566 @@ function FloorPlanEditor() {
     } finally {
       setPipelineActionLoading(false);
     }
-  }, [applyPipelineResponse, buildWallsPayload, buildOpeningsPayload, buildRoomsPayload, buildZkspcPayload, collectWallLengthUpdates, floorPlanId, rooms, deletedElements, applyFloorPlanData, clearLocalDraftChanges, closeHoverPanel, unserviceableRoomIds, floorPlan, calibrationDraft, planMetaDraft]);
+  }, [applyPipelineResponse, buildWallsPayload, buildOpeningsPayload, buildRoomsPayload, buildZkspcPayload, collectWallLengthUpdates, floorPlanId, rooms, deletedElements, applyFloorPlanData, clearLocalDraftChanges, closeHoverPanel, unserviceableRoomIds, floorPlan, calibrationDraft, planMetaDraft, resetStepFeedbackUiState]);
+
+  const reloadFloorPlanAndPipeline = useCallback(async () => {
+    const [data, state] = await Promise.all([
+      floorPlansApi.get(floorPlanId, true),
+      pipelineApi.getState(floorPlanId),
+    ]);
+    applyFloorPlanData(data);
+    setPipelineState(state);
+    if (data?.project_id) {
+      const [
+        projectEquipment,
+        projectSelections,
+        generalDataResponse,
+        generalInstructionsResponse,
+        powerCalculationResponse,
+        specificationResponse,
+        additionalInfoResponse,
+      ] = await Promise.all([
+        projectsApi.listEquipment(data.project_id),
+        projectsApi.getEquipmentSelections(data.project_id),
+        projectsApi.getGeneralData(data.project_id).catch(() => null),
+        projectsApi.getGeneralInstructions(data.project_id).catch(() => null),
+        projectsApi.getPowerConsumptionCalculation(data.project_id).catch(() => null),
+        projectsApi.getEquipmentSpecification(data.project_id).catch(() => null),
+        projectsApi.getAdditionalInfo(data.project_id).catch(() => null),
+      ]);
+      setProjectEquipmentItems(projectEquipment?.items || []);
+      setProjectEquipmentSelections(projectSelections?.selections || {});
+      setGeneralData(cloneGeneralData(generalDataResponse));
+      setGeneralDataError('');
+      setGeneralDataDirty(false);
+      setGeneralInstructions(cloneGeneralInstructions(generalInstructionsResponse));
+      setGeneralInstructionsError('');
+      setGeneralInstructionsDirty(false);
+      setPowerConsumptionCalculation(clonePowerConsumptionCalculation(powerCalculationResponse));
+      setPowerConsumptionCalculationError('');
+      setPowerConsumptionCalculationDirty(false);
+      setEquipmentSpecification(cloneEquipmentSpecification(specificationResponse));
+      setEquipmentSpecificationError('');
+      setEquipmentSpecificationDirty(false);
+      setAdditionalInfo(cloneAdditionalInfo(additionalInfoResponse));
+      setAdditionalInfoError('');
+      setAdditionalInfoDirty(false);
+    }
+    return { data, state };
+  }, [applyFloorPlanData, floorPlanId]);
+
+  const updateGeneralDataDraft = useCallback((updater) => {
+    setGeneralData((prev) => {
+      const base = cloneGeneralData(prev);
+      const next = typeof updater === 'function' ? updater(base) : cloneGeneralData(updater);
+      return next;
+    });
+    setGeneralDataDirty(true);
+  }, []);
+
+  const handleGeneralDataTopLevelFieldChange = useCallback((fieldName, value) => {
+    updateGeneralDataDraft((prev) => {
+      if (!prev) {
+        return prev;
+      }
+      prev[fieldName] = value;
+      return prev;
+    });
+  }, [updateGeneralDataDraft]);
+
+  const handleGeneralDataDocumentRowFieldChange = useCallback((sectionKey, rowKey, fieldName, value) => {
+    updateGeneralDataDraft((prev) => {
+      const rows = prev?.[sectionKey];
+      if (!Array.isArray(rows)) {
+        return prev;
+      }
+      const row = rows.find((item) => item.key === rowKey);
+      if (!row) {
+        return prev;
+      }
+      row[fieldName] = value;
+      return prev;
+    });
+  }, [updateGeneralDataDraft]);
+
+  const handleGeneralDataManifestRowFieldChange = useCallback((rowKey, fieldName, value) => {
+    updateGeneralDataDraft((prev) => {
+      const row = (prev?.drawing_manifest_rows || []).find((item) => item.key === rowKey);
+      if (!row) {
+        return prev;
+      }
+      row[fieldName] = value;
+      return prev;
+    });
+  }, [updateGeneralDataDraft]);
+
+  const handleRefreshGeneralData = useCallback(async () => {
+    if (!floorPlan?.project_id) {
+      return;
+    }
+    await loadGeneralData(floorPlan.project_id);
+  }, [floorPlan?.project_id, loadGeneralData]);
+
+  const handleSaveGeneralData = useCallback(async () => {
+    if (!floorPlan?.project_id || !generalData) {
+      return false;
+    }
+    try {
+      setGeneralDataSaving(true);
+      setGeneralDataError('');
+      const updated = await projectsApi.updateGeneralData(
+        floorPlan.project_id,
+        {
+          page_title: generalData.page_title || '',
+          left_table_title: generalData.left_table_title || '',
+          right_table_title: generalData.right_table_title || '',
+          reference_category_title: generalData.reference_category_title || '',
+          attached_category_title: generalData.attached_category_title || '',
+          reference_documents: (generalData.reference_documents || []).map((row) => ({
+            key: row.key,
+            designation: row.designation || '',
+            name: row.name || '',
+            note: row.note || '',
+          })),
+          attached_documents: (generalData.attached_documents || []).map((row) => ({
+            key: row.key,
+            designation: row.designation || '',
+            name: row.name || '',
+            note: row.note || '',
+          })),
+          drawing_manifest_rows: (generalData.drawing_manifest_rows || []).map((row) => ({
+            key: row.key,
+            name: row.name || '',
+            sheet_count: row.sheet_count || 0,
+            note: row.note || '',
+          })),
+          statement_text: generalData.statement_text || '',
+          gip_name: generalData.gip_name || '',
+        },
+      );
+      setGeneralData(cloneGeneralData(updated));
+      setGeneralDataDirty(false);
+      return true;
+    } catch (error) {
+      console.error('Error saving general data:', error);
+      setGeneralDataError('Не удалось сохранить общие данные.');
+      return false;
+    } finally {
+      setGeneralDataSaving(false);
+    }
+  }, [floorPlan?.project_id, generalData]);
+
+  const updateGeneralInstructionsDraft = useCallback((updater) => {
+    setGeneralInstructions((prev) => {
+      const base = cloneGeneralInstructions(prev);
+      const next = typeof updater === 'function' ? updater(base) : cloneGeneralInstructions(updater);
+      return next;
+    });
+    setGeneralInstructionsDirty(true);
+  }, []);
+
+  const handleGeneralInstructionsTopLevelFieldChange = useCallback((fieldName, value) => {
+    updateGeneralInstructionsDraft((prev) => {
+      if (!prev) {
+        return prev;
+      }
+      prev[fieldName] = value;
+      return prev;
+    });
+  }, [updateGeneralInstructionsDraft]);
+
+  const handleGeneralInstructionsBlockTextChange = useCallback((blockKey, value) => {
+    updateGeneralInstructionsDraft((prev) => {
+      const block = (prev?.blocks || []).find((item) => item.key === blockKey);
+      if (!block) {
+        return prev;
+      }
+      block.text = value;
+      return prev;
+    });
+  }, [updateGeneralInstructionsDraft]);
+
+  const handleGeneralInstructionsBlockItemsChange = useCallback((blockKey, value) => {
+    updateGeneralInstructionsDraft((prev) => {
+      const block = (prev?.blocks || []).find((item) => item.key === blockKey);
+      if (!block) {
+        return prev;
+      }
+      block.items = String(value || '')
+        .split('\n')
+        .map((item) => item.trim())
+        .filter(Boolean);
+      return prev;
+    });
+  }, [updateGeneralInstructionsDraft]);
+
+  const handleRefreshGeneralInstructions = useCallback(async () => {
+    if (!floorPlan?.project_id) {
+      return;
+    }
+    await loadGeneralInstructions(floorPlan.project_id);
+  }, [floorPlan?.project_id, loadGeneralInstructions]);
+
+  const handleSaveGeneralInstructions = useCallback(async () => {
+    if (!floorPlan?.project_id || !generalInstructions) {
+      return false;
+    }
+    try {
+      setGeneralInstructionsSaving(true);
+      setGeneralInstructionsError('');
+      const updated = await projectsApi.updateGeneralInstructions(
+        floorPlan.project_id,
+        {
+          page_title: generalInstructions.page_title || '',
+          heading: generalInstructions.heading || '',
+          local_sheet_title: generalInstructions.local_sheet_title || '',
+          blocks: (generalInstructions.blocks || []).map((block) => ({
+            key: block.key,
+            kind: block.kind,
+            text: block.text ?? null,
+            items: block.items || [],
+          })),
+        },
+      );
+      setGeneralInstructions(cloneGeneralInstructions(updated));
+      setGeneralInstructionsDirty(false);
+      return true;
+    } catch (error) {
+      console.error('Error saving general instructions:', error);
+      setGeneralInstructionsError('Не удалось сохранить общие указания.');
+      return false;
+    } finally {
+      setGeneralInstructionsSaving(false);
+    }
+  }, [floorPlan?.project_id, generalInstructions]);
+
+  const updatePowerConsumptionCalculationDraft = useCallback((updater) => {
+    setPowerConsumptionCalculation((prev) => {
+      const base = clonePowerConsumptionCalculation(prev);
+      const next = typeof updater === 'function' ? updater(base) : clonePowerConsumptionCalculation(updater);
+      return next;
+    });
+    setPowerConsumptionCalculationDirty(true);
+  }, []);
+
+  const handlePowerConsumptionTopLevelFieldChange = useCallback((fieldName, value) => {
+    updatePowerConsumptionCalculationDraft((prev) => {
+      if (!prev) {
+        return prev;
+      }
+      prev[fieldName] = value;
+      return prev;
+    });
+  }, [updatePowerConsumptionCalculationDraft]);
+
+  const handlePowerConsumptionIntroductoryTextChange = useCallback((index, value) => {
+    updatePowerConsumptionCalculationDraft((prev) => {
+      if (!prev) {
+        return prev;
+      }
+      const nextTexts = Array.isArray(prev.introductory_texts) ? [...prev.introductory_texts] : [];
+      while (nextTexts.length <= index) {
+        nextTexts.push('');
+      }
+      nextTexts[index] = value;
+      prev.introductory_texts = nextTexts;
+      return prev;
+    });
+  }, [updatePowerConsumptionCalculationDraft]);
+
+  const handlePowerConsumptionCategoryTitleChange = useCallback((categoryKey, value) => {
+    updatePowerConsumptionCalculationDraft((prev) => {
+      const category = prev?.categories?.find((item) => item.key === categoryKey);
+      if (!category) {
+        return prev;
+      }
+      category.title = value;
+      return prev;
+    });
+  }, [updatePowerConsumptionCalculationDraft]);
+
+  const handlePowerConsumptionRowFieldChange = useCallback((categoryKey, sourceKey, fieldName, value) => {
+    updatePowerConsumptionCalculationDraft((prev) => {
+      const category = prev?.categories?.find((item) => item.key === categoryKey);
+      const row = category?.rows?.find((item) => item.source_key === sourceKey);
+      if (!row || !POWER_CONSUMPTION_ROW_FIELDS.includes(fieldName)) {
+        return prev;
+      }
+      row[fieldName] = value;
+      return prev;
+    });
+  }, [updatePowerConsumptionCalculationDraft]);
+
+  const handlePowerConsumptionSummaryFieldChange = useCallback((summaryKey, fieldName, value) => {
+    updatePowerConsumptionCalculationDraft((prev) => {
+      const summaryRow = prev?.summary_rows?.find((item) => item.key === summaryKey);
+      if (!summaryRow) {
+        return prev;
+      }
+      if (fieldName === 'label') {
+        summaryRow.label = value;
+        return prev;
+      }
+      if (!POWER_CONSUMPTION_EDITABLE_SUMMARY_KEYS.has(summaryKey)) {
+        return prev;
+      }
+      if (fieldName === 'standby' || fieldName === 'alarm') {
+        summaryRow[fieldName] = value;
+      }
+      return prev;
+    });
+  }, [updatePowerConsumptionCalculationDraft]);
+
+  const updateEquipmentSpecificationDraft = useCallback((updater) => {
+    setEquipmentSpecification((prev) => {
+      const base = cloneEquipmentSpecification(prev);
+      const next = typeof updater === 'function' ? updater(base) : cloneEquipmentSpecification(updater);
+      return next;
+    });
+    setEquipmentSpecificationDirty(true);
+  }, []);
+
+  const handleEquipmentSpecificationPageTitleChange = useCallback((value) => {
+    updateEquipmentSpecificationDraft((prev) => {
+      if (!prev) {
+        return prev;
+      }
+      prev.page_title = value;
+      return prev;
+    });
+  }, [updateEquipmentSpecificationDraft]);
+
+  const handleEquipmentSpecificationHeaderChange = useCallback((index, value) => {
+    updateEquipmentSpecificationDraft((prev) => {
+      if (!prev?.column_headers) {
+        return prev;
+      }
+      prev.column_headers[index] = value;
+      return prev;
+    });
+  }, [updateEquipmentSpecificationDraft]);
+
+  const handleEquipmentSpecificationSectionTitleChange = useCallback((sectionKey, value) => {
+    updateEquipmentSpecificationDraft((prev) => {
+      const section = prev?.sections?.find((item) => item.key === sectionKey);
+      if (!section) {
+        return prev;
+      }
+      section.title = value;
+      return prev;
+    });
+  }, [updateEquipmentSpecificationDraft]);
+
+  const handleEquipmentSpecificationCellChange = useCallback((sectionKey, sourceKey, fieldIndex, value) => {
+    updateEquipmentSpecificationDraft((prev) => {
+      const section = prev?.sections?.find((item) => item.key === sectionKey);
+      const row = section?.rows?.find((item) => item.source_key === sourceKey);
+      if (!row) {
+        return prev;
+      }
+      const fieldName = EQUIPMENT_SPECIFICATION_ROW_FIELDS[fieldIndex];
+      if (!fieldName) {
+        return prev;
+      }
+      row[fieldName] = value;
+      return prev;
+    });
+  }, [updateEquipmentSpecificationDraft]);
+
+  const handleRefreshPowerConsumptionCalculation = useCallback(async () => {
+    if (!floorPlan?.project_id) {
+      return;
+    }
+    await loadPowerConsumptionCalculation(floorPlan.project_id);
+  }, [floorPlan?.project_id, loadPowerConsumptionCalculation]);
+
+  const handleSavePowerConsumptionCalculation = useCallback(async () => {
+    if (!floorPlan?.project_id || !powerConsumptionCalculation) {
+      return false;
+    }
+    try {
+      setPowerConsumptionCalculationSaving(true);
+      setPowerConsumptionCalculationError('');
+      const updated = await projectsApi.updatePowerConsumptionCalculation(
+        floorPlan.project_id,
+        {
+          page_title: powerConsumptionCalculation.page_title || '',
+          introductory_texts: powerConsumptionCalculation.introductory_texts || [],
+          table_caption: powerConsumptionCalculation.table_caption || '',
+          table_title: powerConsumptionCalculation.table_title || '',
+          battery_voltage_v: String(powerConsumptionCalculation.battery_voltage_v ?? ''),
+          battery_quantity: String(powerConsumptionCalculation.battery_quantity ?? ''),
+          categories: (powerConsumptionCalculation.categories || []).map((category) => ({
+            key: category.key,
+            title: category.title || '',
+            rows: (category.rows || []).map((row) => ({
+              source_key: row.source_key,
+              number: row.number || '',
+              equipment_name: row.equipment_name || '',
+              unit: row.unit || '',
+              quantity: row.quantity || '',
+              standby_current: row.standby_current || '',
+              alarm_current: row.alarm_current || '',
+            })),
+          })),
+          summary_rows: (powerConsumptionCalculation.summary_rows || []).map((row) => ({
+            key: row.key,
+            label: row.label || '',
+            standby: row.standby ?? null,
+            alarm: row.alarm ?? null,
+          })),
+        },
+      );
+      setPowerConsumptionCalculation(clonePowerConsumptionCalculation(updated));
+      setPowerConsumptionCalculationDirty(false);
+      return true;
+    } catch (error) {
+      console.error('Error saving power consumption calculation:', error);
+      const detail = error?.payload?.detail || error?.payload?.code || error?.message || '';
+      setPowerConsumptionCalculationError(detail || 'Не удалось сохранить расчет токопотребления.');
+      return false;
+    } finally {
+      setPowerConsumptionCalculationSaving(false);
+    }
+  }, [floorPlan?.project_id, powerConsumptionCalculation]);
+
+  const handleRefreshEquipmentSpecification = useCallback(async () => {
+    if (!floorPlan?.project_id) {
+      return;
+    }
+    await loadEquipmentSpecification(floorPlan.project_id);
+  }, [floorPlan?.project_id, loadEquipmentSpecification]);
+
+  const handleSaveEquipmentSpecification = useCallback(async () => {
+    if (!floorPlan?.project_id || !equipmentSpecification) {
+      return false;
+    }
+    try {
+      setEquipmentSpecificationSaving(true);
+      setEquipmentSpecificationError('');
+      const updated = await projectsApi.updateEquipmentSpecification(
+        floorPlan.project_id,
+        {
+          page_title: equipmentSpecification.page_title || '',
+          column_headers: equipmentSpecification.column_headers || [],
+          sections: (equipmentSpecification.sections || []).map((section) => ({
+            key: section.key,
+            title: section.title || '',
+            rows: (section.rows || []).map((row) => ({
+              source_key: row.source_key,
+              position: row.position || '',
+              technical_name: row.technical_name || '',
+              type_mark: row.type_mark || '',
+              code: row.code || '',
+              manufacturer: row.manufacturer || '',
+              unit: row.unit || '',
+              quantity: row.quantity || '',
+              unit_mass_kg: row.unit_mass_kg || '',
+              note: row.note || '',
+            })),
+          })),
+        },
+      );
+      setEquipmentSpecification(cloneEquipmentSpecification(updated));
+      setEquipmentSpecificationDirty(false);
+      return true;
+    } catch (error) {
+      console.error('Error saving equipment specification:', error);
+      setEquipmentSpecificationError('Не удалось сохранить спецификацию оборудования.');
+      return false;
+    } finally {
+      setEquipmentSpecificationSaving(false);
+    }
+  }, [equipmentSpecification, floorPlan?.project_id]);
+
+  const updateAdditionalInfoDraft = useCallback((updater) => {
+    setAdditionalInfo((prev) => {
+      const base = cloneAdditionalInfo(prev);
+      const next = typeof updater === 'function' ? updater(base) : cloneAdditionalInfo(updater);
+      return next;
+    });
+    setAdditionalInfoDirty(true);
+  }, []);
+
+  const handleAdditionalInfoTextChange = useCallback((value) => {
+    updateAdditionalInfoDraft((prev) => {
+      if (!prev) {
+        return prev;
+      }
+      prev.text = value;
+      return prev;
+    });
+  }, [updateAdditionalInfoDraft]);
+
+  const handleRefreshAdditionalInfo = useCallback(async () => {
+    if (!floorPlan?.project_id) {
+      return;
+    }
+    await loadAdditionalInfo(floorPlan.project_id);
+  }, [floorPlan?.project_id, loadAdditionalInfo]);
+
+  const handleSaveAdditionalInfo = useCallback(async () => {
+    if (!floorPlan?.project_id || !additionalInfo) {
+      return false;
+    }
+    try {
+      setAdditionalInfoSaving(true);
+      setAdditionalInfoError('');
+      const updated = await projectsApi.updateAdditionalInfo(
+        floorPlan.project_id,
+        {
+          text: additionalInfo.text || '',
+        },
+      );
+      setAdditionalInfo(cloneAdditionalInfo(updated));
+      setAdditionalInfoDirty(false);
+      return true;
+    } catch (error) {
+      console.error('Error saving additional info:', error);
+      setAdditionalInfoError('Не удалось сохранить доп. сведения.');
+      return false;
+    } finally {
+      setAdditionalInfoSaving(false);
+    }
+  }, [additionalInfo, floorPlan?.project_id]);
+
+  const handleSaveSignalInstrumentsStep = useCallback(async () => {
+    try {
+      setSignalBranchActionLoading(true);
+      await elementsApi.commitSignalInstrumentsStep(floorPlanId, {
+        system_type: currentSharedSignalSystem,
+      });
+      await reloadFloorPlanAndPipeline();
+      setViewStep('fire_alarms');
+      return true;
+    } catch (error) {
+      console.error('Error saving instruments step:', error);
+      alert('Не удалось сохранить шаг приборов.');
+      return false;
+    } finally {
+      setSignalBranchActionLoading(false);
+    }
+  }, [currentSharedSignalSystem, floorPlanId, reloadFloorPlanAndPipeline]);
+
+  const handleSaveCableRoutesStep = useCallback(async (subsystemType) => {
+    const branchSystemType = subsystemType === 'soue' ? currentSharedSignalSystem : currentSignalSystem;
+    try {
+      setSignalBranchActionLoading(true);
+      await elementsApi.commitCableRoutesStep(floorPlanId, {
+        system_type: branchSystemType,
+        subsystem_type: subsystemType,
+        use_shared_trunk: false,
+      });
+      await reloadFloorPlanAndPipeline();
+      return true;
+    } catch (error) {
+      console.error('Error saving cable routes step:', error);
+      alert('Не удалось сохранить шаг кабелей.');
+      return false;
+    } finally {
+      setSignalBranchActionLoading(false);
+    }
+  }, [currentSharedSignalSystem, currentSignalSystem, floorPlanId, reloadFloorPlanAndPipeline]);
 
   const handleSaveFireAlarmsStep = useCallback(async () => {
     if (!draftStateByStep.fire_alarms) {
@@ -2818,6 +4692,48 @@ function FloorPlanEditor() {
       setFireAlarmActionLoading(false);
     }
   }, [draftStateByStep.fire_alarms, floorPlanId, buildFireAlarmsPayload, applyFloorPlanData, clearDraftsForStep, clearLocalDraftChanges, closeHoverPanel, updateLocalSignalBranchState, currentSignalSystem, fetchPipelineState]);
+  const handleSaveSoueDevicesStep = useCallback(async () => {
+    if (!draftStateByStep.soue_devices) {
+      return true;
+    }
+    try {
+      setSoueActionLoading(true);
+      const result = await floorPlansApi.batchSave(floorPlanId, buildSoueDevicesPayload());
+      applyFloorPlanData(result.floor_plan);
+      await fetchPipelineState();
+      const branchDevices = (result?.floor_plan?.soue_devices || []).filter(
+        (device) => normalizeSignalSystemType(device.system_type) === currentSharedSignalSystem,
+      );
+      updateLocalSignalBranchState(currentSharedSignalSystem, {
+        soueDevicesStatus: 'validated',
+        soueCablesStatus: branchDevices.length ? 'draft' : 'validated',
+        activeStep: 'soue_cables',
+      });
+      clearDraftsForStep('soue_devices');
+      setUndoHistory([]);
+      return true;
+    } catch (error) {
+      if (error?.status === 409 && error?.payload?.code === 'stale_editor_state') {
+        try {
+          const [data, state] = await Promise.all([
+            floorPlansApi.get(floorPlanId, true),
+            pipelineApi.getState(floorPlanId),
+          ]);
+          applyFloorPlanData(data);
+          setPipelineState(state);
+          clearLocalDraftChanges();
+          closeHoverPanel();
+        } catch (reloadError) {
+          console.error('Error reloading floor plan after stale SOUE save:', reloadError);
+        }
+        return false;
+      }
+      console.error('Error saving SOUE step:', error);
+      alert('Не удалось сохранить изменения шага СОУЭ.');
+    } finally {
+      setSoueActionLoading(false);
+    }
+  }, [applyFloorPlanData, buildSoueDevicesPayload, clearDraftsForStep, clearLocalDraftChanges, closeHoverPanel, currentSharedSignalSystem, draftStateByStep.soue_devices, fetchPipelineState, floorPlanId, updateLocalSignalBranchState]);
 
   const handleSwitchSignalSystem = useCallback(async (systemType) => {
     const normalized = normalizeSignalSystemType(systemType);
@@ -2828,14 +4744,21 @@ function FloorPlanEditor() {
     setFloorPlan((prev) => (prev ? { ...prev, active_signal_system_type: normalized } : prev));
     updateLocalSignalBranchState(normalized);
     if (pipelineState?.steps?.zkspc?.status === 'validated') {
-      setViewStep(pipelineState?.branches?.[normalized]?.active_step || 'fire_alarms');
+      if (!isSharedSignalStep(viewStep)) {
+        const branchState = buildCompositeBranchState(
+          pipelineState?.branches?.[COMMON_SIGNAL_SYSTEM],
+          pipelineState?.branches?.[normalized],
+          { zkspcValidated: true },
+        );
+        setViewStep(branchState.active_step || 'signal_instruments');
+      }
     }
     try {
       await floorPlansApi.update(floorPlanId, { active_signal_system_type: normalized });
     } catch (error) {
       console.error('Error switching signal system type:', error);
     }
-  }, [currentSignalSystem, floorPlanId, pipelineState, updateLocalSignalBranchState]);
+  }, [currentSignalSystem, floorPlanId, pipelineState, updateLocalSignalBranchState, viewStep]);
 
   const handleToggleZkspcRoom = useCallback((roomId) => {
     setSelectedZkspcRooms((prev) => (
@@ -2930,68 +4853,96 @@ function FloorPlanEditor() {
     setSelectedZkspcRooms([]);
   }, [selectedZkspcRooms, rooms]);
 
-  const refreshCableRoutes = useCallback(async (systemType) => {
+  const buildCableStepUpdate = useCallback((subsystemType, activeStep = null) => (
+    String(subsystemType || 'sps') === 'soue'
+      ? {
+        soueCablesStatus: 'validated',
+        activeStep: activeStep || 'soue_cables',
+      }
+      : {
+        devicesCablesStatus: 'validated',
+        activeStep: activeStep || 'devices_cables',
+      }
+  ), []);
+
+  const buildCableRouteStepUpdate = useCallback((route, activeStep = null) => (
+    buildCableStepUpdate(String(route?.subsystem_type || 'sps'), activeStep)
+  ), [buildCableStepUpdate]);
+
+  const refreshCableRoutes = useCallback(async (systemType, subsystemType = 'sps') => {
     const normalizedSystem = normalizeSignalSystemType(systemType);
+    const routeSystemType = subsystemType === 'soue' ? currentSharedSignalSystem : normalizedSystem;
     await elementsApi.recalculateCableRoutes(floorPlanId, {
-      system_type: normalizedSystem,
+      system_type: routeSystemType,
+      subsystem_type: subsystemType,
       use_shared_trunk: false,
     });
     const data = await floorPlansApi.get(floorPlanId, true);
     applyFloorPlanData(data);
-    updateLocalSignalBranchState(normalizedSystem, {
-      devicesCablesStatus: 'validated',
-      activeStep: 'devices_cables',
-    });
-    return (data.cable_routes || []).filter((route) => normalizeSignalSystemType(route.system_type) === normalizedSystem);
-  }, [applyFloorPlanData, floorPlanId, updateLocalSignalBranchState]);
+    updateLocalSignalBranchState(routeSystemType, buildCableStepUpdate(subsystemType));
+    return (data.cable_routes || []).filter((route) => (
+      normalizeSignalSystemType(route.system_type) === routeSystemType
+      && String(route.subsystem_type || 'sps') === String(subsystemType)
+    ));
+  }, [applyFloorPlanData, buildCableStepUpdate, currentSharedSignalSystem, floorPlanId, updateLocalSignalBranchState]);
 
   const handleCreateSignalInstrumentAt = useCallback(async (instrumentType, x, y) => {
+    const definition = getSignalInstrumentDefinition(instrumentType);
+    const equipmentId = await resolveInstrumentEquipmentSelection(instrumentType);
+    if (!equipmentId) {
+      return;
+    }
+
     try {
       setSignalBranchActionLoading(true);
-      const definition = getSignalInstrumentDefinition(instrumentType);
       const placement = resolveInstrumentPlacement({ x, y });
+      const equipmentName = getEquipmentNameById(equipmentId, definition.label);
       const instrument = await elementsApi.createSignalInstrument({
         floor_plan_id: parseInt(floorPlanId, 10),
-        system_type: currentSignalSystem,
+        system_type: currentSharedSignalSystem,
         instrument_type: instrumentType,
         x: placement.x,
         y: placement.y,
-        name: definition.label,
+        name: equipmentName || definition.label,
+        equipment_id: equipmentId,
         supports_cable_merge: definition.supportsMerge,
       });
-      setSignalInstruments((prev) => [...prev, instrument]);
-      updateLocalSignalBranchState(currentSignalSystem, {
-        devicesCablesStatus: 'draft',
-        activeStep: 'devices_cables',
+      const nextInstrument = attachEquipmentName(instrument, equipmentName || definition.label);
+      setSignalInstruments((prev) => [...prev, nextInstrument]);
+      updateLocalSignalBranchState(currentSharedSignalSystem, {
+        signalInstrumentsStatus: 'draft',
+        activeStep: 'signal_instruments',
       });
-      setSelectedElement({ type: 'signal-instrument', id: instrument.id, data: instrument });
-      setSelectedElements([{ type: 'signal-instrument', id: instrument.id }]);
+      setSelectedElement({ type: 'signal-instrument', id: nextInstrument.id, data: nextInstrument });
+      setSelectedElements([{ type: 'signal-instrument', id: nextInstrument.id }]);
     } catch (error) {
       console.error('Error creating signal instrument:', error);
       alert('Не удалось добавить прибор.');
     } finally {
       setSignalBranchActionLoading(false);
     }
-  }, [currentSignalSystem, floorPlanId, resolveInstrumentPlacement, updateLocalSignalBranchState]);
+  }, [
+    attachEquipmentName,
+    currentSharedSignalSystem,
+    floorPlanId,
+    getEquipmentNameById,
+    resolveInstrumentEquipmentSelection,
+    resolveInstrumentPlacement,
+    updateLocalSignalBranchState,
+  ]);
 
-  const handleInstrumentDragMove = useCallback((instrument, event) => {
-    const placement = resolveInstrumentPlacement(
-      { x: event.target.x(), y: event.target.y() },
-      { excludeInstrumentId: instrument.id, instrument },
-    );
-    event.target.position(placement);
-  }, [resolveInstrumentPlacement]);
+  const handleInstrumentDragMove = useCallback(() => {}, []);
 
   const handleInstrumentDragEnd = useCallback(async (instrumentId, event) => {
     const instrument = signalInstruments.find((item) => item.id === instrumentId) || null;
-    const position = resolveInstrumentPlacement(
-      event.target.position(),
-      { excludeInstrumentId: instrumentId, instrument },
-    );
-    event.target.position(position);
+    const position = event.target.position();
     try {
       const updated = await elementsApi.updateSignalInstrument(instrumentId, { x: position.x, y: position.y });
-      setSignalInstruments((prev) => prev.map((item) => (item.id === updated.id ? updated : item)));
+      const nextInstrument = attachEquipmentName(
+        updated,
+        instrument?.equipment_name || instrument?.name || getSignalInstrumentDefinition(updated.instrument_type).label,
+      );
+      setSignalInstruments((prev) => prev.map((item) => (item.id === updated.id ? nextInstrument : item)));
       const relatedRoutes = cableRoutes.filter((route) => route.instrument_id === instrumentId);
       if (instrument && relatedRoutes.length) {
         const updatedRoutes = await Promise.all(relatedRoutes.map((route) => elementsApi.updateCableRoute(route.id, {
@@ -3001,20 +4952,19 @@ function FloorPlanEditor() {
             position,
           ),
           is_manual: route.is_manual ?? true,
-          zc_label_dx: route.zc_label_dx ?? null,
-          zc_label_dy: route.zc_label_dy ?? null,
+          ...getRouteZcLabelPayload(route),
         })));
         setCableRoutes((prev) => prev.map((route) => updatedRoutes.find((item) => item.id === route.id) || route));
       }
       updateLocalSignalBranchState(updated.system_type, {
-        devicesCablesStatus: 'validated',
-        activeStep: 'devices_cables',
+        signalInstrumentsStatus: 'draft',
+        activeStep: 'signal_instruments',
       });
     } catch (error) {
       console.error('Error moving instrument:', error);
       alert('Не удалось переместить прибор.');
     }
-  }, [cableRoutes, resolveInstrumentPlacement, signalInstruments, updateLocalSignalBranchState]);
+  }, [attachEquipmentName, cableRoutes, getRouteZcLabelPayload, signalInstruments, updateLocalSignalBranchState]);
 
   const handleStartMergeCableRoutes = useCallback((instrument) => {
     if (!instrument?.id) {
@@ -3022,7 +4972,7 @@ function FloorPlanEditor() {
     }
     setMergeInstrumentId(instrument.id);
     setSelectedTool('multi-select');
-    setSelectedElement({ type: 'signal-instrument', id: instrument.id, data: instrument });
+    setSelectedElement(null);
     setSelectedElements([]);
     return;
     /*
@@ -3031,6 +4981,8 @@ function FloorPlanEditor() {
       await refreshCableRoutes(instrument.system_type, true);
     } catch (error) {
       console.error('Error merging cable routes:', error);
+      alert('Не удалось свести кабели.');
+      return;
       alert('Не удалось свести кабели.');
     } finally {
       setSignalBranchActionLoading(false);
@@ -3050,8 +5002,12 @@ function FloorPlanEditor() {
     if (!mergeInstrumentId) {
       return;
     }
+    const subsystemType = interactionViewStep === 'soue_cables' ? 'soue' : 'sps';
+    const selectableTypes = subsystemType === 'soue'
+      ? new Set(['soue-device', 'new-soue-device'])
+      : new Set(['fire-alarm', 'new-fire-alarm']);
     const deviceIds = selectedElements
-      .filter((item) => item.type === 'fire-alarm' || item.type === 'new-fire-alarm')
+      .filter((item) => selectableTypes.has(item.type))
       .map((item) => Number(item.id))
       .filter((id) => Number.isInteger(id) && id > 0);
     if (!deviceIds.length) {
@@ -3060,18 +5016,23 @@ function FloorPlanEditor() {
     }
     try {
       setSignalBranchActionLoading(true);
-      await elementsApi.mergeRoutesForInstrument(mergeInstrumentId, { device_ids: deviceIds });
+      await elementsApi.mergeRoutesForInstrument(mergeInstrumentId, {
+        device_ids: deviceIds,
+        subsystem_type: subsystemType,
+        system_type: subsystemType === 'soue' ? currentSharedSignalSystem : currentSignalSystem,
+      });
       await fetchFloorPlan();
       setMergeInstrumentId(null);
       setSelectedTool('select');
       setSelectedElements([]);
     } catch (error) {
       console.error('Error merging cable routes:', error);
-      alert('РќРµ СѓРґР°Р»РѕСЃСЊ СЃРІРµСЃС‚Рё РєР°Р±РµР»Рё.');
+      alert('Не удалось свести кабели.');
+      return;
     } finally {
       setSignalBranchActionLoading(false);
     }
-  }, [fetchFloorPlan, mergeInstrumentId, selectedElements]);
+  }, [currentSharedSignalSystem, currentSignalSystem, fetchFloorPlan, interactionViewStep, mergeInstrumentId, selectedElements]);
 
   const handleSaveSignalInstrumentMeta = useCallback(async () => {
     if (!hoverPanel || hoverPanel.type !== 'signal-instrument' || !hoverPanel.id) {
@@ -3080,16 +5041,27 @@ function FloorPlanEditor() {
     try {
       setSignalBranchActionLoading(true);
       const definition = getSignalInstrumentDefinition(signalInstrumentDraft.instrumentType);
+      const resolvedEquipmentName = getEquipmentNameById(
+        signalInstrumentDraft.equipmentId ? Number(signalInstrumentDraft.equipmentId) : hoverPanel.data?.equipment_id,
+        definition.label,
+      );
       const updated = await elementsApi.updateSignalInstrument(hoverPanel.id, {
-        name: signalInstrumentDraft.name || definition.label,
+        name: signalInstrumentDraft.name || resolvedEquipmentName || definition.label,
         instrument_type: signalInstrumentDraft.instrumentType,
+        equipment_id: signalInstrumentDraft.equipmentId ? Number(signalInstrumentDraft.equipmentId) : null,
         supports_cable_merge: definition.supportsMerge,
       });
-      setSignalInstruments((prev) => prev.map((item) => (item.id === updated.id ? updated : item)));
-      setHoverPanel((prev) => (prev ? { ...prev, data: updated } : prev));
+      const nextInstrument = attachEquipmentName(updated, resolvedEquipmentName || updated.name || definition.label);
+      setSignalInstruments((prev) => prev.map((item) => (item.id === updated.id ? nextInstrument : item)));
+      setHoverPanel((prev) => (prev ? { ...prev, data: nextInstrument } : prev));
+      setSelectedElement((prev) => (
+        prev?.type === 'signal-instrument' && prev.id === updated.id
+          ? { ...prev, data: nextInstrument }
+          : prev
+      ));
       updateLocalSignalBranchState(updated.system_type, {
-        devicesCablesStatus: 'draft',
-        activeStep: 'devices_cables',
+        signalInstrumentsStatus: 'draft',
+        activeStep: 'signal_instruments',
       });
     } catch (error) {
       console.error('Error saving instrument meta:', error);
@@ -3097,7 +5069,7 @@ function FloorPlanEditor() {
     } finally {
       setSignalBranchActionLoading(false);
     }
-  }, [hoverPanel, signalInstrumentDraft, updateLocalSignalBranchState]);
+  }, [attachEquipmentName, getEquipmentNameById, hoverPanel, signalInstrumentDraft, updateLocalSignalBranchState]);
 
   const handleDeleteSignalInstrument = useCallback(async (instrumentId, systemType) => {
     try {
@@ -3106,8 +5078,8 @@ function FloorPlanEditor() {
       await fetchFloorPlan();
       setMergeInstrumentId((prev) => (prev === instrumentId ? null : prev));
       updateLocalSignalBranchState(systemType, {
-        devicesCablesStatus: 'draft',
-        activeStep: 'devices_cables',
+        signalInstrumentsStatus: 'draft',
+        activeStep: 'signal_instruments',
       });
       closeHoverPanel();
       clearCanvasSelection();
@@ -3128,20 +5100,17 @@ function FloorPlanEditor() {
       const updated = await elementsApi.updateCableRoute(route.id, {
         polyline_points: normalizeOrthogonalPolyline(nextPoints),
         is_manual: true,
-        zc_label_dx: route.zc_label_dx ?? null,
-        zc_label_dy: route.zc_label_dy ?? null,
+        ...getRouteZcLabelPayload(route),
       });
       setCableRoutes((prev) => prev.map((item) => (item.id === updated.id ? updated : item)));
-      updateLocalSignalBranchState(route.system_type, {
-        devicesCablesStatus: 'validated',
-        activeStep: 'devices_cables',
-      });
+      handleSelectCableRoute(updated, insertIndex);
+      updateLocalSignalBranchState(route.system_type, buildCableRouteStepUpdate(route));
       setActiveCableHandle(null);
     } catch (error) {
       console.error('Error inserting cable route point:', error);
       alert('Не удалось изменить сегмент кабеля.');
     }
-  }, [updateLocalSignalBranchState]);
+  }, [buildCableRouteStepUpdate, getRouteZcLabelPayload, handleSelectCableRoute, updateLocalSignalBranchState]);
 
   const handleCableRouteHandleDragEnd = useCallback(async (route, pointIndex, event) => {
     const nextPoints = updateOrthogonalHandlePoint(route.polyline_points || [], pointIndex, {
@@ -3152,20 +5121,17 @@ function FloorPlanEditor() {
       const updated = await elementsApi.updateCableRoute(route.id, {
         polyline_points: normalizeOrthogonalPolyline(nextPoints),
         is_manual: true,
-        zc_label_dx: route.zc_label_dx ?? null,
-        zc_label_dy: route.zc_label_dy ?? null,
+        ...getRouteZcLabelPayload(route),
       });
       setCableRoutes((prev) => prev.map((item) => (item.id === updated.id ? updated : item)));
-      updateLocalSignalBranchState(route.system_type, {
-        devicesCablesStatus: 'validated',
-        activeStep: 'devices_cables',
-      });
+      handleSelectCableRoute(updated);
+      updateLocalSignalBranchState(route.system_type, buildCableRouteStepUpdate(route));
       setActiveCableHandle(null);
     } catch (error) {
       console.error('Error updating cable route:', error);
       alert('Не удалось изменить кабель.');
     }
-  }, [updateLocalSignalBranchState]);
+  }, [buildCableRouteStepUpdate, getRouteZcLabelPayload, handleSelectCableRoute, updateLocalSignalBranchState]);
 
   const applyWallLengthDraft = useCallback((wallGeometry) => {
     if (!wallGeometry || wallLengthDraft === '' || Number.isNaN(Number(wallLengthDraft))) {
@@ -3350,6 +5316,9 @@ function FloorPlanEditor() {
         width: widthPx,
         height: heightPx,
         wall_id: openingSizeDraft.wallId !== '' ? Number(openingSizeDraft.wallId) : current.wall_id,
+        is_evacuation_exit: kind === 'doors' || kind === 'new-doors'
+          ? openingSizeDraft.isEvacuationExit
+          : current.is_evacuation_exit,
       },
       activeWallGeometries,
       floorPlan?.scale_factor,
@@ -3458,6 +5427,7 @@ function FloorPlanEditor() {
         floor_plan_id: parseInt(floorPlanId, 10),
         name: roomDraft.name || null,
         room_type: unserviceableRoomIds.has(hoverPanel.id) ? 'необслуживаемое' : (roomDraft.type || 'базовое'),
+        max_occupancy: roomDraft.maxOccupancy !== '' ? Number(roomDraft.maxOccupancy) : null,
       };
       Object.keys(payload).forEach((key) => payload[key] === undefined && delete payload[key]);
       const updated = await elementsApi.updateRoom(hoverPanel.id, payload);
@@ -3477,6 +5447,7 @@ function FloorPlanEditor() {
     const nextPatch = {
       zone: fireAlarmDraft.zone.trim() || '1',
       address: fireAlarmDraft.address.trim() || String(hoverPanel.data?.address || '1'),
+      equipment_id: fireAlarmDraft.equipmentId ? Number(fireAlarmDraft.equipmentId) : null,
     };
     if (hoverPanel.type === 'new-fire-alarm') {
       setNewFireAlarms((prev) => prev.map((item) => (
@@ -3493,18 +5464,63 @@ function FloorPlanEditor() {
     }
     setHoverPanel((prev) => (prev ? {
       ...prev,
-      data: {
+      data: attachEquipmentName({
         ...(prev.data || {}),
         ...nextPatch,
-      },
+      }),
     } : prev));
     setSelectedElement((prev) => (
       prev && prev.id === hoverPanel.id && (prev.type === 'fire-alarm' || prev.type === 'new-fire-alarm')
-        ? { ...prev, data: { ...(prev.data || {}), ...nextPatch } }
+        ? { ...prev, data: attachEquipmentName({ ...(prev.data || {}), ...nextPatch }) }
         : prev
     ));
     setHasUnsavedChanges(true);
-  }, [hoverPanel, fireAlarmDraft, setNewFireAlarms]);
+  }, [attachEquipmentName, hoverPanel, fireAlarmDraft, setNewFireAlarms]);
+
+  const handleSaveSoueDeviceMeta = useCallback(() => {
+    if (!hoverPanel || !['soue-device', 'new-soue-device'].includes(hoverPanel.type) || !hoverPanel.id) {
+      return;
+    }
+    const currentDeviceType = hoverPanel.data?.device_type || 'siren';
+    const nextPatch = {
+      device_model: soueDeviceDraft.deviceModel.trim() || (currentDeviceType === 'siren' ? 'Комптид-1' : 'Выход-12'),
+      sound_pressure_db: currentDeviceType === 'siren' && soueDeviceDraft.soundPressureDb !== ''
+        ? Number(soueDeviceDraft.soundPressureDb)
+        : null,
+      mounting_height: soueDeviceDraft.mountingHeight !== ''
+        ? Number(soueDeviceDraft.mountingHeight)
+        : null,
+      label_dx: soueDeviceDraft.labelDx !== '' ? Number(soueDeviceDraft.labelDx) : null,
+      label_dy: soueDeviceDraft.labelDy !== '' ? Number(soueDeviceDraft.labelDy) : null,
+      equipment_id: soueDeviceDraft.equipmentId ? Number(soueDeviceDraft.equipmentId) : null,
+    };
+    if (hoverPanel.type === 'new-soue-device') {
+      setNewSoueDevices((prev) => prev.map((item) => (
+        item.id === hoverPanel.id ? { ...item, ...nextPatch } : item
+      )));
+    } else {
+      setModifiedElements((prev) => ({
+        ...prev,
+        [`soue-devices-${hoverPanel.id}`]: {
+          ...(prev[`soue-devices-${hoverPanel.id}`] || {}),
+          ...nextPatch,
+        },
+      }));
+    }
+    setHoverPanel((prev) => (prev ? {
+      ...prev,
+      data: attachEquipmentName({
+        ...(prev.data || {}),
+        ...nextPatch,
+      }),
+    } : prev));
+    setSelectedElement((prev) => (
+      prev && prev.id === hoverPanel.id && (prev.type === 'soue-device' || prev.type === 'new-soue-device')
+        ? { ...prev, data: attachEquipmentName({ ...(prev.data || {}), ...nextPatch }) }
+        : prev
+    ));
+    setHasUnsavedChanges(true);
+  }, [attachEquipmentName, hoverPanel, soueDeviceDraft]);
 
   const handleFireAlarmLabelDragEnd = useCallback((kind, alarmId, alarm, event) => {
     const current = getFireAlarmCurrentGeometry(kind, alarmId, alarm);
@@ -3531,6 +5547,31 @@ function FloorPlanEditor() {
     setHasUnsavedChanges(true);
   }, [getFireAlarmCurrentGeometry, setNewFireAlarms]);
 
+  const handleSoueDeviceLabelDragEnd = useCallback((kind, deviceId, device, event) => {
+    const current = getSoueDeviceCurrentGeometry(kind, deviceId, device);
+    if (!current) {
+      return;
+    }
+    const patch = {
+      label_dx: event.target.x() - current.x,
+      label_dy: event.target.y() - current.y,
+    };
+    if (kind === 'new-soue-devices') {
+      setNewSoueDevices((prev) => prev.map((item) => (
+        item.id === deviceId ? { ...item, ...patch } : item
+      )));
+    } else {
+      setModifiedElements((prev) => ({
+        ...prev,
+        [`soue-devices-${deviceId}`]: {
+          ...(prev[`soue-devices-${deviceId}`] || {}),
+          ...patch,
+        },
+      }));
+    }
+    setHasUnsavedChanges(true);
+  }, [getSoueDeviceCurrentGeometry]);
+
   const handleSignalInstrumentLabelDragEnd = useCallback(async (instrument, event) => {
     if (!instrument?.id) {
       return;
@@ -3540,21 +5581,29 @@ function FloorPlanEditor() {
         label_dx: event.target.x() - instrument.x,
         label_dy: event.target.y() - instrument.y,
       });
-      setSignalInstruments((prev) => prev.map((item) => (item.id === updated.id ? updated : item)));
+      const nextInstrument = attachEquipmentName(
+        updated,
+        instrument.equipment_name || instrument.name || getSignalInstrumentDefinition(updated.instrument_type).label,
+      );
+      setSignalInstruments((prev) => prev.map((item) => (item.id === updated.id ? nextInstrument : item)));
       setHoverPanel((prev) => (
         prev?.type === 'signal-instrument' && prev.id === updated.id
-          ? { ...prev, data: updated }
+          ? { ...prev, data: nextInstrument }
           : prev
       ));
+      updateLocalSignalBranchState(updated.system_type, {
+        signalInstrumentsStatus: 'draft',
+        activeStep: 'signal_instruments',
+      });
     } catch (error) {
       console.error('Error moving instrument label:', error);
       alert('Не удалось переместить подпись прибора.');
     }
-  }, []);
+  }, [attachEquipmentName, updateLocalSignalBranchState]);
 
   const handleZcLabelDragEnd = useCallback(async (route, displayPolyline, event) => {
     const anchorPoint = Array.isArray(displayPolyline) ? displayPolyline[displayPolyline.length - 1] : null;
-    if (!route?.id || !anchorPoint) {
+    if (!route?.id || !anchorPoint || !shouldShowRouteTerminator(route)) {
       return;
     }
     try {
@@ -3565,15 +5614,13 @@ function FloorPlanEditor() {
         zc_label_dy: event.target.y() - anchorPoint[1],
       });
       setCableRoutes((prev) => prev.map((item) => (item.id === updated.id ? updated : item)));
-      updateLocalSignalBranchState(route.system_type, {
-        devicesCablesStatus: 'validated',
-        activeStep: 'devices_cables',
-      });
+      handleSelectCableRoute(updated);
+      updateLocalSignalBranchState(route.system_type, buildCableRouteStepUpdate(route));
     } catch (error) {
       console.error('Error moving ZC label:', error);
       alert('Не удалось переместить подпись ZC.');
     }
-  }, [updateLocalSignalBranchState]);
+  }, [buildCableRouteStepUpdate, handleSelectCableRoute, updateLocalSignalBranchState]);
 
   const buildPlanMetaPayload = useCallback(() => {
     if (!floorPlan) {
@@ -3677,6 +5724,7 @@ function FloorPlanEditor() {
       height: geometry.height,
       rotation_deg: geometry.rotation_deg || 0,
       wall_id: geometry.wall_id,
+      is_evacuation_exit: null,
     };
     setNewDoors((prev) => [...prev, created]);
     setSelectedElement({ type: 'new-door', id: created.id, data: created });
@@ -3722,7 +5770,32 @@ function FloorPlanEditor() {
   }, [floorPlanId, saveToHistory]);
 
   const handleCreateDraftFireAlarm = useCallback((deviceType, x, y, overrides = {}) => {
+    const categories = FIRE_ALARM_EQUIPMENT_CATEGORIES[deviceType] || [];
+    const matchingEquipment = getProjectEquipmentOptions(categories);
+    let selectedEquipmentId = overrides.equipment_id ?? null;
+    if (selectedEquipmentId === null || selectedEquipmentId === undefined) {
+      if (matchingEquipment.length === 1) {
+        selectedEquipmentId = matchingEquipment[0].id;
+      } else if (matchingEquipment.length > 1) {
+        selectedEquipmentId = resolveProjectEquipmentSelection(
+          categories,
+          `Выберите оборудование проекта для "${getFireAlarmDisplayLabel(deviceType)}"`,
+        );
+        if (!selectedEquipmentId) {
+          return;
+        }
+      } else {
+        alert(`Сначала добавьте в проект оборудование для "${getFireAlarmDisplayLabel(deviceType)}".`);
+        return;
+      }
+    }
     const placement = resolveFireAlarmPlacement(deviceType, { x, y });
+    if (!placement) {
+      if (deviceType === 'manual_call_point') {
+        alert('Ручной извещатель можно ставить только у выходов наружу.');
+      }
+      return;
+    }
     const metadata = getRoomMetadataForPoint(placement, rooms, floorPlan?.scale_factor);
     if (metadata.roomId && unserviceableRoomIds.has(metadata.roomId)) {
       alert('В необслуживаемом помещении нельзя размещать элементы сигнализации.');
@@ -3734,8 +5807,9 @@ function FloorPlanEditor() {
     const created = {
       id: createFireAlarmDraftId(),
       floor_plan_id: parseInt(floorPlanId, 10),
-      x,
-      y,
+      x: placement.x,
+      y: placement.y,
+      rotation_deg: placement.rotation_deg ?? 0,
       device_type: deviceType,
       system_type: currentSignalSystem,
       zkspc_zone_id: roomZoneMap[metadata.roomId]?.id ?? null,
@@ -3750,12 +5824,31 @@ function FloorPlanEditor() {
       offset_left_m: metadata.offsetLeftM,
       offset_top_m: metadata.offsetTopM,
       ...overrides,
+      equipment_id: overrides.equipment_id ?? selectedEquipmentId,
     };
+    created.equipment_name = getEquipmentNameById(created.equipment_id, created.equipment_name || '');
     setNewFireAlarms((prev) => [...prev, created]);
     setSelectedElement({ type: 'new-fire-alarm', id: created.id, data: created });
     setSelectedElements([{ type: 'new-fire-alarm', id: created.id }]);
     setHasUnsavedChanges(true);
-  }, [floorPlanId, saveToHistory, rooms, floorPlan?.scale_factor, floorPlan?.ceiling_height_mm, branchFireAlarms, deletedElements, newFireAlarms.length, currentSignalSystem, roomZoneMap, setNewFireAlarms, unserviceableRoomIds, resolveFireAlarmPlacement]);
+  }, [
+    branchFireAlarms,
+    currentSignalSystem,
+    deletedElements,
+    floorPlan?.ceiling_height_mm,
+    floorPlan?.scale_factor,
+    floorPlanId,
+    getEquipmentNameById,
+    getProjectEquipmentOptions,
+    newFireAlarms.length,
+    resolveFireAlarmPlacement,
+    resolveProjectEquipmentSelection,
+    roomZoneMap,
+    rooms,
+    saveToHistory,
+    setNewFireAlarms,
+    unserviceableRoomIds,
+  ]);
 
   const handleAutoLayoutFireAlarms = useCallback(async () => {
     const visiblePersisted = branchFireAlarms.filter((alarm) => !deletedElements.some((del) => del.type === 'fire-alarms' && del.id === alarm.id));
@@ -3799,6 +5892,123 @@ function FloorPlanEditor() {
       setFireAlarmActionLoading(false);
     }
   }, [branchFireAlarms, deletedElements, newFireAlarms.length, floorPlanId, saveToHistory, currentSignalSystem, setNewFireAlarms, setFireAlarmWarnings]);
+  const handleCreateDraftSoueDevice = useCallback((deviceType, x, y, overrides = {}) => {
+    const categories = SOUE_DEVICE_EQUIPMENT_CATEGORIES[deviceType] || [];
+    const matchingEquipment = getProjectEquipmentOptions(categories);
+    let selectedEquipmentId = overrides.equipment_id ?? null;
+    if (selectedEquipmentId === null || selectedEquipmentId === undefined) {
+      if (matchingEquipment.length === 1) {
+        selectedEquipmentId = matchingEquipment[0].id;
+      } else if (matchingEquipment.length > 1) {
+        selectedEquipmentId = resolveProjectEquipmentSelection(
+          categories,
+          `Выберите оборудование проекта для "${deviceType === 'siren' ? 'Сирена' : 'Табло'}"`,
+        );
+        if (!selectedEquipmentId) {
+          return;
+        }
+      } else {
+        alert(`Сначала добавьте в проект оборудование для "${deviceType === 'siren' ? 'Сирена' : 'Табло'}".`);
+        return;
+      }
+    }
+    const placement = resolveSoueDevicePlacement(deviceType, { x, y });
+    if (!placement) {
+      return;
+    }
+    const metadata = getRoomMetadataForPoint(placement, rooms, floorPlan?.scale_factor);
+    if (metadata.roomId && unserviceableRoomIds.has(metadata.roomId)) {
+      alert('В необслуживаемом помещении нельзя размещать элементы СОУЭ.');
+      return;
+    }
+    saveToHistory();
+    const created = {
+      id: createSoueDeviceDraftId(),
+      floor_plan_id: parseInt(floorPlanId, 10),
+      x: placement.x,
+      y: placement.y,
+      device_type: deviceType,
+      device_model: deviceType === 'siren' ? 'Комптид-1' : 'Выход-12',
+      sound_pressure_db: deviceType === 'siren' ? 98 : null,
+      mounting_height: deviceType === 'siren' ? 2.4 : 2.3,
+      system_type: currentSharedSignalSystem,
+      loop_kind: null,
+      loop_number: null,
+      device_number: null,
+      room_id: metadata.roomId,
+      offset_left_m: metadata.offsetLeftM,
+      offset_top_m: metadata.offsetTopM,
+      ...overrides,
+      equipment_id: overrides.equipment_id ?? selectedEquipmentId,
+    };
+    created.equipment_name = getEquipmentNameById(created.equipment_id, created.equipment_name || created.device_model || '');
+    setNewSoueDevices((prev) => [...prev, created]);
+    setSelectedElement({ type: 'new-soue-device', id: created.id, data: created });
+    setSelectedElements([{ type: 'new-soue-device', id: created.id }]);
+    setHasUnsavedChanges(true);
+  }, [
+    currentSharedSignalSystem,
+    floorPlan?.scale_factor,
+    floorPlanId,
+    getEquipmentNameById,
+    getProjectEquipmentOptions,
+    resolveProjectEquipmentSelection,
+    resolveSoueDevicePlacement,
+    rooms,
+    saveToHistory,
+    setNewSoueDevices,
+    unserviceableRoomIds,
+  ]);
+
+  const handleAutoLayoutSoueDevices = useCallback(async () => {
+    const visiblePersisted = branchSoueDevices.filter((device) => !deletedElements.some((del) => del.type === 'soue-devices' && del.id === device.id));
+    if ((visiblePersisted.length || newSoueDevices.length) && !window.confirm('Текущая расстановка СОУЭ будет заменена. Продолжить?')) {
+      return;
+    }
+    try {
+      setSoueActionLoading(true);
+      const preview = await floorPlansApi.autoLayoutSoueDevices(floorPlanId, currentSharedSignalSystem);
+      saveToHistory();
+      setDeletedElements((prev) => {
+        const retained = prev.filter((item) => item.type !== 'soue-devices' || !branchSoueDevices.some((device) => device.id === item.id));
+        return [
+          ...retained,
+          ...visiblePersisted.map((device) => ({ type: 'soue-devices', id: device.id })),
+        ];
+      });
+      setModifiedElements((prev) => Object.fromEntries(
+        Object.entries(prev).filter(([key]) => !key.startsWith('soue-devices-'))
+      ));
+      setNewSoueDevices((preview.devices || []).map((device) => {
+        const placement = resolveSoueDevicePlacement(
+          device.device_type,
+          { x: device.x, y: device.y },
+        ) || { x: device.x, y: device.y };
+        const metadata = getRoomMetadataForPoint(placement, rooms, floorPlan?.scale_factor);
+        return {
+          ...device,
+          x: placement.x,
+          y: placement.y,
+          rotation_deg: placement.rotation_deg ?? device.rotation_deg ?? 0,
+          room_id: metadata.roomId ?? device.room_id ?? null,
+          offset_left_m: metadata.offsetLeftM ?? device.offset_left_m ?? null,
+          offset_top_m: metadata.offsetTopM ?? device.offset_top_m ?? null,
+          id: createSoueDeviceDraftId(),
+          floor_plan_id: parseInt(floorPlanId, 10),
+          system_type: currentSharedSignalSystem,
+        };
+      }));
+      setSoueWarnings(preview.warnings || []);
+      setSelectedElement(null);
+      setSelectedElements([]);
+      setHasUnsavedChanges(Boolean(visiblePersisted.length || (preview.devices || []).length));
+    } catch (error) {
+      console.error('Error auto-placing SOUE devices:', error);
+      alert('Не удалось автоматически расставить устройства СОУЭ.');
+    } finally {
+      setSoueActionLoading(false);
+    }
+  }, [branchSoueDevices, currentSharedSignalSystem, deletedElements, floorPlan?.scale_factor, floorPlanId, newSoueDevices.length, resolveSoueDevicePlacement, rooms, saveToHistory, setNewSoueDevices, setSoueWarnings]);
 
   // eslint-disable-next-line no-unused-vars
   const handleRecognize = async (debug = false) => {
@@ -3861,7 +6071,7 @@ function FloorPlanEditor() {
       || e.target === e.target.getLayer()
       || e.target?.attrs?.id === 'editor-layer'
       || e.target?.className === 'Image';
-    if (selectionLockActive && isBackground) {
+    if (selectionLockActive && isBackground && !(mergeModeActive && selectedTool === 'multi-select')) {
       clearCanvasSelection();
       closeHoverPanel();
       return;
@@ -3956,7 +6166,11 @@ function FloorPlanEditor() {
       handleCreateDraftFireAlarm('smoke_detector', scaledPoint.x, scaledPoint.y);
     } else if (selectedTool === 'manual-call-point' && activeEditorStep === 'fire_alarms') {
       handleCreateDraftFireAlarm('manual_call_point', scaledPoint.x, scaledPoint.y);
-    } else if (SIGNAL_INSTRUMENT_OPTIONS.some((option) => option.key === selectedTool) && activeEditorStep === 'devices_cables') {
+    } else if (selectedTool === 'siren' && activeEditorStep === 'soue_devices') {
+      handleCreateDraftSoueDevice('siren', scaledPoint.x, scaledPoint.y);
+    } else if (selectedTool === 'exit-sign' && activeEditorStep === 'soue_devices') {
+      handleCreateDraftSoueDevice('exit_sign', scaledPoint.x, scaledPoint.y);
+    } else if (SIGNAL_INSTRUMENT_OPTIONS.some((option) => option.key === selectedTool) && activeEditorStep === 'signal_instruments') {
       handleCreateSignalInstrumentAt(selectedTool, scaledPoint.x, scaledPoint.y);
     } else if (selectedTool === 'select' && isBackground) {
       // Сброс выбора при клике на пустую область в режиме выбора
@@ -3980,6 +6194,44 @@ function FloorPlanEditor() {
     }
   }, [floorPlanId]);
 
+  const handleSubmitStepFeedback = useCallback(async (step) => {
+    const stepRevision = pipelineState?.steps?.[step]?.revision;
+    if (!stepRevision) {
+      return;
+    }
+    try {
+      patchStepFeedbackUiState(step, {
+        submitting: true,
+        status: 'idle',
+        error: '',
+        message: '',
+        nextBatchHint: null,
+      });
+      const response = await pipelineApi.submitStepFeedback(floorPlanId, step, {
+        step_revision: stepRevision,
+        issue_tags: [],
+        notes: null,
+      });
+      patchStepFeedbackUiState(step, {
+        submitting: false,
+        status: 'success',
+        error: '',
+        message: STEP_FEEDBACK_COPY[step].success,
+        nextBatchHint: response?.next_batch_hint || null,
+      });
+      await fetchPipelineState();
+    } catch (error) {
+      console.error(`Step feedback submission failed for ${step}:`, error);
+      patchStepFeedbackUiState(step, {
+        submitting: false,
+        status: 'error',
+        error: STEP_FEEDBACK_COPY[step].error,
+        message: '',
+        nextBatchHint: null,
+      });
+    }
+  }, [fetchPipelineState, floorPlanId, patchStepFeedbackUiState, pipelineState?.steps]);
+
   const handleElementDragStart = useCallback((type, id, e) => {
     closeHoverPanel();
     dragStartRef.current[`${type}-${id}`] = { x: e.target.x(), y: e.target.y() };
@@ -3988,14 +6240,11 @@ function FloorPlanEditor() {
 
   const handleElementDragMove = useCallback((type, id, entity, e) => {
     if (type === 'fire-alarms' || type === 'new-fire-alarms') {
-      const current = getFireAlarmCurrentGeometry(type, id, entity);
-      const placement = resolveFireAlarmPlacement(
-        current?.device_type || entity?.device_type || 'smoke_detector',
-        { x: e.target.x(), y: e.target.y() },
-        { excludeFireAlarmId: id },
-      );
-      e.target.position(placement);
-      setActiveDrag({ type, id, x: placement.x, y: placement.y });
+      setActiveDrag({ type, id, x: e.target.x(), y: e.target.y() });
+      return;
+    }
+    if (type === 'soue-devices' || type === 'new-soue-devices') {
+      setActiveDrag({ type, id, x: e.target.x(), y: e.target.y() });
       return;
     }
     if (!['doors', 'windows', 'new-doors', 'new-windows'].includes(type)) {
@@ -4018,7 +6267,7 @@ function FloorPlanEditor() {
     if (normalized) {
       e.target.position({ x: normalized.x + normalized.width / 2, y: normalized.y + normalized.height / 2 });
     }
-  }, [activeWallGeometries, floorPlan?.scale_factor, getFireAlarmCurrentGeometry, getOpeningCurrentGeometry, resolveFireAlarmPlacement]);
+  }, [activeWallGeometries, floorPlan?.scale_factor, getOpeningCurrentGeometry]);
 
   const handleElementDragEnd = (type, id, e) => {
     saveToHistory();
@@ -4070,23 +6319,82 @@ function FloorPlanEditor() {
         newPos,
         { excludeFireAlarmId: id },
       );
-      newPos.x = placement.x;
-      newPos.y = placement.y;
-      node.position(placement);
+      if (placement) {
+        newPos.x = placement.x;
+        newPos.y = placement.y;
+        node.position(placement);
+      } else {
+        newPos.x = current?.x ?? newPos.x;
+        newPos.y = current?.y ?? newPos.y;
+        node.position({ x: newPos.x, y: newPos.y });
+      }
+    } else if (type === 'soue-devices' || type === 'new-soue-devices') {
+      const current = getSoueDeviceCurrentGeometry(type, id);
+      const placement = resolveSoueDevicePlacement(
+        current?.device_type || 'siren',
+        newPos,
+        { excludeSoueDeviceId: id },
+      );
+      if (placement) {
+        newPos.x = placement.x;
+        newPos.y = placement.y;
+        newPos.rotation_deg = placement.rotation_deg ?? current?.rotation_deg ?? 0;
+        node.position(placement);
+      } else {
+        newPos.x = current?.x ?? newPos.x;
+        newPos.y = current?.y ?? newPos.y;
+        newPos.rotation_deg = current?.rotation_deg ?? 0;
+        node.position({ x: newPos.x, y: newPos.y });
+      }
     }
 
     // Сохраняем изменения локально
     if (['doors', 'windows', 'new-doors', 'new-windows'].includes(type)) {
       applyOpeningGeometryUpdate(type, id, newPos);
     } else if (type === 'new-fire-alarms') {
+      const metadata = getRoomMetadataForPoint(newPos, rooms, floorPlan?.scale_factor);
       setNewFireAlarms((prev) => prev.map((item) => (
-        item.id === id ? { ...item, ...newPos } : item
+        item.id === id
+          ? {
+            ...item,
+            ...newPos,
+            room_id: metadata.roomId ?? item.room_id ?? null,
+            offset_left_m: metadata.offsetLeftM ?? item.offset_left_m ?? null,
+            offset_top_m: metadata.offsetTopM ?? item.offset_top_m ?? null,
+          }
+          : item
+      )));
+      setHasUnsavedChanges(true);
+    } else if (type === 'new-soue-devices') {
+      const metadata = getRoomMetadataForPoint(newPos, rooms, floorPlan?.scale_factor);
+      setNewSoueDevices((prev) => prev.map((item) => (
+        item.id === id
+          ? {
+            ...item,
+            ...newPos,
+            room_id: metadata.roomId ?? item.room_id ?? null,
+            offset_left_m: metadata.offsetLeftM ?? item.offset_left_m ?? null,
+            offset_top_m: metadata.offsetTopM ?? item.offset_top_m ?? null,
+          }
+          : item
       )));
       setHasUnsavedChanges(true);
     } else {
+      const metadata = (type === 'soue-devices' || type === 'fire-alarms')
+        ? getRoomMetadataForPoint(newPos, rooms, floorPlan?.scale_factor)
+        : null;
       setModifiedElements(prev => ({
         ...prev,
-        [`${type}-${id}`]: newPos
+        [`${type}-${id}`]: {
+          ...newPos,
+          ...((type === 'soue-devices' || type === 'fire-alarms')
+            ? {
+              room_id: metadata?.roomId ?? null,
+              offset_left_m: metadata?.offsetLeftM ?? null,
+              offset_top_m: metadata?.offsetTopM ?? null,
+            }
+            : {}),
+        }
       }));
       setHasUnsavedChanges(true);
     }
@@ -4642,6 +6950,43 @@ function FloorPlanEditor() {
     }
   }, [floorPlanId, selectedElement]);
 
+  const handleCreateRoomFromRect = useCallback(async (rect) => {
+    const normalized = normalizeRect(rect);
+    if (!normalized || normalized.width <= 2 || normalized.height <= 2) {
+      return null;
+    }
+
+    try {
+      saveToHistory();
+      const created = await elementsApi.createRoom({
+        floor_plan_id: parseInt(floorPlanId, 10),
+        name: roomDraft.name || null,
+        room_type: roomDraft.type || 'базовое',
+        max_occupancy: roomDraft.maxOccupancy !== '' ? Number(roomDraft.maxOccupancy) : null,
+        room_number: null,
+        boundary_points: [
+          [normalized.x, normalized.y],
+          [normalized.x + normalized.width, normalized.y],
+          [normalized.x + normalized.width, normalized.y + normalized.height],
+          [normalized.x, normalized.y + normalized.height],
+        ],
+        length_m: pxToMeters(normalized.width, floorPlan?.scale_factor),
+        width_m: pxToMeters(normalized.height, floorPlan?.scale_factor),
+      });
+      setRooms((prev) => [...prev, created]);
+      setSelectedElement({ type: 'room', id: created.id, data: created });
+      setSelectedElements([{ type: 'room', id: created.id }]);
+      setHasUnsavedChanges(true);
+      setSelectedTool('select');
+      await fetchPipelineState();
+      return created;
+    } catch (error) {
+      console.error('Error creating room:', error);
+      alert('Не удалось добавить помещение.');
+      return null;
+    }
+  }, [fetchPipelineState, floorPlan?.scale_factor, floorPlanId, roomDraft.maxOccupancy, roomDraft.name, roomDraft.type, saveToHistory]);
+
   const handleCanvasElementEnter = useCallback((type, id, e, cursor = 'pointer') => {
     clearHoverCloseTimeout();
     if (e?.target?.getStage) {
@@ -4669,6 +7014,12 @@ function FloorPlanEditor() {
     }
     scheduleHoverPanelClose();
   }, [scheduleHoverPanelClose]);
+  const visibleSignalInstruments = useMemo(
+    () => getBranchSignalInstruments(signalInstruments, currentSharedSignalSystem).map((instrument) => (
+      attachEquipmentName(instrument, instrument.name || getSignalInstrumentDefinition(instrument.instrument_type).label)
+    )),
+    [attachEquipmentName, currentSharedSignalSystem, signalInstruments],
+  );
 
   const getCurrentElementBounds = useCallback((element) => {
     if (!element) {
@@ -4754,17 +7105,25 @@ function FloorPlanEditor() {
     }
     if (element.type === 'fire-alarm') {
       const alarm = getFireAlarmCurrentGeometry('fire-alarms', element.id);
-      if (!alarm) {
-        return null;
-      }
-      return { x: alarm.x - 12, y: alarm.y - 12, width: 24, height: 24 };
+      return alarm ? getFireAlarmBounds(alarm) : null;
     }
     if (element.type === 'new-fire-alarm') {
       const alarm = getFireAlarmCurrentGeometry('new-fire-alarms', element.id);
-      if (!alarm) {
+      return alarm ? getFireAlarmBounds(alarm) : null;
+    }
+    if (element.type === 'soue-device') {
+      const device = getSoueDeviceCurrentGeometry('soue-devices', element.id);
+      if (!device) {
         return null;
       }
-      return { x: alarm.x - 12, y: alarm.y - 12, width: 24, height: 24 };
+      return getSoueDeviceBounds({ ...device, rotation_deg: getSoueDisplayRotation(device) });
+    }
+    if (element.type === 'new-soue-device') {
+      const device = getSoueDeviceCurrentGeometry('new-soue-devices', element.id);
+      if (!device) {
+        return null;
+      }
+      return getSoueDeviceBounds({ ...device, rotation_deg: getSoueDisplayRotation(device) });
     }
     if (element.type === 'signal-instrument') {
       const instrument = visibleSignalInstruments.find((item) => item.id === element.id);
@@ -4778,7 +7137,7 @@ function FloorPlanEditor() {
       return getBoundingBox(room.boundary_points);
     }
     return null;
-  }, [newWalls, walls, modifiedWalls, floorPlan?.scale_factor, doors, windows, newDoors, newWindows, stairs, newStairs, rooms, getOpeningCurrentGeometry, getStairCurrentGeometry, getFireAlarmCurrentGeometry, visibleSignalInstruments]);
+  }, [newWalls, walls, modifiedWalls, floorPlan?.scale_factor, doors, windows, newDoors, newWindows, stairs, newStairs, rooms, getOpeningCurrentGeometry, getStairCurrentGeometry, getFireAlarmCurrentGeometry, getSoueDeviceCurrentGeometry, getSoueDisplayRotation, visibleSignalInstruments]);
 
   const selectionViewStep = interactionViewStep;
 
@@ -4828,10 +7187,18 @@ function FloorPlanEditor() {
     ...((selectionViewStep === 'fire_alarms' || selectionViewStep === 'devices_cables')
       ? newFireAlarms.map((alarm) => ({ type: 'new-fire-alarm', id: alarm.id }))
       : []),
-    ...(selectionViewStep === 'devices_cables'
+    ...((selectionViewStep === 'soue_devices' || selectionViewStep === 'soue_cables')
+      ? branchSoueDevices
+        .filter((device) => !deletedElements.some((del) => del.type === 'soue-devices' && del.id === device.id))
+        .map((device) => ({ type: 'soue-device', id: device.id }))
+      : []),
+    ...((selectionViewStep === 'soue_devices' || selectionViewStep === 'soue_cables')
+      ? newSoueDevices.map((device) => ({ type: 'new-soue-device', id: device.id }))
+      : []),
+    ...(['signal_instruments', 'fire_alarms', 'devices_cables', 'soue_devices', 'soue_cables'].includes(selectionViewStep)
       ? visibleSignalInstruments.map((instrument) => ({ type: 'signal-instrument', id: instrument.id }))
       : []),
-  ]), [selectionViewStep, newWalls, walls, newStairs, stairs, newDoors, doors, newWindows, windows, rooms, fireAlarms, newFireAlarms, deletedElements, visibleSignalInstruments]);
+  ]), [selectionViewStep, newWalls, walls, newStairs, stairs, newDoors, doors, newWindows, windows, rooms, fireAlarms, newFireAlarms, branchSoueDevices, newSoueDevices, deletedElements, visibleSignalInstruments]);
 
   const selectedGroupBounds = useMemo(() => {
     if (!selectedElements.length) {
@@ -5099,7 +7466,8 @@ function FloorPlanEditor() {
     if (!isBackground) {
       return;
     }
-    if (selectionLockActive && !(mergeModeActive && selectedTool === 'multi-select')) {
+    const allowRoomCreation = selectedTool === 'add-room' && interactionViewStep === 'rooms';
+    if (selectionLockActive && !(mergeModeActive && selectedTool === 'multi-select') && !allowRoomCreation) {
       clearCanvasSelection();
       closeHoverPanel();
       return;
@@ -5124,11 +7492,15 @@ function FloorPlanEditor() {
       setIsSelecting(true);
       setSelectionRect({ x: point.x, y: point.y, width: 0, height: 0 });
     }
-    if (selectedTool === 'room-zone' && viewStep === 'rooms' && selectedElement?.type === 'room') {
+    if (selectedTool === 'add-room' && interactionViewStep === 'rooms') {
+      setIsRoomCreationDrawing(true);
+      setRoomCreationRect({ x: point.x, y: point.y, width: 0, height: 0 });
+    }
+    if (selectedTool === 'room-zone' && interactionViewStep === 'rooms' && selectedElement?.type === 'room') {
       setIsRoomZoneDrawing(true);
       setRoomZoneRect({ x: point.x, y: point.y, width: 0, height: 0 });
     }
-  }, [getScaledPointer, selectedTool, selectedElement, viewStep, selectionLockActive, mergeModeActive, clearCanvasSelection, closeHoverPanel, userZoom, stagePanOffset.x, stagePanOffset.y]);
+  }, [getScaledPointer, selectedTool, selectedElement, interactionViewStep, selectionLockActive, mergeModeActive, clearCanvasSelection, closeHoverPanel, userZoom, stagePanOffset.x, stagePanOffset.y]);
 
   const handleStageMouseUp = useCallback(async () => {
     if (isStagePanning) {
@@ -5138,7 +7510,7 @@ function FloorPlanEditor() {
     if (isSelecting && selectionRect) {
       const normalized = normalizeRect(selectionRect);
       const selectionSource = mergeModeActive
-        ? allSelectableElements.filter((element) => element.type === 'fire-alarm' || element.type === 'new-fire-alarm')
+        ? allSelectableElements.filter((element) => mergeSelectableElementTypes.has(element.type))
         : allSelectableElements;
       const selected = selectionSource
         .filter((element) => rectsIntersect(normalized, getCurrentElementBounds(element)))
@@ -5163,19 +7535,14 @@ function FloorPlanEditor() {
           : only.type === 'stair' ? stairs
           : only.type === 'room' ? rooms
           : only.type === 'new-fire-alarm' ? newFireAlarms
+          : only.type === 'fire-alarm' ? fireAlarms
+          : only.type === 'new-soue-device' ? newSoueDevices
+          : only.type === 'soue-device' ? soueDevices
           : fireAlarms;
         const data = source.find((item) => item.id === only.id);
         setSelectedElement({ type: only.type, id: only.id, data: data || null });
       } else {
-        setSelectedElement(mergeModeActive && mergeInstrumentId
-          ? visibleSignalInstruments.find((item) => item.id === mergeInstrumentId)
-            ? {
-              type: 'signal-instrument',
-              id: mergeInstrumentId,
-              data: visibleSignalInstruments.find((item) => item.id === mergeInstrumentId) || null,
-            }
-            : null
-          : null);
+        setSelectedElement(null);
       }
       setSelectionRect(null);
       setIsSelecting(false);
@@ -5204,6 +7571,15 @@ function FloorPlanEditor() {
       setRoomZoneRect(null);
       setIsRoomZoneDrawing(false);
     }
+
+    if (isRoomCreationDrawing && roomCreationRect && interactionViewStep === 'rooms') {
+      const normalized = normalizeRect(roomCreationRect);
+      if (normalized && normalized.width > 2 && normalized.height > 2) {
+        await handleCreateRoomFromRect(normalized);
+      }
+      setRoomCreationRect(null);
+      setIsRoomCreationDrawing(false);
+    }
   }, [
     isStagePanning,
     isSelecting,
@@ -5211,6 +7587,7 @@ function FloorPlanEditor() {
     allSelectableElements,
     getCurrentElementBounds,
     mergeInstrumentId,
+    mergeSelectableElementTypes,
     mergeModeActive,
     newWalls,
     walls,
@@ -5228,7 +7605,11 @@ function FloorPlanEditor() {
     visibleSignalInstruments,
     isRoomZoneDrawing,
     roomZoneRect,
+    isRoomCreationDrawing,
+    roomCreationRect,
     selectedElement,
+    interactionViewStep,
+    handleCreateRoomFromRect,
     updateRoomBoundary,
     endStagePan,
   ]);
@@ -5263,50 +7644,119 @@ function FloorPlanEditor() {
     { key: 'rooms', title: '3. Помещения' },
     { key: 'zkspc', title: '4. ЗКСПС' },
   ];
+  const normalizedPipelineSteps = pipelineSteps.map((step) => ({
+    ...step,
+    title: ({
+      original: '0. Оригинал',
+      walls: '1. Стены',
+      openings: '2. Проемы',
+      rooms: '3. Помещения',
+      zkspc: '4. ЗКСПС',
+      [GENERAL_DATA_STEP_KEY]: '10. Общие данные',
+      [GENERAL_INSTRUCTIONS_STEP_KEY]: '11. Общие указания',
+      [POWER_CONSUMPTION_STEP_KEY]: '12. Расчет токопотребления',
+      [EQUIPMENT_SPECIFICATION_STEP_KEY]: '13. Спецификация',
+      [ADDITIONAL_INFO_STEP_KEY]: '14. Доп. сведения',
+    }[step.key] || step.title),
+  }));
   const getStepStatus = (stepKey) => pipelineState?.steps?.[stepKey]?.status || 'draft';
   const wallsValidated = getStepStatus('walls') === 'validated';
   const openingsValidated = getStepStatus('openings') === 'validated';
   const roomsValidated = getStepStatus('rooms') === 'validated';
   const zkspcValidated = getStepStatus('zkspc') === 'validated';
   const canSubmitRecognitionFeedback = Boolean(recognitionMeta?.id) && recognitionMeta?.status === 'completed';
-  const currentBranchState = pipelineState?.branches?.[currentSignalSystem] || { active_step: 'fire_alarms', steps: {} };
-  const fireAlarmStepUnlocked = zkspcValidated;
-  const devicesCablesStepUnlocked = zkspcValidated;
-  const editorSteps = [
-    ...pipelineSteps,
-    { key: 'fire_alarms', title: '5. Пожарные извещатели', editorOnly: true },
-    { key: 'devices_cables', title: '6. Приборы и кабели', editorOnly: true },
-  ];
+  const wallsFeedbackState = stepFeedbackState.walls;
+  const openingsFeedbackState = stepFeedbackState.openings;
+  const wallsFeedbackRevision = Number(pipelineState?.steps?.walls?.revision || 0);
+  const openingsFeedbackRevision = Number(pipelineState?.steps?.openings?.revision || 0);
+  const wallsFeedbackAlreadySubmitted = Boolean(
+    pipelineState?.steps?.walls?.feedback_example_id
+    && pipelineState?.steps?.walls?.feedback_submitted_revision === pipelineState?.steps?.walls?.revision
+  );
+  const openingsFeedbackAlreadySubmitted = Boolean(
+    pipelineState?.steps?.openings?.feedback_example_id
+    && pipelineState?.steps?.openings?.feedback_submitted_revision === pipelineState?.steps?.openings?.revision
+  );
+  const canSubmitWallsTrainingFeedback = wallsValidated && wallsFeedbackRevision > 0 && !draftStateByStep.walls && !wallsFeedbackAlreadySubmitted;
+  const canSubmitOpeningsTrainingFeedback = openingsValidated && openingsFeedbackRevision > 0 && !draftStateByStep.openings && !openingsFeedbackAlreadySubmitted;
+  const currentBranchState = useMemo(
+    () => buildCompositeBranchState(
+      pipelineState?.branches?.[COMMON_SIGNAL_SYSTEM],
+      pipelineState?.branches?.[currentSignalSystem],
+      { zkspcValidated },
+    ),
+    [pipelineState?.branches, currentSignalSystem, zkspcValidated],
+  );
+  const signalInstrumentsStepUnlocked = currentBranchState.steps.signal_instruments.status !== 'locked';
+  const fireAlarmStepUnlocked = currentBranchState.steps.fire_alarms.status !== 'locked';
+  const devicesCablesStepUnlocked = currentBranchState.steps.devices_cables.status !== 'locked';
+  const soueDevicesStepUnlocked = currentBranchState.steps.soue_devices.status !== 'locked';
+  const soueCablesStepUnlocked = currentBranchState.steps.soue_cables.status !== 'locked';
+  const generalDataStepUnlocked = soueCablesStepUnlocked;
+  const generalInstructionsStepUnlocked = soueCablesStepUnlocked;
+  const powerConsumptionStepUnlocked = soueCablesStepUnlocked;
+  const equipmentSpecificationStepUnlocked = soueCablesStepUnlocked;
+  const additionalInfoStepUnlocked = soueCablesStepUnlocked;
+  const allEditorSteps = [
+    ...normalizedPipelineSteps,
+    { key: 'signal_instruments', title: '5. Приборы', editorOnly: true },
+    { key: 'fire_alarms', title: '6. СПС: извещатели', editorOnly: true },
+    { key: 'devices_cables', title: '7. СПС: кабели', editorOnly: true },
+    { key: 'soue_devices', title: '8. СОУЭ: табло и сирены', editorOnly: true },
+    { key: 'soue_cables', title: '9. СОУЭ: кабели', editorOnly: true },
+    { key: GENERAL_DATA_STEP_KEY, title: '10. Общие данные', editorOnly: true },
+    { key: GENERAL_INSTRUCTIONS_STEP_KEY, title: '11. Общие указания', editorOnly: true },
+    { key: POWER_CONSUMPTION_STEP_KEY, title: '12. Расчет токопотребления', editorOnly: true },
+    { key: EQUIPMENT_SPECIFICATION_STEP_KEY, title: '13. Спецификация', editorOnly: true },
+    { key: ADDITIONAL_INFO_STEP_KEY, title: '14. Доп. сведения', editorOnly: true },
+  ].map((step) => ({
+    ...step,
+    title: ({
+      signal_instruments: '5. Приборы',
+      fire_alarms: '6. СПС: извещатели',
+      devices_cables: '7. СПС: кабели',
+      soue_devices: '8. СОУЭ: табло и сирены',
+      soue_cables: '9. СОУЭ: кабели',
+    }[step.key] || step.title),
+  }));
   const activePipelineStep = zkspcValidated
-    ? (currentBranchState?.active_step || 'fire_alarms')
+    ? (currentBranchState.active_step || 'signal_instruments')
     : roomsValidated
       ? 'zkspc'
       : (pipelineState?.active_step || 'walls');
   const currentViewStep = viewStep || activePipelineStep || 'original';
+  const isGeneralDataView = currentViewStep === GENERAL_DATA_STEP_KEY;
+  const isGeneralInstructionsView = currentViewStep === GENERAL_INSTRUCTIONS_STEP_KEY;
+  const isPowerConsumptionCalculationView = currentViewStep === POWER_CONSUMPTION_STEP_KEY;
+  const isEquipmentSpecificationView = currentViewStep === EQUIPMENT_SPECIFICATION_STEP_KEY;
+  const isAdditionalInfoView = currentViewStep === ADDITIONAL_INFO_STEP_KEY;
+  const hideEditorSidePanels = isGeneralDataView || isGeneralInstructionsView || isPowerConsumptionCalculationView || isEquipmentSpecificationView || isAdditionalInfoView;
   useEffect(() => {
-    if (currentViewStep !== 'devices_cables' && mergeInstrumentId !== null) {
+    if (!['devices_cables', 'soue_cables'].includes(currentViewStep) && mergeInstrumentId !== null) {
       setMergeInstrumentId(null);
       setSelectedElements([]);
     }
   }, [currentViewStep, mergeInstrumentId]);
-  const useArchitectBlack = ['rooms', 'zkspc', 'fire_alarms', 'devices_cables'].includes(currentViewStep);
-  const isPostZkspcView = currentViewStep === 'fire_alarms' || currentViewStep === 'devices_cables';
+  const useArchitectBlack = ['rooms', 'zkspc', 'signal_instruments', 'fire_alarms', 'devices_cables', 'soue_devices', 'soue_cables'].includes(currentViewStep);
+  const isPostZkspcView = ['signal_instruments', 'fire_alarms', 'devices_cables', 'soue_devices', 'soue_cables'].includes(currentViewStep);
   const showBackgroundImage = ['original', 'walls', 'openings', 'rooms'].includes(currentViewStep);
   const showWallsOnCanvas = currentViewStep !== 'original' && (currentViewStep === 'walls' || wallsValidated);
   const wallsInteractive = currentViewStep === 'walls';
-  const showStairsOnCanvas = currentViewStep === 'walls' || currentViewStep === 'fire_alarms' || currentViewStep === 'devices_cables';
-  const showOpeningsOnCanvas = (currentViewStep === 'openings' || currentViewStep === 'rooms' || currentViewStep === 'zkspc' || currentViewStep === 'fire_alarms' || currentViewStep === 'devices_cables')
+  const showStairsOnCanvas = currentViewStep === 'walls' || currentViewStep === 'signal_instruments' || currentViewStep === 'fire_alarms' || currentViewStep === 'devices_cables' || currentViewStep === 'soue_devices' || currentViewStep === 'soue_cables';
+  const showOpeningsOnCanvas = (currentViewStep === 'openings' || currentViewStep === 'rooms' || currentViewStep === 'zkspc' || currentViewStep === 'signal_instruments' || currentViewStep === 'fire_alarms' || currentViewStep === 'devices_cables' || currentViewStep === 'soue_devices' || currentViewStep === 'soue_cables')
     && (currentViewStep === 'openings' || openingsValidated);
   const showRoomsOnCanvas = currentViewStep === 'rooms' || currentViewStep === 'zkspc';
   const showZkspcOverlayOnCanvas = currentViewStep === 'zkspc';
   const showDimensionsOnCanvas = currentViewStep === 'walls';
   const showFireAlarmsOnCanvas = currentViewStep === 'fire_alarms' || currentViewStep === 'devices_cables';
-  const showCableRoutesOnCanvas = currentViewStep === 'devices_cables';
-  const showSignalInstrumentsOnCanvas = currentViewStep === 'devices_cables';
+  const showSoueDevicesOnCanvas = currentViewStep === 'soue_devices' || currentViewStep === 'soue_cables';
+  const showCableRoutesOnCanvas = currentViewStep === 'devices_cables' || currentViewStep === 'soue_cables';
+  const showSignalInstrumentsOnCanvas = ['signal_instruments', 'fire_alarms', 'devices_cables', 'soue_devices', 'soue_cables'].includes(currentViewStep);
   const showRoomsSidebar = currentViewStep === 'rooms';
   const showZkspcSidebar = currentViewStep === 'zkspc';
   const showFireAlarmSidebar = currentViewStep === 'fire_alarms';
-  const showDevicesCablesSidebar = currentViewStep === 'devices_cables';
+  const showSoueSidebar = currentViewStep === 'soue_devices';
+  const showDevicesCablesSidebar = currentViewStep === 'signal_instruments' || currentViewStep === 'devices_cables' || currentViewStep === 'soue_cables';
   const visibleWalls = walls.filter((wall) => !deletedElements.some((del) => del.type === 'walls' && del.id === wall.id));
   const visibleStairs = stairs.filter((stair) => !deletedElements.some((del) => del.type === 'stairs' && del.id === stair.id));
   const visibleDoors = doors.filter((door) => !deletedElements.some((del) => del.type === 'doors' && del.id === door.id));
@@ -5343,29 +7793,139 @@ function FloorPlanEditor() {
   const visiblePersistedFireAlarms = useMemo(() => (
     branchFireAlarms
       .filter((alarm) => !deletedElements.some((del) => del.type === 'fire-alarms' && del.id === alarm.id))
-      .map((alarm) => ({ kind: 'fire-alarms', alarm: getFireAlarmCurrentGeometry('fire-alarms', alarm.id, alarm) }))
+      .map((alarm) => ({
+        kind: 'fire-alarms',
+        alarm: attachEquipmentName(getFireAlarmCurrentGeometry('fire-alarms', alarm.id, alarm)),
+      }))
       .filter((entry) => entry.alarm)
-  ), [branchFireAlarms, deletedElements, getFireAlarmCurrentGeometry]);
+  ), [attachEquipmentName, branchFireAlarms, deletedElements, getFireAlarmCurrentGeometry]);
   const visibleNewFireAlarms = useMemo(() => (
     newFireAlarms
-      .map((alarm) => ({ kind: 'new-fire-alarms', alarm: getFireAlarmCurrentGeometry('new-fire-alarms', alarm.id, alarm) }))
+      .map((alarm) => ({
+        kind: 'new-fire-alarms',
+        alarm: attachEquipmentName(getFireAlarmCurrentGeometry('new-fire-alarms', alarm.id, alarm)),
+      }))
       .filter((entry) => entry.alarm)
-  ), [newFireAlarms, getFireAlarmCurrentGeometry]);
+  ), [attachEquipmentName, newFireAlarms, getFireAlarmCurrentGeometry]);
   const visibleFireAlarmItems = useMemo(
     () => [...visiblePersistedFireAlarms, ...visibleNewFireAlarms],
     [visiblePersistedFireAlarms, visibleNewFireAlarms],
+  );
+  const visibleFireAlarmLookup = useMemo(
+    () => Object.fromEntries(
+      visibleFireAlarmItems
+        .filter(({ alarm }) => alarm?.id !== null && alarm?.id !== undefined)
+        .map(({ alarm }) => [alarm.id, alarm]),
+    ),
+    [visibleFireAlarmItems],
   );
   const fireAlarmNumberMap = buildDisplayNumberMap(visibleFireAlarmItems.map((entry) => entry.alarm));
   const getFireAlarmCode = useCallback((alarm, overrides = {}) => (
     getFireAlarmDisplayCode(alarm, floorPlan?.floor_number, fireAlarmNumberMap[alarm.id] ?? 1, overrides)
   ), [fireAlarmNumberMap, floorPlan?.floor_number]);
-  const visibleSignalInstruments = useMemo(
-    () => getBranchSignalInstruments(signalInstruments, currentSignalSystem),
-    [signalInstruments, currentSignalSystem],
+  const visiblePersistedSoueDevices = useMemo(() => (
+    branchSoueDevices
+      .filter((device) => !deletedElements.some((del) => del.type === 'soue-devices' && del.id === device.id))
+      .map((device) => ({
+        kind: 'soue-devices',
+        device: attachEquipmentName(
+          getSoueDeviceCurrentGeometry('soue-devices', device.id, device),
+          device.device_model || '',
+        ),
+      }))
+      .filter((entry) => entry.device)
+  ), [attachEquipmentName, branchSoueDevices, deletedElements, getSoueDeviceCurrentGeometry]);
+  const visibleNewSoueDevices = useMemo(() => (
+    newSoueDevices
+      .map((device) => ({
+        kind: 'new-soue-devices',
+        device: attachEquipmentName(
+          getSoueDeviceCurrentGeometry('new-soue-devices', device.id, device),
+          device.device_model || '',
+        ),
+      }))
+      .filter((entry) => entry.device)
+  ), [attachEquipmentName, newSoueDevices, getSoueDeviceCurrentGeometry]);
+  const visibleSoueItems = useMemo(
+    () => [...visiblePersistedSoueDevices, ...visibleNewSoueDevices],
+    [visiblePersistedSoueDevices, visibleNewSoueDevices],
   );
+  const fireAlarmEquipmentSummary = useMemo(() => (
+    Object.values(
+      visibleFireAlarmItems.reduce((accumulator, { alarm }) => {
+        if (!alarm) {
+          return accumulator;
+        }
+        const key = alarm.equipment_id ? `equipment-${alarm.equipment_id}` : `device-${alarm.device_type}`;
+        if (!accumulator[key]) {
+          accumulator[key] = {
+            key,
+            label: getEquipmentNameById(alarm.equipment_id, getFireAlarmDisplayLabel(alarm.device_type)),
+            count: 0,
+          };
+        }
+        accumulator[key].count += 1;
+        return accumulator;
+      }, {}),
+    ).sort((left, right) => right.count - left.count || left.label.localeCompare(right.label))
+  ), [getEquipmentNameById, visibleFireAlarmItems]);
+  const soueEquipmentSummary = useMemo(() => (
+    Object.values(
+      visibleSoueItems.reduce((accumulator, { device }) => {
+        if (!device) {
+          return accumulator;
+        }
+        const key = device.equipment_id ? `equipment-${device.equipment_id}` : `device-${device.device_type}`;
+        if (!accumulator[key]) {
+          accumulator[key] = {
+            key,
+            label: getEquipmentNameById(
+              device.equipment_id,
+              device.device_model || (device.device_type === 'siren' ? 'Сирена' : 'Табло'),
+            ),
+            count: 0,
+          };
+        }
+        accumulator[key].count += 1;
+        return accumulator;
+      }, {}),
+    ).sort((left, right) => right.count - left.count || left.label.localeCompare(right.label))
+  ), [getEquipmentNameById, visibleSoueItems]);
+  const soueDeviceNumberMaps = useMemo(() => {
+    const sirenMap = {};
+    const exitSignMap = {};
+    let sirenIndex = 1;
+    let exitSignIndex = 1;
+    visibleSoueItems.forEach(({ device }) => {
+      if (!device?.id) {
+        return;
+      }
+      if (device.device_type === 'siren') {
+        sirenMap[device.id] = sirenIndex;
+        sirenIndex += 1;
+        return;
+      }
+      exitSignMap[device.id] = exitSignIndex;
+      exitSignIndex += 1;
+    });
+    return { sirenMap, exitSignMap };
+  }, [visibleSoueItems]);
+  const getSoueDeviceCode = useCallback((device, overrides = {}) => {
+    if (!device) {
+      return null;
+    }
+    const fallbackNumber = device.device_type === 'siren'
+      ? (soueDeviceNumberMaps.sirenMap[device.id] ?? 1)
+      : (soueDeviceNumberMaps.exitSignMap[device.id] ?? 1);
+    return getSoueDeviceDisplayCode(device, floorPlan?.floor_number, fallbackNumber, overrides);
+  }, [floorPlan?.floor_number, soueDeviceNumberMaps.exitSignMap, soueDeviceNumberMaps.sirenMap]);
   const visibleCableRoutes = useMemo(
-    () => getBranchCableRoutes(cableRoutes, currentSignalSystem),
-    [cableRoutes, currentSignalSystem],
+    () => getBranchCableRoutes(
+      cableRoutes,
+      currentViewStep === 'soue_cables' ? currentSharedSignalSystem : currentSignalSystem,
+      currentViewStep === 'soue_cables' ? 'soue' : 'sps',
+    ),
+    [cableRoutes, currentSharedSignalSystem, currentSignalSystem, currentViewStep],
   );
   useEffect(() => {
     if (mergeInstrumentId && !visibleSignalInstruments.some((instrument) => instrument.id === mergeInstrumentId)) {
@@ -5373,14 +7933,129 @@ function FloorPlanEditor() {
       setSelectedElements([]);
     }
   }, [mergeInstrumentId, visibleSignalInstruments]);
-  const signalBranchSummary = useMemo(
-    () => getSignalBranchSummary({
-      fireAlarms: visibleFireAlarmItems.map((entry) => entry.alarm),
-      cableRoutes: visibleCableRoutes,
-      systemType: currentSignalSystem,
-    }),
-    [visibleFireAlarmItems, visibleCableRoutes, currentSignalSystem],
+  const spsVisibleCableRoutes = useMemo(
+    () => getBranchCableRoutes(cableRoutes, currentSignalSystem, 'sps'),
+    [cableRoutes, currentSignalSystem],
   );
+  const soueVisibleCableRoutes = useMemo(
+    () => getBranchCableRoutes(cableRoutes, currentSharedSignalSystem, 'soue'),
+    [cableRoutes, currentSharedSignalSystem],
+  );
+  const spsBranchSummary = useMemo(
+    () => ({
+      ...getSignalBranchSummary({
+        fireAlarms: visibleFireAlarmItems.map((entry) => entry.alarm),
+        cableRoutes: spsVisibleCableRoutes,
+        systemType: currentSignalSystem,
+        subsystemType: 'sps',
+      }),
+      detectorCount: visibleFireAlarmItems.length,
+    }),
+    [visibleFireAlarmItems, spsVisibleCableRoutes, currentSignalSystem],
+  );
+  const soueBranchSummary = useMemo(
+    () => ({
+      ...getSignalBranchSummary({
+        fireAlarms: visibleSoueItems.map((entry) => entry.device),
+        cableRoutes: soueVisibleCableRoutes,
+        systemType: currentSharedSignalSystem,
+        subsystemType: 'soue',
+      }),
+      detectorCount: visibleSoueItems.length,
+    }),
+    [visibleSoueItems, soueVisibleCableRoutes, currentSharedSignalSystem],
+  );
+  const spsStepSummaryItems = useMemo(() => {
+    const detectorItems = fireAlarmEquipmentSummary.length > 0
+      ? fireAlarmEquipmentSummary.map((item) => ({
+        key: item.key,
+        label: item.label,
+        value: item.count,
+      }))
+      : [{ key: 'devices', label: 'Извещателей', value: spsBranchSummary.detectorCount }];
+    return [
+      ...detectorItems,
+      {
+        key: 'cable',
+        label: getSelectedProjectCableName('sps_cable', 'Кабеля'),
+        value: formatCableMeters(spsBranchSummary.cableLengthM),
+      },
+    ];
+  }, [fireAlarmEquipmentSummary, getSelectedProjectCableName, spsBranchSummary.cableLengthM, spsBranchSummary.detectorCount]);
+  const soueStepSummaryItems = useMemo(() => {
+    const deviceItems = soueEquipmentSummary.length > 0
+      ? soueEquipmentSummary.map((item) => ({
+        key: item.key,
+        label: item.label,
+        value: item.count,
+      }))
+      : [{ key: 'devices', label: 'Устройств СОУЭ', value: soueBranchSummary.detectorCount }];
+    return [
+      ...deviceItems,
+      {
+        key: 'cable',
+        label: getSelectedProjectCableName('soue_cable', 'Кабеля'),
+        value: formatCableMeters(soueBranchSummary.cableLengthM),
+      },
+    ];
+  }, [getSelectedProjectCableName, soueBranchSummary.cableLengthM, soueBranchSummary.detectorCount, soueEquipmentSummary]);
+  const isSignalInstrumentsView = currentViewStep === 'signal_instruments';
+  const isSoueCableView = currentViewStep === 'soue_cables';
+  const devicesCablesMergeTypes = isSoueCableView
+    ? new Set(['soue-device', 'new-soue-device'])
+    : new Set(['fire-alarm', 'new-fire-alarm']);
+  const devicesCablesMergeSelectionCount = selectedElements.filter((item) => devicesCablesMergeTypes.has(item.type)).length;
+  const devicesCablesSidebarTitle = isSignalInstrumentsView
+    ? '\u041f\u0440\u0438\u0431\u043e\u0440\u044b'
+    : (isSoueCableView
+      ? '\u0421\u041e\u0423\u042d: \u043a\u0430\u0431\u0435\u043b\u0438'
+      : '\u0421\u041f\u0421: \u043a\u0430\u0431\u0435\u043b\u0438');
+  const devicesCablesMergeSelectionLabel = isSoueCableView
+    ? '\u0412\u044b\u0431\u0440\u0430\u043d\u043e \u0443\u0441\u0442\u0440\u043e\u0439\u0441\u0442\u0432 \u0421\u041e\u0423\u042d'
+    : '\u0412\u044b\u0431\u0440\u0430\u043d\u043e \u0438\u0437\u0432\u0435\u0449\u0430\u0442\u0435\u043b\u0435\u0439';
+  const devicesCablesMergeButtonLabel = isSoueCableView
+    ? '\u0421\u0432\u0435\u0441\u0442\u0438 \u0443\u0441\u0442\u0440\u043e\u0439\u0441\u0442\u0432\u0430 \u0421\u041e\u0423\u042d'
+    : '\u0421\u0432\u0435\u0441\u0442\u0438 \u0438\u0437\u0432\u0435\u0449\u0430\u0442\u0435\u043b\u0438';
+  const devicesCablesActionButtons = isSignalInstrumentsView
+    ? [
+      {
+        key: 'save-instruments',
+        label: '\u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c',
+        disabled: !visibleSignalInstruments.length || signalBranchActionLoading,
+        onClick: handleSaveSignalInstrumentsStep,
+      },
+    ]
+    : currentViewStep === 'devices_cables'
+      ? [
+        {
+          key: 'recalculate-sps-routes',
+          label: signalBranchActionLoading ? '\u041f\u0435\u0440\u0435\u0441\u0447\u0435\u0442...' : '\u041f\u0435\u0440\u0435\u0441\u0447\u0438\u0442\u0430\u0442\u044c',
+          disabled: !visibleSignalInstruments.length || signalBranchActionLoading,
+          onClick: () => refreshCableRoutes(currentSignalSystem, 'sps'),
+        },
+        {
+          key: 'save-sps-routes',
+          label: '\u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c',
+          disabled: !visibleSignalInstruments.length || signalBranchActionLoading,
+          onClick: () => handleSaveCableRoutesStep('sps'),
+        },
+      ]
+      : isSoueCableView
+        ? [
+          {
+            key: 'recalculate-soue-routes',
+            label: signalBranchActionLoading ? '\u041f\u0435\u0440\u0435\u0441\u0447\u0435\u0442...' : '\u041f\u0435\u0440\u0435\u0441\u0447\u0438\u0442\u0430\u0442\u044c',
+            disabled: !visibleSignalInstruments.length || signalBranchActionLoading,
+            onClick: () => refreshCableRoutes(currentSignalSystem, 'soue'),
+          },
+          {
+            key: 'save-soue-routes',
+            label: '\u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c',
+            disabled: !visibleSignalInstruments.length || signalBranchActionLoading,
+            onClick: () => handleSaveCableRoutesStep('soue'),
+          },
+        ]
+        : [];
   const doorNumberMap = Object.fromEntries(
     doors
       .filter((door) => !deletedElements.some((del) => del.type === 'doors' && del.id === door.id))
@@ -5471,23 +8146,373 @@ function FloorPlanEditor() {
     if (status === 'locked') return '#8e877d';
     return '#8e877d';
   };
+  const getEditorStepPresentation = (step) => {
+    const status = step.key === 'original'
+      ? 'validated'
+      : step.key === 'signal_instruments'
+        ? (currentBranchState?.steps?.signal_instruments?.status || (signalInstrumentsStepUnlocked ? 'draft' : 'locked'))
+        : step.key === 'fire_alarms'
+          ? (currentBranchState?.steps?.fire_alarms?.status || (fireAlarmStepUnlocked ? 'draft' : 'locked'))
+      : step.key === 'devices_cables'
+        ? (currentBranchState?.steps?.devices_cables?.status || (devicesCablesStepUnlocked ? 'draft' : 'locked'))
+      : step.key === 'soue_devices'
+          ? (currentBranchState?.steps?.soue_devices?.status || (soueDevicesStepUnlocked ? 'draft' : 'locked'))
+          : step.key === 'soue_cables'
+            ? (currentBranchState?.steps?.soue_cables?.status || (soueCablesStepUnlocked ? 'draft' : 'locked'))
+            : step.key === GENERAL_DATA_STEP_KEY
+              ? (generalDataStepUnlocked
+                ? (generalDataDirty ? 'stale' : (generalData ? 'validated' : 'draft'))
+                : 'locked')
+            : step.key === GENERAL_INSTRUCTIONS_STEP_KEY
+              ? (generalInstructionsStepUnlocked
+                ? (generalInstructionsDirty ? 'stale' : (generalInstructions ? 'validated' : 'draft'))
+                : 'locked')
+            : step.key === POWER_CONSUMPTION_STEP_KEY
+              ? (powerConsumptionStepUnlocked
+                ? (powerConsumptionCalculationDirty ? 'stale' : (powerConsumptionCalculation ? 'validated' : 'draft'))
+                : 'locked')
+            : step.key === EQUIPMENT_SPECIFICATION_STEP_KEY
+              ? (equipmentSpecificationStepUnlocked
+                ? (equipmentSpecificationDirty ? 'stale' : (equipmentSpecification ? 'validated' : 'draft'))
+                : 'locked')
+            : step.key === ADDITIONAL_INFO_STEP_KEY
+              ? (additionalInfoStepUnlocked
+                ? (additionalInfoDirty ? 'stale' : (additionalInfo && !additionalInfo.is_empty ? 'validated' : 'draft'))
+                : 'locked')
+                : getStepStatus(step.key);
+    const canDetect = step.key === 'walls'
+      || (step.key === 'openings' && wallsValidated)
+      || (step.key === 'rooms' && wallsValidated && openingsValidated)
+      || (step.key === 'zkspc' && roomsValidated);
+    const canOpen = step.key === 'signal_instruments'
+      ? signalInstrumentsStepUnlocked
+      : step.key === 'fire_alarms'
+        ? fireAlarmStepUnlocked
+      : step.key === 'devices_cables'
+          ? devicesCablesStepUnlocked
+          : step.key === 'soue_devices'
+            ? soueDevicesStepUnlocked
+            : step.key === 'soue_cables'
+              ? soueCablesStepUnlocked
+              : step.key === GENERAL_DATA_STEP_KEY
+                ? generalDataStepUnlocked
+              : step.key === GENERAL_INSTRUCTIONS_STEP_KEY
+                ? generalInstructionsStepUnlocked
+              : step.key === POWER_CONSUMPTION_STEP_KEY
+                ? powerConsumptionStepUnlocked
+              : step.key === EQUIPMENT_SPECIFICATION_STEP_KEY
+                ? equipmentSpecificationStepUnlocked
+              : step.key === ADDITIONAL_INFO_STEP_KEY
+                ? additionalInfoStepUnlocked
+              : step.key === 'zkspc'
+                ? roomsValidated
+                : true;
+    return { status, canDetect, canCommit: canDetect, canOpen };
+  };
+  const renderEditorStepCard = (step, { grouped = false, titleOverride = null } = {}) => {
+    const { status, canDetect, canCommit, canOpen } = getEditorStepPresentation(step);
+    return (
+      <div
+        key={step.key}
+        style={{
+          border: step.key === currentViewStep ? '1px solid #0f8f7c' : '1px solid #d9d2c8',
+          borderRadius: '16px',
+          padding: '8px',
+          marginBottom: grouped ? 0 : '8px',
+          background: step.key === currentViewStep ? 'rgba(15, 143, 124, 0.08)' : 'rgba(255, 253, 249, 0.96)',
+          cursor: canOpen ? 'pointer' : 'not-allowed',
+          opacity: canOpen ? 1 : 0.55,
+        }}
+        onClick={() => {
+          if (canOpen) {
+            setViewStep(step.key);
+          }
+        }}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: step.key === 'original' ? 0 : '6px' }}>
+          <strong style={{ fontSize: '13px' }}>{titleOverride || step.title}</strong>
+          <span style={{
+            fontSize: '11px',
+            color: 'white',
+            background: getStepColor(status),
+            borderRadius: '10px',
+            padding: '2px 8px',
+          }}
+          >
+            {status}
+          </span>
+        </div>
+        {!step.editorOnly && step.key !== 'original' && (
+          <div style={{ display: 'flex', gap: '6px' }} onClick={(e) => e.stopPropagation()}>
+            <button
+              className="tool-button"
+              style={{ fontSize: '12px', padding: '4px 8px' }}
+              disabled={!canDetect || pipelineActionLoading}
+              onClick={() => handleDetectStep(step.key)}
+            >
+              Распознать
+            </button>
+            <button
+              className="tool-button"
+              style={{ fontSize: '12px', padding: '4px 8px' }}
+              disabled={!canCommit || pipelineActionLoading}
+              onClick={() => handleCommitStep(step.key)}
+            >
+              Подтвердить и перейти
+            </button>
+          </div>
+        )}
+        {(step.key === 'walls' || step.key === 'openings') && (
+          <div style={{ display: 'grid', gap: '6px', marginTop: '8px' }} onClick={(e) => e.stopPropagation()}>
+            <button
+              className="tool-button"
+              style={{ fontSize: '12px', padding: '4px 8px' }}
+              disabled={
+                step.key === 'walls'
+                  ? (!canSubmitWallsTrainingFeedback || wallsFeedbackState.submitting || pipelineActionLoading)
+                  : (!canSubmitOpeningsTrainingFeedback || openingsFeedbackState.submitting || pipelineActionLoading)
+              }
+              onClick={() => handleSubmitStepFeedback(step.key)}
+            >
+              {step.key === 'walls'
+                ? (wallsFeedbackState.submitting ? 'Отправка...' : STEP_FEEDBACK_COPY.walls.button)
+                : (openingsFeedbackState.submitting ? 'Отправка...' : STEP_FEEDBACK_COPY.openings.button)}
+            </button>
+            {step.key === 'walls' && wallsFeedbackState.status === 'success' && (
+              <div style={{ fontSize: '12px', color: '#0f766e' }}>
+                {wallsFeedbackState.message}
+              </div>
+            )}
+            {step.key === 'openings' && openingsFeedbackState.status === 'success' && (
+              <div style={{ fontSize: '12px', color: '#0f766e' }}>
+                {openingsFeedbackState.message}
+              </div>
+            )}
+            {step.key === 'walls' && wallsFeedbackState.status === 'error' && (
+              <div style={{ fontSize: '12px', color: '#b42318' }}>
+                {wallsFeedbackState.error}
+              </div>
+            )}
+            {step.key === 'openings' && openingsFeedbackState.status === 'error' && (
+              <div style={{ fontSize: '12px', color: '#b42318' }}>
+                {openingsFeedbackState.error}
+              </div>
+            )}
+            {step.key === 'walls' && wallsFeedbackAlreadySubmitted && (
+              <div style={{ fontSize: '12px', color: '#6c757d' }}>
+                Образец для текущей ревизии стен уже отправлен.
+              </div>
+            )}
+            {step.key === 'openings' && openingsFeedbackAlreadySubmitted && (
+              <div style={{ fontSize: '12px', color: '#6c757d' }}>
+                Образец для текущей ревизии проемов уже отправлен.
+              </div>
+            )}
+            {step.key === 'walls' && !canSubmitWallsTrainingFeedback && !wallsFeedbackAlreadySubmitted && (
+              <div style={{ fontSize: '12px', color: '#6c757d' }}>
+                {STEP_FEEDBACK_COPY.walls.waiting}
+              </div>
+            )}
+            {step.key === 'openings' && !canSubmitOpeningsTrainingFeedback && !openingsFeedbackAlreadySubmitted && (
+              <div style={{ fontSize: '12px', color: '#6c757d' }}>
+                {STEP_FEEDBACK_COPY.openings.waiting}
+              </div>
+            )}
+          </div>
+        )}
+        {step.key === 'signal_instruments' && canOpen && (
+          <div style={{ display: 'flex', gap: '6px' }} onClick={(e) => e.stopPropagation()}>
+            <button
+              className="tool-button"
+              style={{ fontSize: '12px', padding: '4px 8px' }}
+              disabled={!visibleSignalInstruments.length || signalBranchActionLoading}
+              onClick={handleSaveSignalInstrumentsStep}
+            >
+              Сохранить
+            </button>
+          </div>
+        )}
+        {step.key === 'fire_alarms' && canOpen && (
+          <div style={{ display: 'flex', gap: '6px' }} onClick={(e) => e.stopPropagation()}>
+            <button
+              className="tool-button"
+              style={{ fontSize: '12px', padding: '4px 8px' }}
+              disabled={!fireAlarmStepUnlocked || fireAlarmActionLoading}
+              onClick={handleAutoLayoutFireAlarms}
+            >
+              {fireAlarmActionLoading ? 'Расстановка...' : 'Расставить'}
+            </button>
+            <button
+              className="tool-button"
+              style={{ fontSize: '12px', padding: '4px 8px' }}
+              disabled={!draftStateByStep.fire_alarms || fireAlarmActionLoading}
+              onClick={handleSaveFireAlarmsStep}
+            >
+              Сохранить
+            </button>
+          </div>
+        )}
+        {step.key === 'rooms' && canOpen && (
+          <div style={{ display: 'flex', gap: '6px', marginTop: '8px' }} onClick={(e) => e.stopPropagation()}>
+            <button
+              className={`tool-button ${selectedTool === 'add-room' ? 'active' : ''}`}
+              style={{ fontSize: '12px', padding: '4px 8px' }}
+              onClick={() => setSelectedTool('add-room')}
+            >
+              {'\u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c \u043f\u043e\u043c\u0435\u0449\u0435\u043d\u0438\u0435'}
+            </button>
+          </div>
+        )}
+        {step.key === 'soue_devices' && canOpen && (
+          <div style={{ display: 'flex', gap: '6px' }} onClick={(e) => e.stopPropagation()}>
+            <button
+              className="tool-button"
+              style={{ fontSize: '12px', padding: '4px 8px' }}
+              disabled={!soueDevicesStepUnlocked || soueActionLoading}
+              onClick={handleAutoLayoutSoueDevices}
+            >
+              {soueActionLoading ? 'Расстановка...' : 'Расставить'}
+            </button>
+            <button
+              className="tool-button"
+              style={{ fontSize: '12px', padding: '4px 8px' }}
+              disabled={!draftStateByStep.soue_devices || soueActionLoading}
+              onClick={handleSaveSoueDevicesStep}
+            >
+              Сохранить
+            </button>
+          </div>
+        )}
+        {step.key === 'devices_cables' && canOpen && (
+          <div style={{ display: 'flex', gap: '6px' }} onClick={(e) => e.stopPropagation()}>
+            <button
+              className="tool-button"
+              style={{ fontSize: '12px', padding: '4px 8px' }}
+              disabled={!visibleSignalInstruments.length || signalBranchActionLoading}
+              onClick={() => refreshCableRoutes(currentSignalSystem, 'sps')}
+            >
+              {signalBranchActionLoading ? 'Пересчет...' : 'Пересчитать'}
+            </button>
+          </div>
+        )}
+        {step.key === POWER_CONSUMPTION_STEP_KEY && canOpen && (
+          <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }} onClick={(e) => e.stopPropagation()}>
+            <button
+              className="tool-button"
+              style={{ fontSize: '12px', padding: '4px 8px' }}
+              disabled={powerConsumptionCalculationLoading || powerConsumptionCalculationSaving}
+              onClick={handleRefreshPowerConsumptionCalculation}
+            >
+              Обновить
+            </button>
+            <button
+              className="tool-button"
+              style={{ fontSize: '12px', padding: '4px 8px' }}
+              disabled={!powerConsumptionCalculation || powerConsumptionCalculationSaving}
+              onClick={handleSavePowerConsumptionCalculation}
+            >
+              {powerConsumptionCalculationSaving ? 'Сохранение...' : 'Сохранить'}
+            </button>
+          </div>
+        )}
+        {step.key === EQUIPMENT_SPECIFICATION_STEP_KEY && canOpen && (
+          <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }} onClick={(e) => e.stopPropagation()}>
+            <button
+              className="tool-button"
+              style={{ fontSize: '12px', padding: '4px 8px' }}
+              disabled={equipmentSpecificationLoading || equipmentSpecificationSaving}
+              onClick={handleRefreshEquipmentSpecification}
+            >
+              Обновить
+            </button>
+            <button
+              className="tool-button"
+              style={{ fontSize: '12px', padding: '4px 8px' }}
+              disabled={!equipmentSpecification || equipmentSpecificationSaving}
+              onClick={handleSaveEquipmentSpecification}
+            >
+              {equipmentSpecificationSaving ? 'Сохранение...' : 'Сохранить'}
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  };
+  const devicesCablesStep = allEditorSteps.find((step) => step.key === 'devices_cables') || null;
+  const soueCablesStep = allEditorSteps.find((step) => step.key === 'soue_cables') || null;
   const stageRect = stageContainerRef.current?.getBoundingClientRect();
-  const stagePlanBounds = useMemo(() => {
-    if (!containerSize.width || !containerSize.height) {
-      return null;
-    }
-    const corners = [
-      viewportPointToPlan({ x: 0, y: 0 }, viewTransform),
-      viewportPointToPlan({ x: containerSize.width, y: 0 }, viewTransform),
-      viewportPointToPlan({ x: containerSize.width, y: containerSize.height }, viewTransform),
-      viewportPointToPlan({ x: 0, y: containerSize.height }, viewTransform),
-    ];
-    return getBoundingBox(corners.map(({ x, y }) => [x, y]));
-  }, [containerSize.height, containerSize.width, viewTransform]);
+  const displayCableRouteMap = useMemo(() => (
+    showCableRoutesOnCanvas ? buildDisplayCableRoutes(visibleCableRoutes) : {}
+  ), [showCableRoutesOnCanvas, visibleCableRoutes]);
+  const planGeometryBounds = useMemo(() => mergeBounds([
+    Number(floorPlan?.image_width) > 0 && Number(floorPlan?.image_height) > 0
+      ? { x: 0, y: 0, width: Number(floorPlan.image_width), height: Number(floorPlan.image_height) }
+      : null,
+    ...[...visibleWalls, ...newWalls].map((wall) => {
+      const current = wall.id && !String(wall.id).startsWith('temp_')
+        ? getWallCurrentGeometry(wall.id)
+        : wall;
+      if (!current) {
+        return null;
+      }
+      const thicknessPx = getWallThicknessPx(current, floorPlan?.scale_factor);
+      return padRect({
+        x: Math.min(current.x1, current.x2),
+        y: Math.min(current.y1, current.y2),
+        width: Math.abs(current.x2 - current.x1) || 1,
+        height: Math.abs(current.y2 - current.y1) || 1,
+      }, Math.max(4, thicknessPx / 2));
+    }),
+    ...[...visibleDoors, ...newDoors].map((door) => getRotatedBounds(getOpeningCurrentGeometry(
+      String(door.id).startsWith('temp_') ? 'new-doors' : 'doors',
+      door.id,
+      door,
+    ))),
+    ...[...visibleWindows, ...newWindows].map((windowItem) => getRotatedBounds(getOpeningCurrentGeometry(
+      String(windowItem.id).startsWith('temp_') ? 'new-windows' : 'windows',
+      windowItem.id,
+      windowItem,
+    ))),
+    ...currentStairGeometries.map((stair) => getRotatedBounds(stair)),
+    ...visibleRooms.map((room) => getBoundingBox(room.boundary_points || [])),
+    ...visibleSignalInstruments.map((instrument) => getSignalInstrumentBounds(instrument)),
+    ...visibleFireAlarmItems.map(({ kind, alarm }) => {
+      const current = getFireAlarmCurrentGeometry(kind, alarm.id, alarm);
+      return current ? getFireAlarmBounds(current) : null;
+    }),
+    ...visibleSoueItems.map(({ device }) => (device ? getSoueDeviceBounds({ ...device, rotation_deg: getSoueDisplayRotation(device) }) : null)),
+    ...(showCableRoutesOnCanvas
+      ? visibleCableRoutes.map((route) => getBoundingBox(displayCableRouteMap[route.id] || route.polyline_points || []))
+      : []),
+  ]), [
+    currentStairGeometries,
+    displayCableRouteMap,
+    floorPlan?.image_height,
+    floorPlan?.image_width,
+    floorPlan?.scale_factor,
+    getFireAlarmCurrentGeometry,
+    getOpeningCurrentGeometry,
+    getSoueDisplayRotation,
+    getWallCurrentGeometry,
+    newDoors,
+    newWalls,
+    newWindows,
+    showCableRoutesOnCanvas,
+    visibleCableRoutes,
+    visibleDoors,
+    visibleFireAlarmItems,
+    visibleRooms,
+    visibleSoueItems,
+    visibleSignalInstruments,
+    visibleWalls,
+    visibleWindows,
+  ]);
+  const planDrawingBounds = useMemo(() => buildPlanDrawingBounds({
+    imageWidth: floorPlan?.image_width,
+    imageHeight: floorPlan?.image_height,
+    geometryBounds: planGeometryBounds,
+  }), [floorPlan?.image_height, floorPlan?.image_width, planGeometryBounds]);
   const drawingLabelBaseObstacles = useMemo(() => {
-    if (!showFireAlarmsOnCanvas && !showCableRoutesOnCanvas && !showSignalInstrumentsOnCanvas) {
-      return [];
-    }
     const obstacles = [];
     [...visibleWalls, ...newWalls].forEach((wall) => {
       const current = wall.id && !String(wall.id).startsWith('temp_')
@@ -5545,103 +8570,338 @@ function FloorPlanEditor() {
       }
       obstacles.push(getFireAlarmBounds(current));
     });
+    visibleSoueItems.forEach(({ device }) => {
+      if (!device) {
+        return;
+      }
+      obstacles.push(getSoueDeviceBounds({ ...device, rotation_deg: getSoueDisplayRotation(device) }));
+    });
+    if (showCableRoutesOnCanvas) {
+      visibleCableRoutes.forEach((route) => {
+        const displayPolyline = displayCableRouteMap[route.id] || route.polyline_points || [];
+        obstacles.push(...buildPolylineObstacles(displayPolyline, 4));
+        if (displayPolyline.length) {
+          obstacles.push(buildPointObstacle(displayPolyline[displayPolyline.length - 1], 16));
+        }
+      });
+    }
     return obstacles.filter(Boolean);
   }, [
     currentStairGeometries,
+    displayCableRouteMap,
     floorPlan?.scale_factor,
     getFireAlarmCurrentGeometry,
     getOpeningCurrentGeometry,
+    getSoueDisplayRotation,
     getWallCurrentGeometry,
     newDoors,
     newWalls,
     newWindows,
     showCableRoutesOnCanvas,
-    showFireAlarmsOnCanvas,
-    showSignalInstrumentsOnCanvas,
+    visibleCableRoutes,
     visibleDoors,
     visibleFireAlarmItems,
+    visibleSoueItems,
     visibleSignalInstruments,
     visibleWalls,
     visibleWindows,
   ]);
   const fireAlarmLabelLayouts = useMemo(() => {
     const layouts = {};
-    const placed = [];
-    visibleFireAlarmItems.forEach(({ kind, alarm }) => {
-      const current = getFireAlarmCurrentGeometry(kind, alarm.id, alarm);
-      if (!current) {
-        return;
-      }
-      const label = getFireAlarmCode(current);
-      const savedRect = getLabelRectFromOffset(current.x, current.y, label, 10, current.label_dx, current.label_dy);
-      const rect = savedRect || chooseSymbolLabelRect({
-        anchorX: current.x,
-        anchorY: current.y,
-        text: label,
-        fontSize: 10,
-        symbolHalfWidth: 14,
-        symbolHalfHeight: 14,
-        obstacles: [...drawingLabelBaseObstacles, ...placed],
-        bounds: stagePlanBounds,
+    const placedLayouts = [];
+    visibleFireAlarmItems
+      .map(({ kind, alarm }) => {
+        const current = getFireAlarmCurrentGeometry(kind, alarm.id, alarm);
+        if (!current) {
+          return null;
+        }
+        const label = getFireAlarmCode(current);
+        return {
+          current,
+          label,
+          anchor: { x: current.x, y: current.y },
+          stableKey: `${current.id}:${label}`,
+          hasManualOffset: current.label_dx !== null && current.label_dx !== undefined && current.label_dy !== null && current.label_dy !== undefined,
+        };
+      })
+      .filter(Boolean)
+      .sort(comparePlacementAnchors)
+      .forEach(({ current, label, hasManualOffset }) => {
+        const layout = placePlanText({
+          text: label,
+          fontSize: 10,
+          anchor: { x: current.x, y: current.y },
+          symbolHalfWidth: 14,
+          symbolHalfHeight: 14,
+          preferredOffset: hasManualOffset ? { dx: current.label_dx, dy: current.label_dy } : null,
+          obstacles: [...drawingLabelBaseObstacles, ...collectPlacementObstacles(placedLayouts)],
+          bounds: planDrawingBounds,
+        });
+        if (!layout) {
+          return;
+        }
+        layouts[current.id] = layout;
+        placedLayouts.push(layout);
       });
-      layouts[current.id] = rect;
-      placed.push(rect);
-    });
     return layouts;
   }, [
     drawingLabelBaseObstacles,
     getFireAlarmCode,
     getFireAlarmCurrentGeometry,
-    stagePlanBounds,
+    planDrawingBounds,
     visibleFireAlarmItems,
   ]);
+  const soueDeviceLabelLayouts = useMemo(() => {
+    const layouts = {};
+    const placedLayouts = [];
+    visibleSoueItems
+      .map(({ device }) => {
+        if (!device) {
+          return null;
+        }
+        const label = getSoueDeviceCode(device);
+        if (!label) {
+          return null;
+        }
+        const bounds = getSoueDeviceBounds({ ...device, rotation_deg: getSoueDisplayRotation(device) });
+        return {
+          device,
+          label,
+          bounds,
+          anchor: { x: device.x, y: device.y },
+          stableKey: `${device.id}:${label}`,
+          hasManualOffset: device.label_dx !== null && device.label_dx !== undefined && device.label_dy !== null && device.label_dy !== undefined,
+        };
+      })
+      .filter(Boolean)
+      .sort(comparePlacementAnchors)
+      .forEach(({ device, label, bounds, hasManualOffset }) => {
+        const layout = placePlanText({
+          text: label,
+          fontSize: 10,
+          anchor: { x: device.x, y: device.y },
+          symbolHalfWidth: bounds.width / 2,
+          symbolHalfHeight: bounds.height / 2,
+          preferredOffset: hasManualOffset ? { dx: device.label_dx, dy: device.label_dy } : null,
+          obstacles: [...drawingLabelBaseObstacles, ...collectPlacementObstacles(placedLayouts)],
+          bounds: planDrawingBounds,
+        });
+        if (!layout) {
+          return;
+        }
+        layouts[device.id] = layout;
+        placedLayouts.push(layout);
+      });
+    return layouts;
+  }, [drawingLabelBaseObstacles, getSoueDeviceCode, getSoueDisplayRotation, planDrawingBounds, visibleSoueItems]);
   const signalInstrumentLabelLayouts = useMemo(() => {
     const layouts = {};
-    const placed = [];
-    visibleSignalInstruments.forEach((instrument) => {
-      const label = getInstrumentLabelText(instrument);
-      if (!label) {
-        return;
-      }
-      const bounds = getSignalInstrumentBounds(instrument);
-      const savedRect = getLabelRectFromOffset(
-        instrument.x,
-        instrument.y,
-        label,
-        11,
-        instrument.label_dx,
-        instrument.label_dy,
-      );
-      const rect = savedRect || chooseSymbolLabelRect({
-        anchorX: instrument.x,
-        anchorY: instrument.y,
-        text: label,
-        fontSize: 11,
-        symbolHalfWidth: bounds.width / 2,
-        symbolHalfHeight: bounds.height / 2,
-        obstacles: [...drawingLabelBaseObstacles, ...Object.values(fireAlarmLabelLayouts), ...placed],
-        bounds: stagePlanBounds,
+    const placedLayouts = [];
+    visibleSignalInstruments
+      .map((instrument) => {
+        const label = getInstrumentLabelText(instrument);
+        if (!label) {
+          return null;
+        }
+        const bounds = getSignalInstrumentBounds(instrument);
+        return {
+          instrument,
+          label,
+          bounds,
+          anchor: { x: instrument.x, y: instrument.y },
+          stableKey: `${instrument.id}:${label}`,
+          hasManualOffset: instrument.label_dx !== null && instrument.label_dx !== undefined && instrument.label_dy !== null && instrument.label_dy !== undefined,
+        };
+      })
+      .filter(Boolean)
+      .sort(comparePlacementAnchors)
+      .forEach(({ instrument, label, bounds, hasManualOffset }) => {
+        const layout = placePlanText({
+          text: label,
+          fontSize: 11,
+          anchor: { x: instrument.x, y: instrument.y },
+          symbolHalfWidth: bounds.width / 2,
+          symbolHalfHeight: bounds.height / 2,
+          preferredOffset: hasManualOffset ? { dx: instrument.label_dx, dy: instrument.label_dy } : null,
+          obstacles: [
+            ...drawingLabelBaseObstacles,
+            ...collectPlacementObstacles(Object.values(fireAlarmLabelLayouts)),
+            ...collectPlacementObstacles(Object.values(soueDeviceLabelLayouts)),
+            ...collectPlacementObstacles(placedLayouts),
+          ],
+          bounds: planDrawingBounds,
+        });
+        if (!layout) {
+          return;
+        }
+        layouts[instrument.id] = layout;
+        placedLayouts.push(layout);
       });
-      layouts[instrument.id] = rect;
-      placed.push(rect);
-    });
     return layouts;
-  }, [drawingLabelBaseObstacles, fireAlarmLabelLayouts, stagePlanBounds, visibleSignalInstruments]);
+  }, [drawingLabelBaseObstacles, fireAlarmLabelLayouts, soueDeviceLabelLayouts, planDrawingBounds, visibleSignalInstruments]);
   const cableLabelObstacles = useMemo(() => {
     if (!showCableRoutesOnCanvas) {
       return [];
     }
     return [
       ...drawingLabelBaseObstacles,
-      ...Object.values(fireAlarmLabelLayouts),
-      ...Object.values(signalInstrumentLabelLayouts),
+      ...collectPlacementObstacles(Object.values(fireAlarmLabelLayouts)),
+      ...collectPlacementObstacles(Object.values(soueDeviceLabelLayouts)),
+      ...collectPlacementObstacles(Object.values(signalInstrumentLabelLayouts)),
     ];
   }, [
     drawingLabelBaseObstacles,
     fireAlarmLabelLayouts,
     showCableRoutesOnCanvas,
     signalInstrumentLabelLayouts,
+    soueDeviceLabelLayouts,
   ]);
+  const dimensionLabelLayouts = useMemo(() => {
+    if (!showDimensionsOnCanvas) {
+      return {};
+    }
+    const layouts = {};
+    const placedLayouts = [];
+    [...visibleDimensions]
+      .sort((left, right) => {
+        if ((left?.y ?? 0) !== (right?.y ?? 0)) {
+          return (left?.y ?? 0) - (right?.y ?? 0);
+        }
+        if ((left?.x ?? 0) !== (right?.x ?? 0)) {
+          return (left?.x ?? 0) - (right?.x ?? 0);
+        }
+        return String(left?.id ?? '').localeCompare(String(right?.id ?? ''));
+      })
+      .forEach((dim) => {
+        const label = dim.text || formatDimensionMeters(dim.value);
+        const layout = placePlanText({
+          text: label,
+          fontSize: 12,
+          anchor: { x: Number(dim.x || 0), y: Number(dim.y || 0) },
+          preferredOffset: { dx: 0, dy: 0 },
+          obstacles: [...drawingLabelBaseObstacles, ...collectPlacementObstacles(placedLayouts)],
+          bounds: planDrawingBounds,
+        });
+        if (!layout) {
+          return;
+        }
+        layouts[dim.id] = layout;
+        placedLayouts.push(layout);
+      });
+    return layouts;
+  }, [drawingLabelBaseObstacles, planDrawingBounds, showDimensionsOnCanvas, visibleDimensions]);
+  const zoneLabelLayouts = useMemo(() => {
+    if (!showZkspcOverlayOnCanvas) {
+      return {};
+    }
+    const layouts = {};
+    const placedLayouts = [];
+    currentZkspcZones
+      .map((zone) => {
+        const zoneStyle = zkspcStyleMap[Number(zone.zone_number || 1)] || getZkspcStyle(zone, floorPlan?.id);
+        const zoneRooms = visibleRooms.filter((room) => (
+          (zone.room_ids || []).includes(room.id)
+          && room.boundary_points?.length >= 3
+          && !unserviceableRoomIds.has(room.id)
+        ));
+        if (!zoneRooms.length) {
+          return null;
+        }
+        const anchor = zoneLabelAnchors[zone.id || zone.zone_number];
+        if (!anchor) {
+          return null;
+        }
+        return {
+          zone,
+          zoneStyle,
+          anchor,
+          stableKey: `${zone.id || zone.zone_number}:${zoneStyle.label}`,
+          regionConstraint: {
+            polygons: zoneRooms.map((room) => room.boundary_points),
+            preferredPoints: [anchor, ...zoneRooms.map((room) => getRoomDisplayCenter(room)).filter(Boolean)],
+          },
+        };
+      })
+      .filter(Boolean)
+      .sort(comparePlacementAnchors)
+      .forEach(({ zone, zoneStyle, anchor, regionConstraint }) => {
+        const layout = placePlanText({
+          text: zoneStyle.label,
+          fontSize: 16,
+          strategy: 'region',
+          anchor,
+          regionConstraint,
+          obstacles: [...drawingLabelBaseObstacles, ...collectPlacementObstacles(placedLayouts)],
+          bounds: planDrawingBounds,
+        });
+        if (!layout) {
+          return;
+        }
+        layouts[zone.id || zone.zone_number] = { ...layout, color: zoneStyle.labelColor };
+        placedLayouts.push(layout);
+      });
+    return layouts;
+  }, [
+    currentZkspcZones,
+    drawingLabelBaseObstacles,
+    floorPlan?.id,
+    planDrawingBounds,
+    showZkspcOverlayOnCanvas,
+    unserviceableRoomIds,
+    visibleRooms,
+    zkspcStyleMap,
+    zoneLabelAnchors,
+  ]);
+  const staticCanvasLabelObstacles = useMemo(() => ([
+    ...collectPlacementObstacles(Object.values(fireAlarmLabelLayouts)),
+    ...collectPlacementObstacles(Object.values(soueDeviceLabelLayouts)),
+    ...collectPlacementObstacles(Object.values(signalInstrumentLabelLayouts)),
+    ...collectPlacementObstacles(Object.values(dimensionLabelLayouts)),
+    ...collectPlacementObstacles(Object.values(zoneLabelLayouts)),
+  ]), [
+    dimensionLabelLayouts,
+    fireAlarmLabelLayouts,
+    signalInstrumentLabelLayouts,
+    soueDeviceLabelLayouts,
+    zoneLabelLayouts,
+  ]);
+  const buildGuideLabelLayouts = useCallback((guide) => {
+    if (!guide) {
+      return null;
+    }
+    const sharedObstacles = [...drawingLabelBaseObstacles, ...staticCanvasLabelObstacles];
+    const horizontal = placePlanText({
+      text: guide.horizontalLabel.text,
+      fontSize: 11,
+      strategy: 'segment',
+      anchor: {
+        x: (Number(guide.horizontalLine?.[0] || 0) + Number(guide.horizontalLine?.[2] || 0)) / 2,
+        y: (Number(guide.horizontalLine?.[1] || 0) + Number(guide.horizontalLine?.[3] || 0)) / 2,
+      },
+      segment: {
+        start: { x: Number(guide.horizontalLine?.[0] || 0), y: Number(guide.horizontalLine?.[1] || 0) },
+        end: { x: Number(guide.horizontalLine?.[2] || 0), y: Number(guide.horizontalLine?.[3] || 0) },
+      },
+      obstacles: sharedObstacles,
+      bounds: planDrawingBounds,
+    });
+    const vertical = placePlanText({
+      text: guide.verticalLabel.text,
+      fontSize: 11,
+      strategy: 'segment',
+      anchor: {
+        x: (Number(guide.verticalLine?.[0] || 0) + Number(guide.verticalLine?.[2] || 0)) / 2,
+        y: (Number(guide.verticalLine?.[1] || 0) + Number(guide.verticalLine?.[3] || 0)) / 2,
+      },
+      segment: {
+        start: { x: Number(guide.verticalLine?.[0] || 0), y: Number(guide.verticalLine?.[1] || 0) },
+        end: { x: Number(guide.verticalLine?.[2] || 0), y: Number(guide.verticalLine?.[3] || 0) },
+      },
+      obstacles: [...sharedObstacles, ...collectPlacementObstacles(horizontal ? [horizontal] : [])],
+      bounds: planDrawingBounds,
+    });
+    return { horizontal, vertical };
+  }, [drawingLabelBaseObstacles, planDrawingBounds, staticCanvasLabelObstacles]);
   const hoverPanelStyle = (() => {
     if (!hoverPanel || !stageRect) {
       return null;
@@ -5666,14 +8926,38 @@ function FloorPlanEditor() {
       padding: '14px',
       fontSize: '12px',
       pointerEvents: 'auto',
-      overflow: 'hidden',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '8px',
+      overflowY: 'auto',
+      overflowX: 'hidden',
     };
   })();
-  const hoverFireAlarmTitle = (hoverPanel?.type === 'fire-alarm' || hoverPanel?.type === 'new-fire-alarm') && hoverPanel?.data
+  const hoverFireAlarmCode = (hoverPanel?.type === 'fire-alarm' || hoverPanel?.type === 'new-fire-alarm') && hoverPanel?.data
     ? getFireAlarmCode(hoverPanel.data, {
       zone: fireAlarmDraft.zone || hoverPanel.data.zone,
       address: fireAlarmDraft.address || hoverPanel.data.address,
     })
+    : null;
+  const hoverFireAlarmTitle = (hoverPanel?.type === 'fire-alarm' || hoverPanel?.type === 'new-fire-alarm') && hoverPanel?.data
+    ? (hoverPanel.data.equipment_name || getEquipmentNameById(hoverPanel.data.equipment_id, '') || hoverFireAlarmCode)
+    : null;
+  const hoverSoueDeviceTitle = (hoverPanel?.type === 'soue-device' || hoverPanel?.type === 'new-soue-device') && hoverPanel?.data
+    ? (
+      hoverPanel.data.equipment_name
+      || getEquipmentNameById(hoverPanel.data.equipment_id, '')
+      || hoverPanel.data.device_model
+      || getSoueDeviceCode(hoverPanel.data)
+      || 'СОУЭ'
+    )
+    : null;
+  const hoverSignalInstrumentTitle = hoverPanel?.type === 'signal-instrument' && hoverPanel?.data
+    ? (
+      hoverPanel.data.equipment_name
+      || getEquipmentNameById(hoverPanel.data.equipment_id, '')
+      || hoverPanel.data.name
+      || 'Прибор'
+    )
     : null;
   const hoverFireAlarmRoomCoordinates = (hoverPanel?.type === 'fire-alarm' || hoverPanel?.type === 'new-fire-alarm') && hoverPanel?.data
     ? getFireAlarmRoomCoordinates(hoverPanel.data, rooms, floorPlan?.scale_factor)
@@ -5689,32 +8973,113 @@ function FloorPlanEditor() {
 
   return (
     <div className="editor-container">
+      {!hideEditorSidePanels && (
       <div className="editor-sidebar">
         <div className="sidebar-section">
           <button className="tool-button" style={{ width: '100%', marginBottom: '8px' }} onClick={() => navigate(`/projects/${floorPlan.project_id}`)}>
             ← Назад к проекту
           </button>
           <h3>Пошаговый пайплайн</h3>
-          {editorSteps.map((step) => {
-            const status = step.key === 'original'
-              ? 'validated'
-              : step.key === 'fire_alarms'
-                ? (currentBranchState?.steps?.fire_alarms?.status || (fireAlarmStepUnlocked ? 'draft' : 'locked'))
-                : step.key === 'devices_cables'
-                  ? (currentBranchState?.steps?.devices_cables?.status || (devicesCablesStepUnlocked ? 'draft' : 'locked'))
-                : getStepStatus(step.key);
-            const canDetect = step.key === 'walls'
-              || (step.key === 'openings' && wallsValidated)
-              || (step.key === 'rooms' && wallsValidated && openingsValidated)
-              || (step.key === 'zkspc' && roomsValidated);
-            const canCommit = canDetect;
-            const canOpen = step.key === 'fire_alarms'
-              ? fireAlarmStepUnlocked
-              : step.key === 'devices_cables'
-                ? devicesCablesStepUnlocked
-                : step.key === 'zkspc'
-                  ? roomsValidated
-                  : true;
+          {allEditorSteps.map((step) => {
+            if (step.key === 'devices_cables' || step.key === 'soue_cables') {
+              return null;
+            }
+            if (step.key === 'fire_alarms' && devicesCablesStep) {
+              return (
+                <div
+                  key="sps-steps-group"
+                  data-testid="sps-steps-group"
+                  style={{
+                    marginBottom: '8px',
+                    padding: '8px',
+                    borderRadius: '18px',
+                    border: '1px solid #d9d2c8',
+                    background: 'rgba(255, 253, 249, 0.96)',
+                    display: 'grid',
+                    gap: '8px',
+                  }}
+                >
+                  <div style={{ fontSize: '13px', fontWeight: 700, color: '#2a2926', padding: '2px 4px 0' }}>
+                    {'\u0036. \u0421\u041f\u0421'}
+                  </div>
+                  <div
+                    style={{
+                      padding: '8px 10px',
+                      borderRadius: '14px',
+                      background: '#fffaf2',
+                      border: '1px solid #ece3d8',
+                    }}
+                  >
+                    <SignalSystemSidebarSection
+                      currentSignalSystem={currentSignalSystem}
+                      signalBranchSummary={spsBranchSummary}
+                      summaryItems={spsStepSummaryItems}
+                      deviceCountLabel={'\u0418\u0437\u0432\u0435\u0449\u0430\u0442\u0435\u043b\u0435\u0439'}
+                      onSwitchSignalSystem={handleSwitchSignalSystem}
+                      embedded
+                    />
+                  </div>
+                  {renderEditorStepCard(step, {
+                    grouped: true,
+                    titleOverride: '\u0418\u0437\u0432\u0435\u0449\u0430\u0442\u0435\u043b\u0438',
+                  })}
+                  {renderEditorStepCard(devicesCablesStep, {
+                    grouped: true,
+                    titleOverride: '\u041a\u0430\u0431\u0435\u043b\u0438',
+                  })}
+                </div>
+              );
+            }
+            if (step.key === 'soue_devices' && soueCablesStep) {
+              return (
+                <div
+                  key="soue-steps-group"
+                  data-testid="soue-steps-group"
+                  style={{
+                    marginBottom: '8px',
+                    padding: '8px',
+                    borderRadius: '18px',
+                    border: '1px solid #d9d2c8',
+                    background: 'rgba(255, 253, 249, 0.96)',
+                    display: 'grid',
+                    gap: '8px',
+                  }}
+                >
+                  <div style={{ fontSize: '13px', fontWeight: 700, color: '#2a2926', padding: '2px 4px 0' }}>
+                    {'\u0038. \u0421\u041e\u0423\u042d'}
+                  </div>
+                  <div
+                    style={{
+                      padding: '8px 10px',
+                      borderRadius: '14px',
+                      background: '#fffaf2',
+                      border: '1px solid #ece3d8',
+                      fontSize: '12px',
+                      color: '#645f57',
+                      display: 'grid',
+                      gap: '4px',
+                    }}
+                  >
+                    {soueStepSummaryItems.map((item) => (
+                      <div key={item.key}>
+                        {item.label}
+                        {': '}
+                        {item.value}
+                      </div>
+                    ))}
+                  </div>
+                  {renderEditorStepCard(step, {
+                    grouped: true,
+                    titleOverride: '\u0422\u0430\u0431\u043b\u043e \u0438 \u0441\u0438\u0440\u0435\u043d\u044b',
+                  })}
+                  {renderEditorStepCard(soueCablesStep, {
+                    grouped: true,
+                    titleOverride: '\u041a\u0430\u0431\u0435\u043b\u0438',
+                  })}
+                </div>
+              );
+            }
+            const { status, canDetect, canCommit, canOpen } = getEditorStepPresentation(step);
 
             return (
               <div
@@ -5766,6 +9131,76 @@ function FloorPlanEditor() {
                     </button>
                   </div>
                 )}
+                {(step.key === 'walls' || step.key === 'openings') && (
+                  <div style={{ display: 'grid', gap: '6px', marginTop: '8px' }} onClick={(e) => e.stopPropagation()}>
+                    <button
+                      className="tool-button"
+                      style={{ fontSize: '12px', padding: '4px 8px' }}
+                      disabled={
+                        step.key === 'walls'
+                          ? (!canSubmitWallsTrainingFeedback || wallsFeedbackState.submitting || pipelineActionLoading)
+                          : (!canSubmitOpeningsTrainingFeedback || openingsFeedbackState.submitting || pipelineActionLoading)
+                      }
+                      onClick={() => handleSubmitStepFeedback(step.key)}
+                    >
+                      {step.key === 'walls'
+                        ? (wallsFeedbackState.submitting ? 'Отправка...' : STEP_FEEDBACK_COPY.walls.button)
+                        : (openingsFeedbackState.submitting ? 'Отправка...' : STEP_FEEDBACK_COPY.openings.button)}
+                    </button>
+                    {step.key === 'walls' && wallsFeedbackState.status === 'success' && (
+                      <div style={{ fontSize: '12px', color: '#0f766e' }}>
+                        {wallsFeedbackState.message}
+                      </div>
+                    )}
+                    {step.key === 'openings' && openingsFeedbackState.status === 'success' && (
+                      <div style={{ fontSize: '12px', color: '#0f766e' }}>
+                        {openingsFeedbackState.message}
+                      </div>
+                    )}
+                    {step.key === 'walls' && wallsFeedbackState.status === 'error' && (
+                      <div style={{ fontSize: '12px', color: '#b42318' }}>
+                        {wallsFeedbackState.error}
+                      </div>
+                    )}
+                    {step.key === 'openings' && openingsFeedbackState.status === 'error' && (
+                      <div style={{ fontSize: '12px', color: '#b42318' }}>
+                        {openingsFeedbackState.error}
+                      </div>
+                    )}
+                    {step.key === 'walls' && wallsFeedbackAlreadySubmitted && (
+                      <div style={{ fontSize: '12px', color: '#6c757d' }}>
+                        Образец для текущей ревизии стен уже отправлен.
+                      </div>
+                    )}
+                    {step.key === 'openings' && openingsFeedbackAlreadySubmitted && (
+                      <div style={{ fontSize: '12px', color: '#6c757d' }}>
+                        Образец для текущей ревизии проемов уже отправлен.
+                      </div>
+                    )}
+                    {step.key === 'walls' && !canSubmitWallsTrainingFeedback && !wallsFeedbackAlreadySubmitted && (
+                      <div style={{ fontSize: '12px', color: '#6c757d' }}>
+                        {STEP_FEEDBACK_COPY.walls.waiting}
+                      </div>
+                    )}
+                    {step.key === 'openings' && !canSubmitOpeningsTrainingFeedback && !openingsFeedbackAlreadySubmitted && (
+                      <div style={{ fontSize: '12px', color: '#6c757d' }}>
+                        {STEP_FEEDBACK_COPY.openings.waiting}
+                      </div>
+                    )}
+                  </div>
+                )}
+                {step.key === 'signal_instruments' && canOpen && (
+                  <div style={{ display: 'flex', gap: '6px' }} onClick={(e) => e.stopPropagation()}>
+                    <button
+                      className="tool-button"
+                      style={{ fontSize: '12px', padding: '4px 8px' }}
+                      disabled={!visibleSignalInstruments.length || signalBranchActionLoading}
+                      onClick={handleSaveSignalInstrumentsStep}
+                    >
+                      Сохранить
+                    </button>
+                  </div>
+                )}
                 {step.key === 'fire_alarms' && canOpen && (
                   <div style={{ display: 'flex', gap: '6px' }} onClick={(e) => e.stopPropagation()}>
                     <button
@@ -5786,13 +9221,33 @@ function FloorPlanEditor() {
                     </button>
                   </div>
                 )}
-                {false && step.key === 'devices_cables' && canOpen && (
+                {step.key === 'soue_devices' && canOpen && (
+                  <div style={{ display: 'flex', gap: '6px' }} onClick={(e) => e.stopPropagation()}>
+                    <button
+                      className="tool-button"
+                      style={{ fontSize: '12px', padding: '4px 8px' }}
+                      disabled={!soueDevicesStepUnlocked || soueActionLoading}
+                      onClick={handleAutoLayoutSoueDevices}
+                    >
+                      {soueActionLoading ? 'Расстановка...' : 'Расставить'}
+                    </button>
+                    <button
+                      className="tool-button"
+                      style={{ fontSize: '12px', padding: '4px 8px' }}
+                      disabled={!draftStateByStep.soue_devices || soueActionLoading}
+                      onClick={handleSaveSoueDevicesStep}
+                    >
+                      Сохранить
+                    </button>
+                  </div>
+                )}
+                {step.key === 'devices_cables' && canOpen && (
                   <div style={{ display: 'flex', gap: '6px' }} onClick={(e) => e.stopPropagation()}>
                     <button
                       className="tool-button"
                       style={{ fontSize: '12px', padding: '4px 8px' }}
                       disabled={!visibleSignalInstruments.length || signalBranchActionLoading}
-                      onClick={() => refreshCableRoutes(currentSignalSystem, false)}
+                      onClick={() => refreshCableRoutes(currentSignalSystem, 'sps')}
                     >
                       {signalBranchActionLoading ? 'Пересчет...' : 'Пересчитать'}
                     </button>
@@ -5845,14 +9300,6 @@ function FloorPlanEditor() {
               </div>
             )}
           </div>
-        )}
-
-        {(showFireAlarmSidebar || showDevicesCablesSidebar) && (
-          <SignalSystemSidebarSection
-            currentSignalSystem={currentSignalSystem}
-            signalBranchSummary={signalBranchSummary}
-            onSwitchSignalSystem={handleSwitchSignalSystem}
-          />
         )}
 
         {/* Legacy sidebar branch selector kept out of render.
@@ -5909,6 +9356,14 @@ function FloorPlanEditor() {
               </button>
               <button className="tool-button" onClick={handleMergeSelectedZkspcRooms} disabled={selectedZkspcRooms.length < 2}>
                 Объединить
+              </button>
+            </div>
+            <div style={{ display: 'flex', gap: '8px', marginBottom: '10px' }}>
+              <button
+                className={`tool-button ${selectedTool === 'add-room' ? 'active' : ''}`}
+                onClick={() => setSelectedTool('add-room')}
+              >
+                Добавить помещение
               </button>
             </div>
             <ul className="element-list">
@@ -5968,6 +9423,14 @@ function FloorPlanEditor() {
         {showRoomsSidebar && (
           <div className="sidebar-section">
             <h3>Помещения ({visibleRooms.length})</h3>
+            <div style={{ display: 'flex', gap: '8px', marginBottom: '10px' }}>
+              <button
+                className={`tool-button ${selectedTool === 'add-room' ? 'active' : ''}`}
+                onClick={() => setSelectedTool('add-room')}
+              >
+                Добавить помещение
+              </button>
+            </div>
             <ul className="element-list">
               {visibleRooms.map((room) => (
                 <li
@@ -5997,7 +9460,7 @@ function FloorPlanEditor() {
                     }}
                   >
                     ×
-                  </button>}
+                  </button>
                 </li>
               ))}
             </ul>
@@ -6054,6 +9517,16 @@ function FloorPlanEditor() {
               ))}
             </div>
           )}
+          {fireAlarmEquipmentSummary.length > 0 && (
+            <div style={{ marginBottom: '10px', padding: '8px', borderRadius: '8px', background: '#f8f9fa', fontSize: '12px', display: 'grid', gap: '4px' }}>
+              {fireAlarmEquipmentSummary.map((item) => (
+                <div key={item.key} style={{ display: 'flex', justifyContent: 'space-between', gap: '12px' }}>
+                  <span>{item.label}</span>
+                  <strong>{item.count}</strong>
+                </div>
+              ))}
+            </div>
+          )}
           {visibleFireAlarmGroups.map((group) => (
             <div key={`fire-group-${group.key}`} style={{ marginBottom: '0.75rem' }}>
               <div style={{ fontSize: '12px', fontWeight: 600, color: '#495057', marginBottom: '6px' }}>
@@ -6073,7 +9546,8 @@ function FloorPlanEditor() {
                     }}
                   >
                     <div>
-                      <div>{getFireAlarmCode(alarm)}</div>
+                      <div>{alarm.equipment_name || getFireAlarmDisplayLabel(alarm.device_type)}</div>
+                      <small>{getFireAlarmCode(alarm)}</small>
                     </div>
                     <button
                       className="element-delete"
@@ -6096,7 +9570,66 @@ function FloorPlanEditor() {
           ))}
         </div>
         )}
+
+        {showSoueSidebar && (
+        <div className="sidebar-section">
+          <h3>СОУЭ ({visibleSoueItems.length})</h3>
+          {soueWarnings.length > 0 && (
+            <div style={{ marginBottom: '10px', padding: '8px', borderRadius: '6px', background: '#fff3cd', color: '#664d03', fontSize: '12px' }}>
+              {soueWarnings.map((warning, index) => (
+                <div key={`soue-warning-sidebar-${index}`}>{warning}</div>
+              ))}
+            </div>
+          )}
+          {soueEquipmentSummary.length > 0 && (
+            <div style={{ marginBottom: '10px', padding: '8px', borderRadius: '8px', background: '#f8f9fa', fontSize: '12px', display: 'grid', gap: '4px' }}>
+              {soueEquipmentSummary.map((item) => (
+                <div key={item.key} style={{ display: 'flex', justifyContent: 'space-between', gap: '12px' }}>
+                  <span>{item.label}</span>
+                  <strong>{item.count}</strong>
+                </div>
+              ))}
+            </div>
+          )}
+          <ul className="element-list">
+            {visibleSoueItems.map(({ kind, device }) => (
+              <li
+                key={device.id}
+                className={`element-item ${selectedElement?.type === (kind === 'new-soue-devices' ? 'new-soue-device' : 'soue-device') && selectedElement?.id === device.id ? 'selected' : ''}`}
+                onClick={() => {
+                  const type = kind === 'new-soue-devices' ? 'new-soue-device' : 'soue-device';
+                  setSelectedElement({ type, id: device.id, data: device });
+                  setSelectedElements([{ type, id: device.id }]);
+                }}
+              >
+                <div>
+                  <div>{device.equipment_name || device.device_model || (device.device_type === 'siren' ? 'Сирена' : 'Табло')}</div>
+                  <small>
+                    {device.device_type === 'siren' ? 'Сирена' : 'Табло'}
+                    {device.device_model ? ` • ${device.device_model}` : ''}
+                  </small>
+                </div>
+                <button
+                  className="element-delete"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (kind === 'new-soue-devices') {
+                      setNewSoueDevices((prev) => prev.filter((item) => item.id !== device.id));
+                      setHasUnsavedChanges(true);
+                    } else {
+                      handleDeleteElement('soue-devices', device.id);
+                    }
+                  }}
+                >
+                  ×
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+        )}
       </div>
+      )}
 
       {showDevicesCablesSidebar && (
         <DevicesCablesSidebarSection
@@ -6104,8 +9637,15 @@ function FloorPlanEditor() {
           visibleSignalInstruments={visibleSignalInstruments}
           visibleCableRoutes={visibleCableRoutes}
           selectedElement={selectedElement}
+          actionButtons={devicesCablesActionButtons}
           mergeInstrumentId={mergeInstrumentId}
-          mergeSelectionCount={selectedElements.filter((item) => item.type === 'fire-alarm' || item.type === 'new-fire-alarm').length}
+          mergeSelectionCount={devicesCablesMergeSelectionCount}
+          title={devicesCablesSidebarTitle}
+          allowMerge={currentViewStep === 'devices_cables' || currentViewStep === 'soue_cables'}
+          showToolSelector={isSignalInstrumentsView}
+          showRouteSummary={!isSignalInstrumentsView}
+          mergeSelectionLabel={devicesCablesMergeSelectionLabel}
+          mergeButtonLabel={devicesCablesMergeButtonLabel}
           onSelectTool={setSelectedTool}
           onSelectInstrument={(instrument) => {
             setSelectedElement({ type: 'signal-instrument', id: instrument.id, data: instrument });
@@ -6198,6 +9738,79 @@ function FloorPlanEditor() {
         </div>
       */}
       <div className="editor-canvas">
+        {isGeneralDataView ? (
+          <div className="editor-stage" style={{ padding: '16px', overflow: 'auto' }}>
+            <GeneralDataPreview
+              generalData={generalData}
+              loading={generalDataLoading}
+              saving={generalDataSaving}
+              error={generalDataError}
+              onTopLevelFieldChange={handleGeneralDataTopLevelFieldChange}
+              onDocumentRowFieldChange={handleGeneralDataDocumentRowFieldChange}
+              onManifestRowFieldChange={handleGeneralDataManifestRowFieldChange}
+              onSave={handleSaveGeneralData}
+              onRefresh={handleRefreshGeneralData}
+            />
+          </div>
+        ) : isGeneralInstructionsView ? (
+          <div className="editor-stage" style={{ padding: '16px', overflow: 'auto' }}>
+            <GeneralInstructionsPreview
+              instructions={generalInstructions}
+              loading={generalInstructionsLoading}
+              saving={generalInstructionsSaving}
+              error={generalInstructionsError}
+              onTopLevelFieldChange={handleGeneralInstructionsTopLevelFieldChange}
+              onBlockTextChange={handleGeneralInstructionsBlockTextChange}
+              onBlockItemsChange={handleGeneralInstructionsBlockItemsChange}
+              onSave={handleSaveGeneralInstructions}
+              onRefresh={handleRefreshGeneralInstructions}
+            />
+          </div>
+        ) : isPowerConsumptionCalculationView ? (
+          <div className="editor-stage" style={{ padding: '16px', overflow: 'auto' }}>
+            <PowerConsumptionCalculationPreview
+              calculation={powerConsumptionCalculation}
+              loading={powerConsumptionCalculationLoading}
+              saving={powerConsumptionCalculationSaving}
+              error={powerConsumptionCalculationError}
+              onTopLevelFieldChange={handlePowerConsumptionTopLevelFieldChange}
+              onIntroductoryTextChange={handlePowerConsumptionIntroductoryTextChange}
+              onCategoryTitleChange={handlePowerConsumptionCategoryTitleChange}
+              onRowFieldChange={handlePowerConsumptionRowFieldChange}
+              onSummaryFieldChange={handlePowerConsumptionSummaryFieldChange}
+              onSave={handleSavePowerConsumptionCalculation}
+              onRefresh={handleRefreshPowerConsumptionCalculation}
+            />
+          </div>
+        ) : isEquipmentSpecificationView ? (
+          <div className="editor-stage" style={{ padding: '16px', overflow: 'auto' }}>
+            <EquipmentSpecificationPreview
+              specification={equipmentSpecification}
+              loading={equipmentSpecificationLoading}
+              saving={equipmentSpecificationSaving}
+              error={equipmentSpecificationError}
+              onPageTitleChange={handleEquipmentSpecificationPageTitleChange}
+              onHeaderChange={handleEquipmentSpecificationHeaderChange}
+              onSectionTitleChange={handleEquipmentSpecificationSectionTitleChange}
+              onCellChange={handleEquipmentSpecificationCellChange}
+              onSave={handleSaveEquipmentSpecification}
+              onRefresh={handleRefreshEquipmentSpecification}
+            />
+          </div>
+        ) : isAdditionalInfoView ? (
+          <div className="editor-stage" style={{ padding: '16px', overflow: 'auto' }}>
+            <AdditionalInfoPreview
+              additionalInfo={additionalInfo}
+              loading={additionalInfoLoading}
+              saving={additionalInfoSaving}
+              error={additionalInfoError}
+              onTextChange={handleAdditionalInfoTextChange}
+              onSave={handleSaveAdditionalInfo}
+              onRefresh={handleRefreshAdditionalInfo}
+            />
+          </div>
+        ) : (
+        <>
         <div className="editor-toolbar">
           <button
             className={`tool-button ${selectedTool === 'select' ? 'active' : ''}`}
@@ -6338,7 +9951,23 @@ function FloorPlanEditor() {
               </button>
             </>
           )}
-          {currentViewStep === 'devices_cables' && (
+          {currentViewStep === 'soue_devices' && (
+            <>
+              <button
+                className={`tool-button ${selectedTool === 'siren' ? 'active' : ''}`}
+                onClick={() => setSelectedTool('siren')}
+              >
+                Сирена
+              </button>
+              <button
+                className={`tool-button ${selectedTool === 'exit-sign' ? 'active' : ''}`}
+                onClick={() => setSelectedTool('exit-sign')}
+              >
+                Табло
+              </button>
+            </>
+          )}
+          {(currentViewStep === 'devices_cables' || currentViewStep === 'soue_cables') && (
             <>
               {SIGNAL_INSTRUMENT_OPTIONS.map((option) => (
                 <button
@@ -6519,7 +10148,8 @@ function FloorPlanEditor() {
                   {(hoverPanel.type === 'stair' || hoverPanel.type === 'new-stair') && `Лестница №${stairDisplayNumberMap[hoverPanel.id] ?? '—'}`}
                   {hoverPanel.type === 'room' && `Помещение №${roomDisplayNumberMap[hoverPanel.id] ?? '—'}`}
                   {(hoverPanel.type === 'fire-alarm' || hoverPanel.type === 'new-fire-alarm') && hoverFireAlarmTitle}
-                  {hoverPanel.type === 'signal-instrument' && (hoverPanel.data?.name || 'Прибор')}
+                  {(hoverPanel.type === 'soue-device' || hoverPanel.type === 'new-soue-device') && hoverSoueDeviceTitle}
+                  {hoverPanel.type === 'signal-instrument' && hoverSignalInstrumentTitle}
                   {hoverPanel.type === 'cable-route' && `Кабель ${hoverPanel.data?.route_kind || ''} #${hoverPanel.data?.route_number || '—'}`}
                 </strong>
                 <button
@@ -6617,6 +10247,19 @@ function FloorPlanEditor() {
                       style={HOVER_PANEL_INPUT_STYLE}
                     />
                   </label>
+                  {hoverPanel.type.includes('door') && (
+                    <label style={{ ...HOVER_PANEL_FIELD_ROW_STYLE, alignItems: 'center' }}>
+                      <span style={HOVER_PANEL_LABEL_STYLE}>Эвакуационный выход</span>
+                      <input
+                        type="checkbox"
+                        checked={openingSizeDraft.isEvacuationExit}
+                        onChange={(e) => {
+                          const nextDraft = { ...openingSizeDraft, isEvacuationExit: e.target.checked };
+                          setOpeningSizeDraft(nextDraft);
+                        }}
+                      />
+                    </label>
+                  )}
                   <button className="tool-button" onClick={handleSaveOpeningMeta}>Сохранить</button>
                 </div>
               )}
@@ -6680,6 +10323,16 @@ function FloorPlanEditor() {
                       <option value="необслуживаемое">необслуживаемое</option>
                     </select>
                   </label>
+                  <label style={HOVER_PANEL_FIELD_ROW_STYLE}>
+                    <span style={HOVER_PANEL_LABEL_STYLE}>Вместимость</span>
+                    <input
+                      type="number"
+                      min="0"
+                      value={roomDraft.maxOccupancy}
+                      onChange={(e) => setRoomDraft(prev => ({ ...prev, maxOccupancy: e.target.value }))}
+                      style={HOVER_PANEL_INPUT_STYLE}
+                    />
+                  </label>
                   <div style={HOVER_PANEL_INFO_ROW_STYLE}>
                     <span>Длина</span>
                     <strong>{formatMetersValue(hoverPanel.data?.length_m, 2)}</strong>
@@ -6703,6 +10356,19 @@ function FloorPlanEditor() {
               {(hoverPanel.type === 'fire-alarm' || hoverPanel.type === 'new-fire-alarm') && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
                   <div>Тип: {getFireAlarmShortTypeLabel(hoverPanel.data?.device_type)}</div>
+                  <div>Обозначение: {hoverFireAlarmCode || '—'}</div>
+                  <label style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                    <span>Оборудование проекта</span>
+                    <select
+                      value={fireAlarmDraft.equipmentId}
+                      onChange={(e) => setFireAlarmDraft((prev) => ({ ...prev, equipmentId: e.target.value }))}
+                    >
+                      <option value="">Не выбрано</option>
+                      {getProjectEquipmentOptions(FIRE_ALARM_EQUIPMENT_CATEGORIES[hoverPanel.data?.device_type] || []).map((item) => (
+                        <option key={`fire-alarm-equipment-${item.id}`} value={item.id}>{item.name}</option>
+                      ))}
+                    </select>
+                  </label>
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' }}>
                     <label style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
                       <span>Шлейф</span>
@@ -6758,10 +10424,121 @@ function FloorPlanEditor() {
                 </div>
               )}
 
+              {(hoverPanel.type === 'soue-device' || hoverPanel.type === 'new-soue-device') && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                  <div>Тип: {hoverPanel.data?.device_type === 'siren' ? 'Сирена' : 'Табло'}</div>
+                  <div>Обозначение: {getSoueDeviceCode(hoverPanel.data) || '—'}</div>
+                  <label style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                    <span>Оборудование проекта</span>
+                    <select
+                      value={soueDeviceDraft.equipmentId}
+                      onChange={(e) => setSoueDeviceDraft((prev) => ({ ...prev, equipmentId: e.target.value }))}
+                    >
+                      <option value="">Не выбрано</option>
+                      {getProjectEquipmentOptions(SOUE_DEVICE_EQUIPMENT_CATEGORIES[hoverPanel.data?.device_type] || []).map((item) => (
+                        <option key={`soue-equipment-${item.id}`} value={item.id}>{item.name}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                    <span>Модель</span>
+                    <input
+                      type="text"
+                      value={soueDeviceDraft.deviceModel}
+                      onChange={(e) => setSoueDeviceDraft((prev) => ({ ...prev, deviceModel: e.target.value }))}
+                    />
+                  </label>
+                  {hoverPanel.data?.device_type === 'siren' && (
+                    <label style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                      <span>Звуковое давление, дБ</span>
+                      <input
+                        type="number"
+                        step="0.1"
+                        value={soueDeviceDraft.soundPressureDb}
+                        onChange={(e) => setSoueDeviceDraft((prev) => ({ ...prev, soundPressureDb: e.target.value }))}
+                      />
+                    </label>
+                  )}
+                  <label style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                    <span>Высота монтажа</span>
+                    <input
+                      type="number"
+                      step="0.1"
+                      value={soueDeviceDraft.mountingHeight}
+                      onChange={(e) => setSoueDeviceDraft((prev) => ({ ...prev, mountingHeight: e.target.value }))}
+                    />
+                  </label>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' }}>
+                    <label style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                      <span>Смещение подписи X</span>
+                      <input
+                        type="number"
+                        step="0.1"
+                        value={soueDeviceDraft.labelDx}
+                        onChange={(e) => setSoueDeviceDraft((prev) => ({ ...prev, labelDx: e.target.value }))}
+                      />
+                    </label>
+                    <label style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                      <span>Смещение подписи Y</span>
+                      <input
+                        type="number"
+                        step="0.1"
+                        value={soueDeviceDraft.labelDy}
+                        onChange={(e) => setSoueDeviceDraft((prev) => ({ ...prev, labelDy: e.target.value }))}
+                      />
+                    </label>
+                  </div>
+                  <button className="tool-button" onClick={handleSaveSoueDeviceMeta}>Сохранить</button>
+                  <button
+                    className="tool-button"
+                    onClick={() => {
+                      if (hoverPanel.type === 'new-soue-device') {
+                        setNewSoueDevices((prev) => prev.filter((item) => item.id !== hoverPanel.id));
+                        setHasUnsavedChanges(true);
+                        closeHoverPanel();
+                        clearCanvasSelection();
+                      } else {
+                        handleDeleteElement('soue-devices', hoverPanel.id);
+                        closeHoverPanel();
+                      }
+                    }}
+                  >
+                    Удалить
+                  </button>
+                </div>
+              )}
+
               {hoverPanel.type === 'signal-instrument' && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
                   <label style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
-                    <span>Название</span>
+                    <span>Оборудование проекта</span>
+                    <select
+                      value={signalInstrumentDraft.equipmentId}
+                      onChange={(e) => {
+                        const nextEquipmentId = e.target.value;
+                        const nextEquipmentName = getEquipmentNameById(
+                          nextEquipmentId ? Number(nextEquipmentId) : null,
+                          signalInstrumentDraft.name,
+                        );
+                        setSignalInstrumentDraft((prev) => ({
+                          ...prev,
+                          equipmentId: nextEquipmentId,
+                          name: nextEquipmentName || prev.name,
+                        }));
+                      }}
+                    >
+                      <option value="">Не выбрано</option>
+                      {getProjectEquipmentOptions(
+                        SIGNAL_INSTRUMENT_EQUIPMENT_CATEGORIES[
+                          signalInstrumentDraft.instrumentType || hoverPanel.data?.instrument_type
+                        ] || ['instrument', 'keyboard'],
+                      ).map((item) => (
+                        <option key={`signal-instrument-equipment-${item.id}`} value={item.id}>{item.name}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                    <span>Подпись</span>
                     <input
                       type="text"
                       value={signalInstrumentDraft.name}
@@ -6804,7 +10581,7 @@ function FloorPlanEditor() {
                   <div>Режим: {hoverPanel.data?.is_manual ? 'ручной' : 'авто'}</div>
                   {false && <button className="tool-button" onClick={() => refreshCableRoutes(currentSignalSystem, false)}>
                     Пересчитать
-                  </button>
+                  </button>}
                 </div>
               )}
             </div>
@@ -6857,6 +10634,9 @@ function FloorPlanEditor() {
               }
               if (isRoomZoneDrawing && roomZoneRect) {
                 setRoomZoneRect((prev) => (prev ? { ...prev, width: scaledPoint.x - prev.x, height: scaledPoint.y - prev.y } : prev));
+              }
+              if (isRoomCreationDrawing && roomCreationRect) {
+                setRoomCreationRect((prev) => (prev ? { ...prev, width: scaledPoint.x - prev.x, height: scaledPoint.y - prev.y } : prev));
               }
             }}
           >
@@ -8312,7 +12092,7 @@ function FloorPlanEditor() {
 
               {showZkspcOverlayOnCanvas && currentZkspcZones.map((zone) => {
                 const zoneStyle = zkspcStyleMap[Number(zone.zone_number || 1)] || getZkspcStyle(zone, floorPlan?.id);
-                const anchor = zoneLabelAnchors[zone.id || zone.zone_number];
+                const zoneLabelLayout = zoneLabelLayouts[zone.id || zone.zone_number];
                 const zoneRooms = visibleRooms.filter((room) => (
                   (zone.room_ids || []).includes(room.id)
                   && room.boundary_points?.length >= 3
@@ -8374,16 +12154,27 @@ function FloorPlanEditor() {
                         </Group>
                       );
                     })}
-                    {anchor && (
+                    {zoneLabelLayout?.leaderPolyline && (
+                      <Line
+                        points={zoneLabelLayout.leaderPolyline.flat()}
+                        stroke={zoneLabelLayout.color || zoneStyle.labelColor}
+                        strokeWidth={1.2}
+                        dash={[5, 4]}
+                        listening={false}
+                      />
+                    )}
+                    {zoneLabelLayout?.rect && (
                       <Text
-                        x={anchor.x - 120}
-                        y={anchor.y - 10}
-                        width={240}
+                        x={zoneLabelLayout.rect.x}
+                        y={zoneLabelLayout.rect.y}
+                        width={zoneLabelLayout.rect.width}
                         align="center"
                         text={zoneStyle.label}
                         fontSize={16}
                         fontFamily="GOST A"
-                        fill={zoneStyle.labelColor}
+                        fill={zoneLabelLayout.color || zoneStyle.labelColor}
+                        wrap="none"
+                        ellipsis={false}
                         listening={false}
                       />
                     )}
@@ -8416,41 +12207,59 @@ function FloorPlanEditor() {
 
               {/* Render Dimensions */}
               {showDimensionsOnCanvas && visibleDimensions.map((dim) => (
-                <Text
-                  key={`dim-${dim.id}`}
-                  x={dim.x}
-                  y={dim.y}
-                  text={dim.text || formatDimensionMeters(dim.value)}
-                  fontSize={12}
-                  fontFamily={CANVAS_FONT_FAMILY}
-                  fill="red"
-                />
+                <React.Fragment key={`dim-${dim.id}`}>
+                  {dimensionLabelLayouts[dim.id]?.leaderPolyline && (
+                    <Line
+                      points={dimensionLabelLayouts[dim.id].leaderPolyline.flat()}
+                      stroke="red"
+                      strokeWidth={1.1}
+                      dash={[4, 3]}
+                      listening={false}
+                    />
+                  )}
+                  {dimensionLabelLayouts[dim.id]?.rect && (
+                    <Text
+                      x={dimensionLabelLayouts[dim.id].rect.x}
+                      y={dimensionLabelLayouts[dim.id].rect.y}
+                      width={dimensionLabelLayouts[dim.id].rect.width}
+                      text={dim.text || formatDimensionMeters(dim.value)}
+                      fontSize={12}
+                      fontFamily={CANVAS_FONT_FAMILY}
+                      fill="red"
+                      wrap="none"
+                      ellipsis={false}
+                    />
+                  )}
+                </React.Fragment>
               ))}
 
               {showCableRoutesOnCanvas && (
                 <CableRoutesLayer
                   routes={visibleCableRoutes}
                   selectedElement={selectedElement}
+                  selectedCableSegment={selectedCableSegment}
                   hoveredElement={hoveredElement}
                   activeCableHandle={activeCableHandle}
+                  deviceLookup={visibleFireAlarmLookup}
                   isRouteBlocked={(routeId) => (
                     drawingToolActive
                     || (selectionLockActive && !isElementSelected('cable-route', routeId))
                   )}
-                  onSelectRoute={(route) => {
-                    setSelectedElement({ type: 'cable-route', id: route.id, data: route });
-                    setSelectedElements([{ type: 'cable-route', id: route.id }]);
-                  }}
+                  onSelectRoute={(route) => handleSelectCableRoute(route)}
+                  onSelectSegment={handleSelectCableRoute}
                   onHoverEnter={(routeId, e) => handleCanvasElementEnter('cable-route', routeId, e)}
                   onHoverMove={(routeId, e) => handleCanvasElementMove('cable-route', routeId, e)}
                   onHoverLeave={handleCanvasElementLeave}
-                  onHandleDragStart={(routeId, pointIndex) => setActiveCableHandle({ routeId, pointIndex })}
+                  onHandleDragStart={(routeId, pointIndex) => {
+                    setSelectedCableSegment(null);
+                    setActiveCableHandle({ routeId, pointIndex });
+                  }}
                   onHandleDragEnd={handleCableRouteHandleDragEnd}
                   onSegmentDragStart={(routeId, insertIndex) => setActiveCableHandle({ routeId, insertIndex })}
                   onSegmentDragEnd={handleCableRouteSegmentDragEnd}
                   onZcLabelDragEnd={handleZcLabelDragEnd}
                   labelObstacles={cableLabelObstacles}
-                  stageBounds={stagePlanBounds}
+                  stageBounds={planDrawingBounds}
                 />
               )}
 
@@ -8515,9 +12324,16 @@ function FloorPlanEditor() {
               }))}
 
               {showSignalInstrumentsOnCanvas && visibleSignalInstruments.map((instrument) => {
-                const isSelected = selectedElement?.type === 'signal-instrument' && selectedElement?.id === instrument.id;
+                const isSelected = (
+                  (selectedElement?.type === 'signal-instrument' && selectedElement?.id === instrument.id)
+                  || (mergeModeActive && mergeInstrumentId === instrument.id)
+                );
                 const isHovered = hoveredElement?.type === 'signal-instrument' && hoveredElement?.id === instrument.id;
-                const isBlocked = drawingToolActive || (selectionLockActive && !isElementSelected('signal-instrument', instrument.id));
+                const canInteractWithInstrument = ['signal_instruments', 'fire_alarms', 'devices_cables', 'soue_devices', 'soue_cables'].includes(currentViewStep);
+                const isBlocked = !canInteractWithInstrument
+                  || (!mergeModeActive && drawingToolActive)
+                  || (!mergeModeActive && selectionLockActive && !isElementSelected('signal-instrument', instrument.id));
+                const instrumentLabelLayout = signalInstrumentLabelLayouts[instrument.id];
                 return (
                   <Group
                     key={`signal-instrument-${instrument.id}`}
@@ -8539,27 +12355,38 @@ function FloorPlanEditor() {
                       handleCanvasElementMove('signal-instrument', instrument.id, e);
                     }) : undefined}
                     onMouseLeave={!isBlocked ? handleCanvasElementLeave : undefined}
-                  >
-                    <SignalInstrumentSymbol
-                      x={0}
+                    >
+                      <SignalInstrumentSymbol
+                        x={0}
                       y={0}
                       instrumentType={instrument.instrument_type}
                       isSelected={isSelected}
                       isHovered={isHovered}
                       listening={false}
                     />
-                    {signalInstrumentLabelLayouts[instrument.id] && (
+                    {instrumentLabelLayout?.leaderPolyline && (
+                      <Line
+                        points={instrumentLabelLayout.leaderPolyline.flatMap(([x, y]) => [x - instrument.x, y - instrument.y])}
+                        stroke="#111111"
+                        strokeWidth={1.1}
+                        dash={[4, 3]}
+                        listening={false}
+                      />
+                    )}
+                    {instrumentLabelLayout?.rect && (
                       <Text
-                        x={signalInstrumentLabelLayouts[instrument.id].x - instrument.x}
-                        y={signalInstrumentLabelLayouts[instrument.id].y - instrument.y}
-                        width={signalInstrumentLabelLayouts[instrument.id].width}
+                        x={instrumentLabelLayout.rect.x - instrument.x}
+                        y={instrumentLabelLayout.rect.y - instrument.y}
+                        width={instrumentLabelLayout.rect.width}
                         align="center"
                         text={getInstrumentLabelText(instrument)}
                         fontSize={11}
                         fontFamily={CANVAS_FONT_FAMILY}
                         fill="#111111"
+                        wrap="none"
+                        ellipsis={false}
                         listening={!isBlocked}
-                        draggable={!isBlocked && selectedTool === 'select'}
+                        draggable={false}
                         onClick={(e) => {
                           e.cancelBubble = true;
                         }}
@@ -8590,16 +12417,22 @@ function FloorPlanEditor() {
                 const room = current.room_id
                   ? rooms.find((item) => item.id === current.room_id)
                   : null;
-                const roomBounds = room?.boundary_points?.length ? getBoundingBox(room.boundary_points) : null;
+                const displayPoint = isDragging && activeDrag?.type === kind && activeDrag?.id === alarm.id
+                  ? { x: activeDrag.x, y: activeDrag.y }
+                  : { x: current.x, y: current.y };
+                const fireAlarmGuide = getNearestRoomMeasurementGuide(room, displayPoint, floorPlan?.scale_factor);
+                const fireAlarmGuideLayouts = buildGuideLabelLayouts(fireAlarmGuide);
                 const label = getFireAlarmCode(current);
                 const labelColor = current.device_type === 'manual_call_point' ? '#b91c1c' : '#d32f2f';
+                const fireLabelLayout = fireAlarmLabelLayouts[current.id]?.rect || null;
+                const fireLabelLeader = fireAlarmLabelLayouts[current.id]?.leaderPolyline || null;
 
                 return (
                   <React.Fragment key={`alarm-${kind}-${alarm.id}`}>
                     {coverageRadiusPx && current.device_type !== 'manual_call_point' && (isSelected || isHovered) && (
                       <Circle
-                        x={current.x}
-                        y={current.y}
+                        x={displayPoint.x}
+                        y={displayPoint.y}
                         radius={coverageRadiusPx}
                         fill="rgba(217,45,32,0.08)"
                         stroke="rgba(217,45,32,0.45)"
@@ -8608,25 +12441,25 @@ function FloorPlanEditor() {
                         listening={false}
                       />
                     )}
-                    {(isDragging || isSelected) && roomBounds && (
+                    {(isDragging || isSelected || isHovered) && fireAlarmGuide && (
                       <>
                         <Line
-                          points={[roomBounds.x, current.y, current.x, current.y]}
+                          points={fireAlarmGuide.horizontalLine}
                           stroke="#d32f2f"
                           strokeWidth={1}
                           dash={[4, 4]}
                           listening={false}
                         />
                         <Line
-                          points={[current.x, roomBounds.y, current.x, current.y]}
+                          points={fireAlarmGuide.verticalLine}
                           stroke="#d32f2f"
                           strokeWidth={1}
                           dash={[4, 4]}
                           listening={false}
                         />
-                        {current.offset_left_m !== null && current.offset_left_m !== undefined && (
+                        {false && current.offset_left_m !== null && current.offset_left_m !== undefined && (
                           <Text
-                            x={roomBounds.x + 4}
+                            x={fireAlarmGuide.horizontalLabel.x}
                             y={current.y - 18}
                             text={`${current.offset_left_m.toFixed(2)} м`}
                             fontSize={11}
@@ -8634,14 +12467,60 @@ function FloorPlanEditor() {
                             fill="#9f1239"
                           />
                         )}
-                        {current.offset_top_m !== null && current.offset_top_m !== undefined && (
+                        {false && current.offset_top_m !== null && current.offset_top_m !== undefined && (
                           <Text
                             x={current.x + 6}
-                            y={roomBounds.y + 4}
+                            y={fireAlarmGuide.verticalLabel.y}
                             text={`${current.offset_top_m.toFixed(2)} м`}
                             fontSize={11}
                             fontFamily={CANVAS_FONT_FAMILY}
                             fill="#9f1239"
+                          />
+                        )}
+                        {fireAlarmGuideLayouts?.horizontal?.leaderPolyline && (
+                          <Line
+                            points={fireAlarmGuideLayouts.horizontal.leaderPolyline.flat()}
+                            stroke="#9f1239"
+                            strokeWidth={1}
+                            dash={[3, 3]}
+                            listening={false}
+                          />
+                        )}
+                        {fireAlarmGuideLayouts?.horizontal?.rect && (
+                          <Text
+                            x={fireAlarmGuideLayouts.horizontal.rect.x}
+                            y={fireAlarmGuideLayouts.horizontal.rect.y}
+                            width={fireAlarmGuideLayouts.horizontal.rect.width}
+                            text={fireAlarmGuide.horizontalLabel.text}
+                            align="center"
+                            fontSize={11}
+                            fontFamily={CANVAS_FONT_FAMILY}
+                            fill="#9f1239"
+                            wrap="none"
+                            ellipsis={false}
+                          />
+                        )}
+                        {fireAlarmGuideLayouts?.vertical?.leaderPolyline && (
+                          <Line
+                            points={fireAlarmGuideLayouts.vertical.leaderPolyline.flat()}
+                            stroke="#9f1239"
+                            strokeWidth={1}
+                            dash={[3, 3]}
+                            listening={false}
+                          />
+                        )}
+                        {fireAlarmGuideLayouts?.vertical?.rect && (
+                          <Text
+                            x={fireAlarmGuideLayouts.vertical.rect.x}
+                            y={fireAlarmGuideLayouts.vertical.rect.y}
+                            width={fireAlarmGuideLayouts.vertical.rect.width}
+                            text={fireAlarmGuide.verticalLabel.text}
+                            align="center"
+                            fontSize={11}
+                            fontFamily={CANVAS_FONT_FAMILY}
+                            fill="#9f1239"
+                            wrap="none"
+                            ellipsis={false}
                           />
                         )}
                       </>
@@ -8661,15 +12540,7 @@ function FloorPlanEditor() {
                       onClick={!isBlocked ? ((e) => {
                         e.cancelBubble = true;
                         if (mergeModeActive) {
-                          setSelectedElement(
-                            mergeInstrumentId && visibleSignalInstruments.find((item) => item.id === mergeInstrumentId)
-                              ? {
-                                type: 'signal-instrument',
-                                id: mergeInstrumentId,
-                                data: visibleSignalInstruments.find((item) => item.id === mergeInstrumentId) || null,
-                              }
-                              : null,
-                          );
+                          setSelectedElement(null);
                           setSelectedElements((prev) => {
                             const alreadySelected = prev.some((item) => item.type === itemType && item.id === alarm.id);
                             if (e.evt?.shiftKey) {
@@ -8692,22 +12563,35 @@ function FloorPlanEditor() {
                       }) : undefined}
                       onMouseLeave={!isBlocked ? handleCanvasElementLeave : undefined}
                     />
-                    <Text
-                      x={(fireAlarmLabelLayouts[current.id] || estimateTextRect(label, current.x + 12, current.y - 18, 10)).x}
-                      y={(fireAlarmLabelLayouts[current.id] || estimateTextRect(label, current.x + 12, current.y - 18, 10)).y}
-                      width={(fireAlarmLabelLayouts[current.id] || estimateTextRect(label, current.x + 12, current.y - 18, 10)).width}
-                      align="center"
-                      text={label}
-                      fontSize={10}
-                      fontFamily={CANVAS_FONT_FAMILY}
-                      fill={labelColor}
-                      listening={!isBlocked}
-                      draggable={!isBlocked && selectedTool === 'select'}
-                      onClick={(e) => {
-                        e.cancelBubble = true;
-                      }}
-                      onDragEnd={(e) => handleFireAlarmLabelDragEnd(kind, alarm.id, alarm, e)}
-                    />
+                    {fireLabelLeader && fireLabelLayout && (
+                      <Line
+                        points={fireLabelLeader.flat()}
+                        stroke={labelColor}
+                        strokeWidth={1.1}
+                        dash={[4, 3]}
+                        listening={false}
+                      />
+                    )}
+                    {fireLabelLayout && (
+                      <Text
+                        x={fireLabelLayout.x}
+                        y={fireLabelLayout.y}
+                        width={fireLabelLayout.width}
+                        align="center"
+                        text={label}
+                        fontSize={10}
+                        fontFamily={CANVAS_FONT_FAMILY}
+                        fill={labelColor}
+                        wrap="none"
+                        ellipsis={false}
+                        listening={!isBlocked}
+                        draggable={!isBlocked && selectedTool === 'select'}
+                        onClick={(e) => {
+                          e.cancelBubble = true;
+                        }}
+                        onDragEnd={(e) => handleFireAlarmLabelDragEnd(kind, alarm.id, alarm, e)}
+                      />
+                    )}
                     {isSelected && (
                       <DeleteButton
                         x={current.x + 20}
@@ -8720,6 +12604,204 @@ function FloorPlanEditor() {
                             clearCanvasSelection();
                           } else {
                             handleDeleteElement('fire-alarms', alarm.id);
+                          }
+                        }}
+                      />
+                    )}
+                  </React.Fragment>
+                );
+              })}
+              {showSoueDevicesOnCanvas && visibleSoueItems.map(({ kind, device }) => {
+                const current = getSoueDeviceCurrentGeometry(kind, device.id, device);
+                if (!current) {
+                  return null;
+                }
+                const itemType = kind === 'new-soue-devices' ? 'new-soue-device' : 'soue-device';
+                const isSelected = (
+                  (selectedElement?.type === itemType && selectedElement?.id === device.id)
+                  || selectedElements.some((item) => item.type === itemType && item.id === device.id)
+                );
+                const isBlocked = isElementInteractionBlocked(itemType, device.id);
+                const isHovered = hoveredElement?.type === itemType && hoveredElement?.id === device.id;
+                const isDragging = activeDrag?.type === kind && activeDrag?.id === device.id;
+                const room = current.room_id
+                  ? rooms.find((item) => item.id === current.room_id)
+                  : null;
+                const displayPoint = isDragging && activeDrag?.type === kind && activeDrag?.id === device.id
+                  ? { x: activeDrag.x, y: activeDrag.y }
+                  : { x: current.x, y: current.y };
+                const soueGuide = getNearestRoomMeasurementGuide(room, displayPoint, floorPlan?.scale_factor);
+                const soueGuideLayouts = buildGuideLabelLayouts(soueGuide);
+                const label = getSoueDeviceCode(current);
+                const labelLayout = label ? (soueDeviceLabelLayouts[current.id]?.rect || null) : null;
+                const soueLabelLeader = label ? (soueDeviceLabelLayouts[current.id]?.leaderPolyline || null) : null;
+
+                return (
+                  <React.Fragment key={`soue-device-${kind}-${device.id}`}>
+                    {(isDragging || isSelected) && soueGuide && (
+                      <>
+                        <Line
+                          points={soueGuide.horizontalLine}
+                          stroke={SOUE_VISUAL_STYLE.base}
+                          strokeWidth={1}
+                          dash={[4, 4]}
+                          listening={false}
+                        />
+                        <Line
+                          points={soueGuide.verticalLine}
+                          stroke={SOUE_VISUAL_STYLE.base}
+                          strokeWidth={1}
+                          dash={[4, 4]}
+                          listening={false}
+                        />
+                        {false && current.offset_left_m !== null && current.offset_left_m !== undefined && (
+                          <Text
+                            x={soueGuide.horizontalLabel.x}
+                            y={current.y - 18}
+                            text={`${current.offset_left_m.toFixed(2)} м`}
+                            fontSize={11}
+                            fontFamily={CANVAS_FONT_FAMILY}
+                            fill={SOUE_VISUAL_STYLE.base}
+                          />
+                        )}
+                        {false && current.offset_top_m !== null && current.offset_top_m !== undefined && (
+                          <Text
+                            x={current.x + 6}
+                            y={soueGuide.verticalLabel.y}
+                            text={`${current.offset_top_m.toFixed(2)} м`}
+                            fontSize={11}
+                            fontFamily={CANVAS_FONT_FAMILY}
+                            fill={SOUE_VISUAL_STYLE.base}
+                          />
+                        )}
+                        {soueGuideLayouts?.horizontal?.leaderPolyline && (
+                          <Line
+                            points={soueGuideLayouts.horizontal.leaderPolyline.flat()}
+                            stroke={SOUE_VISUAL_STYLE.base}
+                            strokeWidth={1}
+                            dash={[3, 3]}
+                            listening={false}
+                          />
+                        )}
+                        {soueGuideLayouts?.horizontal?.rect && (
+                          <Text
+                            x={soueGuideLayouts.horizontal.rect.x}
+                            y={soueGuideLayouts.horizontal.rect.y}
+                            width={soueGuideLayouts.horizontal.rect.width}
+                            text={soueGuide.horizontalLabel.text}
+                            align="center"
+                            fontSize={11}
+                            fontFamily={CANVAS_FONT_FAMILY}
+                            fill={SOUE_VISUAL_STYLE.base}
+                            wrap="none"
+                            ellipsis={false}
+                          />
+                        )}
+                        {soueGuideLayouts?.vertical?.leaderPolyline && (
+                          <Line
+                            points={soueGuideLayouts.vertical.leaderPolyline.flat()}
+                            stroke={SOUE_VISUAL_STYLE.base}
+                            strokeWidth={1}
+                            dash={[3, 3]}
+                            listening={false}
+                          />
+                        )}
+                        {soueGuideLayouts?.vertical?.rect && (
+                          <Text
+                            x={soueGuideLayouts.vertical.rect.x}
+                            y={soueGuideLayouts.vertical.rect.y}
+                            width={soueGuideLayouts.vertical.rect.width}
+                            text={soueGuide.verticalLabel.text}
+                            align="center"
+                            fontSize={11}
+                            fontFamily={CANVAS_FONT_FAMILY}
+                            fill={SOUE_VISUAL_STYLE.base}
+                            wrap="none"
+                            ellipsis={false}
+                          />
+                        )}
+                      </>
+                    )}
+                    <SoueDeviceSymbol
+                      x={current.x}
+                      y={current.y}
+                      rotation={getSoueDisplayRotation(current)}
+                      deviceType={current.device_type}
+                      isSelected={isSelected}
+                      isHovered={isHovered}
+                      opacity={isDragging ? 0.45 : 1}
+                      listening={!isBlocked}
+                      draggable={!isBlocked && selectedTool === 'select'}
+                      onDragStart={!isBlocked ? ((e) => handleElementDragStart(kind, device.id, e)) : undefined}
+                      onDragMove={!isBlocked ? ((e) => handleElementDragMove(kind, device.id, device, e)) : undefined}
+                      onDragEnd={!isBlocked ? ((e) => handleElementDragEnd(kind, device.id, e)) : undefined}
+                      onClick={!isBlocked ? ((e) => {
+                        e.cancelBubble = true;
+                        if (mergeModeActive) {
+                          setSelectedElement(null);
+                          setSelectedElements((prev) => {
+                            const alreadySelected = prev.some((item) => item.type === itemType && item.id === device.id);
+                            if (e.evt?.shiftKey) {
+                              return alreadySelected
+                                ? prev.filter((item) => !(item.type === itemType && item.id === device.id))
+                                : [...prev, { type: itemType, id: device.id }];
+                            }
+                            return [{ type: itemType, id: device.id }];
+                          });
+                          return;
+                        }
+                        setSelectedElement({ type: itemType, id: device.id, data: current });
+                        setSelectedElements([{ type: itemType, id: device.id }]);
+                      }) : undefined}
+                      onMouseEnter={!isBlocked ? ((e) => {
+                        handleCanvasElementEnter(itemType, device.id, e, isSelected ? 'move' : 'pointer');
+                      }) : undefined}
+                      onMouseMove={!isBlocked ? ((e) => {
+                        handleCanvasElementMove(itemType, device.id, e);
+                      }) : undefined}
+                      onMouseLeave={!isBlocked ? handleCanvasElementLeave : undefined}
+                    />
+                    {soueLabelLeader && labelLayout && (
+                      <Line
+                        points={soueLabelLeader.flat()}
+                        stroke={SOUE_VISUAL_STYLE.base}
+                        strokeWidth={1.1}
+                        dash={[4, 3]}
+                        listening={false}
+                      />
+                    )}
+                    {label && labelLayout && (
+                      <Text
+                        x={labelLayout.x}
+                        y={labelLayout.y}
+                        width={labelLayout.width}
+                        align="center"
+                        text={label}
+                        fontSize={10}
+                        fontFamily={CANVAS_FONT_FAMILY}
+                        fill={SOUE_VISUAL_STYLE.base}
+                        wrap="none"
+                        ellipsis={false}
+                        listening={!isBlocked}
+                        draggable={!isBlocked && selectedTool === 'select'}
+                        onClick={(e) => {
+                          e.cancelBubble = true;
+                        }}
+                        onDragEnd={(e) => handleSoueDeviceLabelDragEnd(kind, device.id, device, e)}
+                      />
+                    )}
+                    {isSelected && (
+                      <DeleteButton
+                        x={current.x + 24}
+                        y={current.y - 22}
+                        onClick={(e) => {
+                          e.cancelBubble = true;
+                          if (kind === 'new-soue-devices') {
+                            setNewSoueDevices((prev) => prev.filter((item) => item.id !== device.id));
+                            setHasUnsavedChanges(true);
+                            clearCanvasSelection();
+                          } else {
+                            handleDeleteElement('soue-devices', device.id);
                           }
                         }}
                       />
@@ -8750,6 +12832,19 @@ function FloorPlanEditor() {
                   dash={[6, 3]}
                   strokeWidth={1.5}
                   fill="rgba(111,66,193,0.12)"
+                  listening={false}
+                />
+              )}
+              {roomCreationRect && (
+                <Rect
+                  x={normalizeRect(roomCreationRect)?.x}
+                  y={normalizeRect(roomCreationRect)?.y}
+                  width={normalizeRect(roomCreationRect)?.width}
+                  height={normalizeRect(roomCreationRect)?.height}
+                  stroke="#198754"
+                  dash={[6, 3]}
+                  strokeWidth={1.5}
+                  fill="rgba(25,135,84,0.12)"
                   listening={false}
                 />
               )}
@@ -8793,8 +12888,11 @@ function FloorPlanEditor() {
           </Stage>
           )}
         </div>
+        </>
+        )}
       </div>
 
+      {!hideEditorSidePanels && (
       <div className="editor-right-sidebar">
         <div className="sidebar-section">
           <h3>Информация о плане</h3>
@@ -8817,8 +12915,6 @@ function FloorPlanEditor() {
             />
           </label>
           <p><strong>Размер:</strong> {floorPlan.image_width} × {floorPlan.image_height}px</p>
-          <p><strong>Масштаб:</strong> {floorPlan.scale_factor} мм/px</p>
-          <p><strong>Обратный масштаб:</strong> 1 px = {formatMetersValue((floorPlan.scale_factor || 0) / 1000, 2)}</p>
           <div style={{ padding: '8px', border: '1px solid #dee2e6', borderRadius: '6px', marginBottom: '8px', background: '#f8f9fa' }}>
             <strong style={{ display: 'block', marginBottom: '6px' }}>Калибровка масштаба</strong>
             <div style={{ fontSize: '12px', color: '#6c757d', marginBottom: '6px' }}>
@@ -8843,15 +12939,18 @@ function FloorPlanEditor() {
             <div style={{ fontSize: '12px', color: '#6c757d' }}>
               px: {calibrationPixelDistance ? calibrationPixelDistance.toFixed(2) : '—'}
             </div>
-            <div style={{ fontSize: '12px', color: '#6c757d' }}>
-              Новый масштаб: {calibrationScalePreview ? `${calibrationScalePreview.toFixed(2)} мм/px` : '—'}
-            </div>
+            {calibrationScalePreview && (
+              <div style={{ fontSize: '12px', color: '#6c757d' }}>
+                Калибровка готова к сохранению
+              </div>
+            )}
           </div>
           <button className="tool-button" style={{ width: '100%' }} disabled={savingPlanMeta} onClick={handleSavePlanMeta}>
             {savingPlanMeta ? 'Сохранение...' : 'Сохранить параметры'}
           </button>
         </div>
       </div>
+      )}
     </div>
   );
 }

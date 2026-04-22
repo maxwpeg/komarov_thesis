@@ -32,6 +32,7 @@ class FloorPlanRecord:
     rooms: list[dict[str, Any]] = field(default_factory=list)
     dimensions: list[dict[str, Any]] = field(default_factory=list)
     fire_alarms: list[dict[str, Any]] = field(default_factory=list)
+    soue_devices: list[dict[str, Any]] = field(default_factory=list)
     zkspc_zones: list[dict[str, Any]] = field(default_factory=list)
     signal_instruments: list[dict[str, Any]] = field(default_factory=list)
     cable_routes: list[dict[str, Any]] = field(default_factory=list)
@@ -60,6 +61,7 @@ class FloorPlanRecord:
             rooms=[item.to_dict() for item in floor_plan.rooms] if include_elements else [],
             dimensions=[item.to_dict() for item in floor_plan.dimensions] if include_elements else [],
             fire_alarms=[item.to_dict() for item in floor_plan.fire_alarms] if include_elements else [],
+            soue_devices=[item.to_dict() for item in floor_plan.soue_devices] if include_elements else [],
             zkspc_zones=[item.to_dict() for item in floor_plan.zkspc_zones] if include_elements else [],
             signal_instruments=[item.to_dict() for item in floor_plan.signal_instruments] if include_elements else [],
             cable_routes=[item.to_dict() for item in floor_plan.cable_routes] if include_elements else [],
@@ -75,6 +77,7 @@ class FloorPlanRecord:
             data["rooms"] = []
             data["dimensions"] = []
             data["fire_alarms"] = []
+            data["soue_devices"] = []
             data["zkspc_zones"] = []
             data["signal_instruments"] = []
             data["cable_routes"] = []

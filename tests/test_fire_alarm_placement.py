@@ -3,7 +3,13 @@ from __future__ import annotations
 from shapely.geometry import Point, Polygon
 from shapely.ops import unary_union
 
-from backend.fire_alarm_placement import FireAlarmPlacement, calculate_fire_alarm_layout, locate_fire_alarm_metadata
+from backend.fire_alarm_placement import (
+    FireAlarmPlacement,
+    _detector_symbol_spacing_px,
+    _refine_detector_positions_for_drawing,
+    calculate_fire_alarm_layout,
+    locate_fire_alarm_metadata,
+)
 from backend.signal_planning import (
     _build_polyline,
     _wall_crossing_summary,
@@ -386,6 +392,110 @@ def test_manual_call_points_are_not_created_for_unserviceable_room():
     assert layout["manual_call_points"] == []
 
 
+def test_manual_call_points_are_not_created_for_internal_stair_door():
+    layout = calculate_fire_alarm_layout(
+        {
+            "rooms": [
+                {
+                    "id": 21,
+                    "name": "Office",
+                    "room_type": "general",
+                    "boundary_points": [[0, 0], [100, 0], [100, 100], [0, 100]],
+                    "area_sqm": 100.0,
+                    "center_x": 50,
+                    "center_y": 50,
+                },
+                {
+                    "id": 22,
+                    "name": "Stair",
+                    "room_type": "РЅРµРѕР±СЃР»СѓР¶РёРІР°РµРјРѕРµ",
+                    "boundary_points": [[100, 0], [180, 0], [180, 100], [100, 100]],
+                    "area_sqm": 80.0,
+                    "center_x": 140,
+                    "center_y": 50,
+                },
+            ],
+            "doors": [
+                {"id": 1, "x": 95, "y": 40, "width": 10, "height": 20, "rotation_deg": 90, "wall_id": 1},
+            ],
+            "stairs": [
+                {"id": 1, "x": 120, "y": 25, "width": 30, "height": 50},
+            ],
+            "walls": [
+                {"id": 1, "x1": 100, "y1": 0, "x2": 100, "y2": 100},
+            ],
+        },
+        scale_factor=100.0,
+    )
+
+    assert layout["manual_call_points"] == []
+
+
+def test_manual_call_points_are_created_for_stair_room_external_door():
+    layout = calculate_fire_alarm_layout(
+        {
+            "rooms": [
+                {
+                    "id": 31,
+                    "name": "Stair",
+                    "room_type": "РЅРµРѕР±СЃР»СѓР¶РёРІР°РµРјРѕРµ",
+                    "boundary_points": [[0, 0], [100, 0], [100, 100], [0, 100]],
+                    "area_sqm": 100.0,
+                    "center_x": 50,
+                    "center_y": 50,
+                }
+            ],
+            "doors": [
+                {"id": 1, "x": 40, "y": -5, "width": 20, "height": 10, "rotation_deg": 0, "wall_id": 1},
+            ],
+            "stairs": [
+                {"id": 1, "x": 30, "y": 20, "width": 40, "height": 40},
+            ],
+            "walls": [
+                {"id": 1, "x1": 0, "y1": 0, "x2": 100, "y2": 0},
+            ],
+        },
+        scale_factor=100.0,
+    )
+
+    assert len(layout["manual_call_points"]) == 1
+    assert layout["manual_call_points"][0]["device_type"] == "manual_call_point"
+
+
+def test_detector_symbol_spacing_keeps_half_symbol_gap_between_edges():
+    assert _detector_symbol_spacing_px(10.0) == 42.0
+    assert _detector_symbol_spacing_px(100.0) == 42.0
+
+
+def test_non_addressable_refinement_pushes_smoke_detectors_apart_to_visual_minimum():
+    room = {
+        "id": 555,
+        "name": "Wide Room",
+        "room_type": "general",
+        "boundary_points": [[0, 0], [120, 0], [120, 120], [0, 120]],
+        "area_sqm": 144.0,
+        "center_x": 60,
+        "center_y": 60,
+    }
+
+    refined, has_overlap = _refine_detector_positions_for_drawing(
+        room,
+        [(58.0, 60.0), (62.0, 60.0)],
+        radius_px=100.0,
+        scale_factor=100.0,
+        coverage_need=1,
+    )
+
+    assert has_overlap is False
+    min_spacing = _detector_symbol_spacing_px(100.0)
+    for left_index in range(len(refined) - 1):
+        for right_index in range(left_index + 1, len(refined)):
+            left = refined[left_index]
+            right = refined[right_index]
+            distance = ((left[0] - right[0]) ** 2 + (left[1] - right[1]) ** 2) ** 0.5
+            assert distance >= min_spacing - 1e-6
+
+
 def test_locate_fire_alarm_metadata_returns_room_offsets_in_meters():
     metadata = locate_fire_alarm_metadata(
         x=35.0,
@@ -454,10 +564,45 @@ def test_non_addressable_route_appends_zc_terminal_point():
     route = routes[0]
     assert route["route_kind"] == "zone_loop"
     assert route["device_ids"] == [1, 2]
+    assert route["polyline_points"][-3] == [26.0, 0.0]
     assert route["polyline_points"][-2] == [40.0, 0.0]
-    assert route["polyline_points"][-1][0] > route["polyline_points"][-2][0]
-    assert route["polyline_points"][-1][1] == route["polyline_points"][-2][1]
-    assert route["polyline_points"][-1][0] - route["polyline_points"][-2][0] < 16.0
+    assert route["polyline_points"][-1] == [59.4, 0.0]
+
+
+def test_intermediate_device_uses_different_entry_and_exit_sides():
+    routes = recalculate_cable_routes(
+        {"scale_factor": 100.0, "walls": []},
+        system_type="addressable",
+        instrument={"id": 55, "x": 0.0, "y": 0.0},
+        alarms=[
+            {"id": 1, "device_type": "smoke_detector", "address": "1", "x": 40.0, "y": 0.0},
+            {"id": 2, "device_type": "smoke_detector", "address": "2", "x": 40.0, "y": 40.0},
+        ],
+    )
+
+    route = routes[0]
+    points = route["polyline_points"]
+    assert [26.0, 0.0] in points
+    assert [40.0, 14.0] in points
+    assert points.index([26.0, 0.0]) < points.index([40.0, 14.0])
+
+
+def test_non_addressable_zc_uses_alternative_side_when_forward_side_is_blocked():
+    routes = recalculate_cable_routes(
+        {
+            "scale_factor": 100.0,
+            "walls": [{"id": 1, "x1": 50.0, "y1": -20.0, "x2": 50.0, "y2": 20.0}],
+        },
+        system_type="non_addressable",
+        instrument={"id": 77, "x": 0.0, "y": 0.0},
+        alarms=[
+            {"id": 1, "device_type": "smoke_detector", "loop_number": 1, "device_number": 1, "x": 40.0, "y": 0.0},
+        ],
+    )
+
+    route = routes[0]
+    assert route["polyline_points"][-2] == [40.0, 0.0]
+    assert route["polyline_points"][-1] == [40.0, -19.4]
 
 
 def test_addressable_routes_form_ring_without_duplicate_device_ids():

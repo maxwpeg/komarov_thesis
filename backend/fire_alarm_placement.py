@@ -153,6 +153,18 @@ def _is_serviceable_room(room: dict[str, Any] | None) -> bool:
     return bool(room) and room.get("room_type") != "необслуживаемое"
 
 
+def _room_contains_stair(room: dict[str, Any] | None, stairs: list[dict[str, Any]]) -> bool:
+    if not room or not room.get("boundary_points") or not stairs:
+        return False
+    polygon = room.get("boundary_points") or []
+    for stair in stairs:
+        center_x = float(stair.get("x", 0.0)) + float(stair.get("width", 0.0)) / 2.0
+        center_y = float(stair.get("y", 0.0)) + float(stair.get("height", 0.0)) / 2.0
+        if point_in_polygon((center_x, center_y), polygon):
+            return True
+    return False
+
+
 def _room_control_points(room: dict[str, Any], scale_factor: float) -> list[Point]:
     polygon = room.get("boundary_points") or []
     if len(polygon) < 3:
@@ -416,8 +428,9 @@ def _detector_coverage_satisfied(
 
 
 def _detector_symbol_spacing_px(scale_factor: float) -> float:
-    scale = _safe_scale(scale_factor)
-    return max(20.0, 220.0 / scale)
+    _safe_scale(scale_factor)
+    detector_symbol_side_px = 28.0
+    return detector_symbol_side_px * 1.5
 
 
 def _refine_detector_positions_for_drawing(
@@ -626,21 +639,7 @@ class FireAlarmPlacement:
         scale = _safe_scale(scale_factor)
         sample_offset_px = max(6.0, 750.0 / scale)
         placement_offset_px = max(4.0, self.DEFAULT_MANUAL_CALL_POINT_OFFSET / scale)
-        stair_margin_px = max(8.0, 600.0 / scale)
         tangent_clearance_px = max(8.0, 180.0 / scale)
-
-        stair_rects = [
-            _expand_rect(
-                (
-                    float(stair["x"]),
-                    float(stair["y"]),
-                    float(stair["x"]) + float(stair["width"]),
-                    float(stair["y"]) + float(stair["height"]),
-                ),
-                stair_margin_px,
-            )
-            for stair in stairs
-        ]
 
         for door in doors:
             center_x = float(door["x"]) + float(door.get("width", 0.0)) / 2.0
@@ -659,25 +658,18 @@ class FireAlarmPlacement:
 
             positive_room = _find_containing_room(positive_sample, rooms)
             negative_room = _find_containing_room(negative_sample, rooms)
-            positive_inside = _is_serviceable_room(positive_room)
-            negative_inside = _is_serviceable_room(negative_room)
+            positive_outside = positive_room is None
+            negative_outside = negative_room is None
+            if positive_outside == negative_outside:
+                continue
 
-            is_external = positive_inside != negative_inside
-
-            near_stair = False
+            positive_allowed = _is_serviceable_room(positive_room) or _room_contains_stair(positive_room, stairs)
+            negative_allowed = _is_serviceable_room(negative_room) or _room_contains_stair(negative_room, stairs)
             desired_sign = 0.0
-            if stair_rects:
-                positive_stair_distance = min(_distance_to_rect(positive_sample, rect) for rect in stair_rects)
-                negative_stair_distance = min(_distance_to_rect(negative_sample, rect) for rect in stair_rects)
-                near_stair = min(positive_stair_distance, negative_stair_distance) <= stair_margin_px
-                if near_stair:
-                    if positive_inside != negative_inside:
-                        desired_sign = 1.0 if positive_inside else -1.0
-                    elif positive_inside:
-                        desired_sign = 1.0 if positive_stair_distance >= negative_stair_distance else -1.0
-
-            if not near_stair and is_external:
-                desired_sign = 1.0 if positive_inside else -1.0
+            if positive_outside and negative_allowed:
+                desired_sign = -1.0
+            elif negative_outside and positive_allowed:
+                desired_sign = 1.0
 
             if desired_sign == 0.0:
                 continue

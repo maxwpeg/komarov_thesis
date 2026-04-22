@@ -32,6 +32,9 @@ class ElementsRepository(Protocol):
     def get_fire_alarm(self, fire_alarm_id: int):
         """Return a fire alarm model or raise."""
 
+    def get_soue_device(self, soue_device_id: int):
+        """Return a SOUE device model or raise."""
+
     def list_walls(self, floor_plan_id: int) -> list:
         """List walls for a floor plan."""
 
@@ -52,6 +55,9 @@ class ElementsRepository(Protocol):
 
     def list_fire_alarms(self, floor_plan_id: int) -> list:
         """List fire alarms for a floor plan."""
+
+    def list_soue_devices(self, floor_plan_id: int) -> list:
+        """List SOUE devices for a floor plan."""
 
     def list_signal_instruments(self, floor_plan_id: int, system_type: str | None = None) -> list:
         """List signal instruments for a floor plan branch."""
@@ -80,6 +86,9 @@ class ElementsRepository(Protocol):
     def create_fire_alarm(self, data: dict):
         """Create a fire alarm persistence entity."""
 
+    def create_soue_device(self, data: dict):
+        """Create a SOUE device persistence entity."""
+
     def create_cable_route(self, data: dict):
         """Create a cable route persistence entity."""
 
@@ -98,8 +107,8 @@ class ElementsRepository(Protocol):
     def refresh(self, entity) -> None:
         """Refresh an entity from persistence."""
 
-    def delete_routes_for_instrument(self, instrument_id: int) -> None:
+    def delete_routes_for_instrument(self, instrument_id: int, subsystem_type: str | None = None) -> None:
         """Delete persisted routes for the instrument."""
 
-    def delete_routes_for_branch(self, floor_plan_id: int, system_type: str) -> None:
+    def delete_routes_for_branch(self, floor_plan_id: int, system_type: str, subsystem_type: str | None = None) -> None:
         """Delete persisted routes for the branch."""

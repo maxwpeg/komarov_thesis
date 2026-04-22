@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any
 
 from backend.errors import AppError
+from backend.modules.equipment.domain.bindings import resolve_project_equipment_id
+from backend.modules.equipment.domain.constants import FIRE_ALARM_DEVICE_CATEGORY_MAP, SOUE_DEVICE_CATEGORY_MAP
 from backend.modules.elements_geometry.domain.policies import (
     FireAlarmMetadataPolicy,
     OpeningNormalizationPolicy,
     RoomGeometryPolicy,
+    SoueDeviceMetadataPolicy,
     StairGeometryPolicy,
 )
 from backend.modules.elements_geometry.domain.records import (
@@ -17,6 +21,7 @@ from backend.modules.elements_geometry.domain.records import (
     DoorRecord,
     FireAlarmRecord,
     RoomRecord,
+    SoueDeviceRecord,
     StairRecord,
     WallRecord,
     WindowRecord,
@@ -26,6 +31,122 @@ from backend.modules.floor_plans.domain.entities import FloorPlanRecord
 from backend.modules.pipeline.application.branch_state import update_signal_branch_state
 from backend.modules.shared.application.unit_of_work import UnitOfWork
 from backend.modules.shared.infrastructure.runtime import NoOpEventPublisher
+
+
+def _model_to_payload(model: Any) -> dict[str, Any]:
+    if isinstance(model, dict):
+        return dict(model)
+    if hasattr(model, "to_dict"):
+        return model.to_dict()
+    return {
+        "id": getattr(model, "id", None),
+        "name": getattr(model, "name", None),
+        "room_type": getattr(model, "room_type", None),
+        "room_number": getattr(model, "room_number", None),
+        "max_occupancy": getattr(model, "max_occupancy", None),
+        "boundary_points": getattr(model, "boundary_points", None),
+    }
+
+
+def _point_on_segment(point: tuple[float, float], start: tuple[float, float], end: tuple[float, float]) -> bool:
+    px, py = point
+    x1, y1 = start
+    x2, y2 = end
+    cross = (px - x1) * (y2 - y1) - (py - y1) * (x2 - x1)
+    if abs(cross) > 1e-6:
+        return False
+    dot = (px - x1) * (px - x2) + (py - y1) * (py - y2)
+    return dot <= 1e-6
+
+
+def _point_in_polygon(point: tuple[float, float], polygon: list[list[float]] | None) -> bool:
+    if not polygon or len(polygon) < 3:
+        return False
+    x, y = point
+    inside = False
+    previous = polygon[-1]
+    for current in polygon:
+        x1, y1 = float(previous[0]), float(previous[1])
+        x2, y2 = float(current[0]), float(current[1])
+        if _point_on_segment(point, (x1, y1), (x2, y2)):
+            return True
+        intersects = ((y1 > y) != (y2 > y)) and (x < (x2 - x1) * (y - y1) / ((y2 - y1) or 1e-9) + x1)
+        if intersects:
+            inside = not inside
+        previous = current
+    return inside
+
+
+def _room_text(room: dict[str, Any] | None) -> str:
+    if room is None:
+        return ""
+    return " ".join(
+        [
+            str(room.get("name") or ""),
+            str(room.get("room_type") or ""),
+            str(room.get("room_number") or ""),
+        ]
+    ).lower()
+
+
+def _is_path_like_room(room: dict[str, Any] | None) -> bool:
+    text = _room_text(room)
+    keywords = ("лест", "corridor", "коридор", "холл", "hall", "фойе", "тамбур", "вестиб", "эвак", "выход", "безопас")
+    return any(keyword in text for keyword in keywords)
+
+
+def _is_large_public_room(room: dict[str, Any] | None) -> bool:
+    if room is None:
+        return False
+    occupancy = room.get("max_occupancy")
+    if occupancy is not None and int(occupancy) >= 50:
+        return True
+    text = _room_text(room)
+    keywords = ("зал", "демонстр", "выстав", "auditor", "showroom")
+    return any(keyword in text for keyword in keywords)
+
+
+def _door_adjacent_room_ids(door: dict[str, Any], rooms: list[dict[str, Any]]) -> list[int]:
+    center = (
+        float(door.get("x") or 0.0) + (float(door.get("width") or 0.0) / 2.0),
+        float(door.get("y") or 0.0) + (float(door.get("height") or 0.0) / 2.0),
+    )
+    rotation_rad = math.radians(float(door.get("rotation_deg") or 0.0))
+    normal = (-math.sin(rotation_rad), math.cos(rotation_rad))
+    sample_offset = max(10.0, float(door.get("height") or 0.0) * 1.5)
+    candidates = [
+        (center[0] + normal[0] * sample_offset, center[1] + normal[1] * sample_offset),
+        (center[0] - normal[0] * sample_offset, center[1] - normal[1] * sample_offset),
+        center,
+    ]
+
+    room_ids: list[int] = []
+    for point in candidates:
+        for room in rooms:
+            polygon = room.get("boundary_points") or []
+            room_id = room.get("id")
+            if room_id is None or not polygon or not _point_in_polygon(point, polygon):
+                continue
+            safe_room_id = int(room_id)
+            if safe_room_id not in room_ids:
+                room_ids.append(safe_room_id)
+    return room_ids
+
+
+def _infer_door_evacuation_exit(door: dict[str, Any], rooms: list[dict[str, Any]]) -> bool:
+    rooms_by_id = {
+        int(room["id"]): room
+        for room in rooms
+        if room.get("id") is not None
+    }
+    adjacent_rooms = [rooms_by_id[room_id] for room_id in _door_adjacent_room_ids(door, rooms) if room_id in rooms_by_id]
+    if len(adjacent_rooms) <= 1:
+        return True
+    if any(_is_path_like_room(room) for room in adjacent_rooms):
+        return True
+    if any(_is_large_public_room(room) for room in adjacent_rooms):
+        return True
+    return False
 
 
 @dataclass(slots=True)
@@ -95,6 +216,11 @@ class OpeningUseCases:
             walls=self.repository.list_walls(payload.floor_plan_id),
             strict=True,
         )
+        if payload.is_evacuation_exit is None:
+            normalized["is_evacuation_exit"] = _infer_door_evacuation_exit(
+                normalized,
+                [_model_to_payload(room) for room in self.repository.list_rooms(payload.floor_plan_id)],
+            )
         door = self.repository.create_door(normalized)
         self.repository.add(door)
         self.uow.commit()
@@ -117,6 +243,11 @@ class OpeningUseCases:
                 "door_type": payload.door_type if payload.door_type is not None else door.door_type,
                 "swing_angle": payload.swing_angle if payload.swing_angle is not None else door.swing_angle,
                 "swing_direction": payload.swing_direction if payload.swing_direction is not None else door.swing_direction,
+                "is_evacuation_exit": (
+                    payload.is_evacuation_exit
+                    if payload.is_evacuation_exit is not None
+                    else door.is_evacuation_exit
+                ),
             },
             floor_plan_scale_factor=floor_plan.scale_factor or 1.0,
             walls=self.repository.list_walls(floor_plan_id),
@@ -194,6 +325,7 @@ class OpeningUseCases:
                     "door_type": door.door_type,
                     "swing_angle": door.swing_angle,
                     "swing_direction": door.swing_direction,
+                    "is_evacuation_exit": door.is_evacuation_exit,
                 },
                 floor_plan_scale_factor=floor_plan.scale_factor or 1.0,
                 walls=walls,
@@ -244,6 +376,7 @@ class OpeningUseCases:
                     "door_type": door.door_type,
                     "swing_angle": door.swing_angle,
                     "swing_direction": door.swing_direction,
+                    "is_evacuation_exit": door.is_evacuation_exit,
                 },
                 floor_plan_scale_factor=floor_plan.scale_factor or 1.0,
                 walls=walls,
@@ -328,6 +461,7 @@ class RoomUseCases:
         self.repository.add(room)
         self.repository.flush()
         FireAlarmCrudUseCases(self.repository, self.uow, self.events).refresh_metadata_for_floor_plan(payload.floor_plan_id)
+        SoueDeviceCrudUseCases(self.repository, self.uow, self.events).refresh_metadata_for_floor_plan(payload.floor_plan_id)
         self.uow.commit()
         self.repository.refresh(room)
         return RoomRecord.from_model(room)
@@ -339,6 +473,7 @@ class RoomUseCases:
             setattr(room, field, value)
         RoomGeometryPolicy.refresh(room, floor_plan.scale_factor)
         FireAlarmCrudUseCases(self.repository, self.uow, self.events).refresh_metadata_for_floor_plan(room.floor_plan_id)
+        SoueDeviceCrudUseCases(self.repository, self.uow, self.events).refresh_metadata_for_floor_plan(room.floor_plan_id)
         self.uow.commit()
         self.repository.refresh(room)
         return RoomRecord.from_model(room)
@@ -349,6 +484,7 @@ class RoomUseCases:
         self.repository.delete(room)
         self.repository.flush()
         FireAlarmCrudUseCases(self.repository, self.uow, self.events).refresh_metadata_for_floor_plan(floor_plan_id)
+        SoueDeviceCrudUseCases(self.repository, self.uow, self.events).refresh_metadata_for_floor_plan(floor_plan_id)
         self.uow.commit()
 
 
@@ -403,6 +539,7 @@ class FireAlarmCrudUseCases:
             "coverage_radius": updates.get("coverage_radius", fire_alarm.coverage_radius),
             "mounting_height": updates.get("mounting_height", fire_alarm.mounting_height),
             "system_type": updates.get("system_type", fire_alarm.system_type),
+            "equipment_id": updates.get("equipment_id", fire_alarm.equipment_id),
             "zkspc_zone_id": updates.get("zkspc_zone_id", fire_alarm.zkspc_zone_id),
             "loop_kind": updates.get("loop_kind", fire_alarm.loop_kind),
             "loop_number": updates.get("loop_number", fire_alarm.loop_number),
@@ -493,13 +630,117 @@ class FireAlarmCrudUseCases:
             scale_factor=floor_plan.scale_factor or 1.0,
             rooms=rooms,
             zone_lookup=lambda room_id: self._find_zkspc_zone_for_room(floor_plan_id, room_id),
-        )
+        ) | {
+            "equipment_id": resolve_project_equipment_id(
+                floor_plan,
+                FIRE_ALARM_DEVICE_CATEGORY_MAP.get(str(data.get("device_type") or ""), ()),
+                data.get("equipment_id"),
+                entity_label="fire alarm device",
+            )
+        }
 
     def _find_zkspc_zone_for_room(self, floor_plan_id: int, room_id: int):
         for zone in self.repository.list_zkspc_zones(floor_plan_id):
             if any(link.room_id == room_id for link in zone.room_links):
                 return zone
         return None
+
+
+@dataclass(slots=True)
+class SoueDeviceCrudUseCases:
+    repository: ElementsRepository
+    uow: UnitOfWork
+    events: Any
+
+    def list_soue_devices(self, floor_plan_id: int) -> list[SoueDeviceRecord]:
+        return [SoueDeviceRecord.from_model(item) for item in self.repository.list_soue_devices(floor_plan_id)]
+
+    def create_soue_device(self, payload) -> SoueDeviceRecord:
+        normalized = self._normalize_soue_device_payload(payload.floor_plan_id, payload.model_dump())
+        device = self.repository.create_soue_device(normalized)
+        self.repository.add(device)
+        self.uow.commit()
+        self.repository.refresh(device)
+        return SoueDeviceRecord.from_model(device)
+
+    def update_soue_device(self, soue_device_id: int, payload) -> SoueDeviceRecord:
+        device = self.repository.get_soue_device(soue_device_id)
+        updates = payload.model_dump(exclude_unset=True)
+        floor_plan_id = int(updates.get("floor_plan_id", device.floor_plan_id))
+        merged = {
+            "floor_plan_id": floor_plan_id,
+            "x": updates.get("x", device.x),
+            "y": updates.get("y", device.y),
+            "device_type": updates.get("device_type", device.device_type),
+            "device_model": updates.get("device_model", device.device_model),
+            "sound_pressure_db": updates.get("sound_pressure_db", device.sound_pressure_db),
+            "mounting_height": updates.get("mounting_height", device.mounting_height),
+            "system_type": updates.get("system_type", device.system_type),
+            "equipment_id": updates.get("equipment_id", device.equipment_id),
+            "loop_kind": updates.get("loop_kind", device.loop_kind),
+            "loop_number": updates.get("loop_number", device.loop_number),
+            "device_number": updates.get("device_number", device.device_number),
+            "room_id": updates.get("room_id", device.room_id),
+            "offset_left_m": updates.get("offset_left_m", device.offset_left_m),
+            "offset_top_m": updates.get("offset_top_m", device.offset_top_m),
+            "label_dx": updates.get("label_dx", device.label_dx),
+            "label_dy": updates.get("label_dy", device.label_dy),
+        }
+        normalized = self._normalize_soue_device_payload(floor_plan_id, merged)
+        for field, value in normalized.items():
+            setattr(device, field, value)
+        self.uow.commit()
+        self.repository.refresh(device)
+        return SoueDeviceRecord.from_model(device)
+
+    def delete_soue_device(self, soue_device_id: int) -> None:
+        self.repository.delete(self.repository.get_soue_device(soue_device_id))
+        self.uow.commit()
+
+    def refresh_metadata_for_floor_plan(self, floor_plan_id: int) -> None:
+        floor_plan = self.repository.get_floor_plan(floor_plan_id)
+        rooms = [room.to_dict() for room in self.repository.list_rooms(floor_plan_id)]
+        scale_factor = floor_plan.scale_factor or 1.0
+        for device in self.repository.list_soue_devices(floor_plan_id):
+            metadata = SoueDeviceMetadataPolicy.normalize(
+                floor_plan_id=floor_plan_id,
+                data={
+                    "x": device.x,
+                    "y": device.y,
+                    "device_type": device.device_type,
+                    "device_model": device.device_model,
+                    "sound_pressure_db": device.sound_pressure_db,
+                    "mounting_height": device.mounting_height,
+                    "system_type": device.system_type,
+                    "loop_kind": device.loop_kind,
+                    "loop_number": device.loop_number,
+                    "device_number": device.device_number,
+                    "label_dx": device.label_dx,
+                    "label_dy": device.label_dy,
+                },
+                scale_factor=scale_factor,
+                rooms=rooms,
+            )
+            device.room_id = metadata["room_id"]
+            device.offset_left_m = metadata["offset_left_m"]
+            device.offset_top_m = metadata["offset_top_m"]
+
+    def _normalize_soue_device_payload(self, floor_plan_id: int, data: dict[str, Any]) -> dict[str, Any]:
+        floor_plan = self.repository.get_floor_plan(floor_plan_id)
+        rooms = [room.to_dict() for room in self.repository.list_rooms(floor_plan_id)]
+        return SoueDeviceMetadataPolicy.normalize(
+            floor_plan_id=floor_plan_id,
+            data=data,
+            scale_factor=floor_plan.scale_factor or 1.0,
+            rooms=rooms,
+        ) | {
+            "equipment_id": resolve_project_equipment_id(
+                floor_plan,
+                SOUE_DEVICE_CATEGORY_MAP.get(str(data.get("device_type") or ""), ()),
+                data.get("equipment_id"),
+                entity_label="SOUE device",
+            )
+        }
 
 
 @dataclass(slots=True)
@@ -512,14 +753,17 @@ class BatchSaveFloorPlanUseCase:
         floor_plan = self.repository.get_floor_plan(floor_plan_id)
         wall_use_cases = WallUseCases(self.repository, self.uow, self.events)
         fire_alarms = FireAlarmCrudUseCases(self.repository, self.uow, self.events)
+        soue_devices = SoueDeviceCrudUseCases(self.repository, self.uow, self.events)
         walls_changed = False
         touched_fire_alarm_systems: set[str] = set()
+        touched_soue_systems: set[str] = set()
         deleted_ids_by_type: dict[str, set[int]] = {
             "walls": set(),
             "stairs": set(),
             "doors": set(),
             "windows": set(),
             "fire-alarms": set(),
+            "soue-devices": set(),
             "rooms": set(),
             "dimensions": set(),
         }
@@ -532,6 +776,10 @@ class BatchSaveFloorPlanUseCase:
                 alarm = self.repository.get_optional_by_type("fire_alarm", item.id)
                 if alarm is not None:
                     touched_fire_alarm_systems.add(alarm.system_type if alarm.system_type in {"addressable", "non_addressable"} else "non_addressable")
+            if item.element_type == "soue-devices":
+                device = self.repository.get_optional_by_type("soue_device", item.id)
+                if device is not None:
+                    touched_soue_systems.add(device.system_type if device.system_type in {"addressable", "non_addressable"} else "non_addressable")
             self._delete_by_type(item.element_type, item.id, missing_ok=item.element_type in {"doors", "windows"})
 
         for wall_payload in payload.create_walls:
@@ -546,6 +794,7 @@ class BatchSaveFloorPlanUseCase:
         self.repository.flush()
         floor_plan_scale = self.repository.get_floor_plan(floor_plan_id).scale_factor or 1.0
         walls = self.repository.list_walls(floor_plan_id)
+        room_payloads = [_model_to_payload(room) for room in self.repository.list_rooms(floor_plan_id)]
         for door_payload in payload.create_doors:
             data = OpeningNormalizationPolicy.normalize(
                 {**door_payload.model_dump(), "floor_plan_id": floor_plan_id},
@@ -553,6 +802,8 @@ class BatchSaveFloorPlanUseCase:
                 walls=walls,
                 strict=True,
             )
+            if door_payload.is_evacuation_exit is None:
+                data["is_evacuation_exit"] = _infer_door_evacuation_exit(data, room_payloads)
             self.repository.add(self.repository.create_door(data))
         for window_payload in payload.create_windows:
             data = OpeningNormalizationPolicy.normalize(
@@ -567,6 +818,11 @@ class BatchSaveFloorPlanUseCase:
             data["floor_plan_id"] = floor_plan_id
             touched_fire_alarm_systems.add(data["system_type"])
             self.repository.add(self.repository.create_fire_alarm(data))
+        for soue_payload in payload.create_soue_devices:
+            data = soue_devices._normalize_soue_device_payload(floor_plan_id, soue_payload.model_dump())
+            data["floor_plan_id"] = floor_plan_id
+            touched_soue_systems.add(data["system_type"])
+            self.repository.add(self.repository.create_soue_device(data))
         for command in payload.update_walls:
             if command.id in deleted_ids_by_type["walls"]:
                 continue
@@ -605,9 +861,18 @@ class BatchSaveFloorPlanUseCase:
                     "height": command.data.height if command.data.height is not None else door.height,
                     "wall_id": command.data.wall_id if command.data.wall_id is not None else door.wall_id,
                     "rotation_deg": command.data.rotation_deg if command.data.rotation_deg is not None else door.rotation_deg,
-                    "door_type": door.door_type,
-                    "swing_angle": door.swing_angle,
-                    "swing_direction": door.swing_direction,
+                    "door_type": command.data.door_type if command.data.door_type is not None else door.door_type,
+                    "swing_angle": command.data.swing_angle if command.data.swing_angle is not None else door.swing_angle,
+                    "swing_direction": (
+                        command.data.swing_direction
+                        if command.data.swing_direction is not None
+                        else door.swing_direction
+                    ),
+                    "is_evacuation_exit": (
+                        command.data.is_evacuation_exit
+                        if command.data.is_evacuation_exit is not None
+                        else door.is_evacuation_exit
+                    ),
                 },
                 floor_plan_scale_factor=floor_plan_scale,
                 walls=walls,
@@ -659,6 +924,7 @@ class BatchSaveFloorPlanUseCase:
                 "coverage_radius": updates.get("coverage_radius", fire_alarm.coverage_radius),
                 "mounting_height": updates.get("mounting_height", fire_alarm.mounting_height),
                 "system_type": updates.get("system_type", fire_alarm.system_type),
+                "equipment_id": updates.get("equipment_id", fire_alarm.equipment_id),
                 "zkspc_zone_id": updates.get("zkspc_zone_id", fire_alarm.zkspc_zone_id),
                 "loop_kind": updates.get("loop_kind", fire_alarm.loop_kind),
                 "loop_number": updates.get("loop_number", fire_alarm.loop_number),
@@ -672,12 +938,47 @@ class BatchSaveFloorPlanUseCase:
             touched_fire_alarm_systems.add(normalized_alarm["system_type"])
             for field, value in normalized_alarm.items():
                 setattr(fire_alarm, field, value)
+        for command in payload.update_soue_devices:
+            if command.id in deleted_ids_by_type["soue-devices"]:
+                continue
+            device = self.repository.get_soue_device(command.id)
+            updates = command.data.model_dump(exclude_unset=True)
+            floor_plan_id_for_device = int(updates.get("floor_plan_id", device.floor_plan_id))
+            merged = {
+                "floor_plan_id": floor_plan_id_for_device,
+                "x": updates.get("x", device.x),
+                "y": updates.get("y", device.y),
+                "device_type": updates.get("device_type", device.device_type),
+                "device_model": updates.get("device_model", device.device_model),
+                "sound_pressure_db": updates.get("sound_pressure_db", device.sound_pressure_db),
+                "mounting_height": updates.get("mounting_height", device.mounting_height),
+                "system_type": updates.get("system_type", device.system_type),
+                "equipment_id": updates.get("equipment_id", device.equipment_id),
+                "loop_kind": updates.get("loop_kind", device.loop_kind),
+                "loop_number": updates.get("loop_number", device.loop_number),
+                "device_number": updates.get("device_number", device.device_number),
+                "label_dx": updates.get("label_dx", device.label_dx),
+                "label_dy": updates.get("label_dy", device.label_dy),
+            }
+            normalized_device = soue_devices._normalize_soue_device_payload(floor_plan_id_for_device, merged)
+            touched_soue_systems.add(normalized_device["system_type"])
+            for field, value in normalized_device.items():
+                setattr(device, field, value)
 
         if walls_changed:
             wall_use_cases._relink_or_prune_openings(floor_plan_id, delete_invalid=True)
+            touched_fire_alarm_systems.update(
+                alarm.system_type if alarm.system_type in {"addressable", "non_addressable"} else "non_addressable"
+                for alarm in self.repository.list_fire_alarms(floor_plan_id)
+            )
+            touched_soue_systems.update(
+                device.system_type if device.system_type in {"addressable", "non_addressable"} else "non_addressable"
+                for device in self.repository.list_soue_devices(floor_plan_id)
+            )
         fire_alarms.refresh_metadata_for_floor_plan(floor_plan_id)
+        soue_devices.refresh_metadata_for_floor_plan(floor_plan_id)
         for system_type in touched_fire_alarm_systems:
-            self.repository.delete_routes_for_branch(floor_plan_id, system_type)
+            self.repository.delete_routes_for_branch(floor_plan_id, system_type, subsystem_type="sps")
             branch_alarm_models = [
                 alarm
                 for alarm in self.repository.list_fire_alarms(floor_plan_id)
@@ -695,6 +996,24 @@ class BatchSaveFloorPlanUseCase:
                 devices_cables_status="draft" if branch_alarm_models else "validated",
                 active_step="devices_cables",
             )
+        for system_type in touched_soue_systems:
+            self.repository.delete_routes_for_branch(floor_plan_id, system_type, subsystem_type="soue")
+            branch_soue_models = [
+                device
+                for device in self.repository.list_soue_devices(floor_plan_id)
+                if device.system_type == system_type
+            ]
+            for device in branch_soue_models:
+                device.loop_kind = None
+                device.loop_number = None
+                device.device_number = None
+            update_signal_branch_state(
+                floor_plan,
+                system_type,
+                soue_devices_status="validated",
+                soue_cables_status="draft" if branch_soue_models else "validated",
+                active_step="soue_cables",
+            )
         self.uow.commit()
         self.repository.refresh(floor_plan)
         self.events.publish(
@@ -710,6 +1029,7 @@ class BatchSaveFloorPlanUseCase:
             "doors": ("door", "door_not_found", "Door not found"),
             "windows": ("window", "window_not_found", "Window not found"),
             "fire-alarms": ("fire_alarm", "fire_alarm_not_found", "Fire alarm not found"),
+            "soue-devices": ("soue_device", "soue_device_not_found", "SOUe device not found"),
             "rooms": ("room", "room_not_found", "Room not found"),
             "dimensions": ("dimension", "dimension_not_found", "Dimension not found"),
         }
@@ -743,6 +1063,7 @@ class ElementsGeometryUseCases:
         self.rooms = RoomUseCases(repository, uow, publisher)
         self.dimensions = DimensionUseCases(repository, uow, publisher)
         self.fire_alarms = FireAlarmCrudUseCases(repository, uow, publisher)
+        self.soue_devices = SoueDeviceCrudUseCases(repository, uow, publisher)
         self.batch = BatchSaveFloorPlanUseCase(repository, uow, publisher)
 
     def list_walls(self, floor_plan_id: int) -> list[WallRecord]:
@@ -837,6 +1158,21 @@ class ElementsGeometryUseCases:
 
     def refresh_fire_alarm_metadata_for_floor_plan(self, floor_plan_id: int) -> None:
         self.fire_alarms.refresh_metadata_for_floor_plan(floor_plan_id)
+
+    def list_soue_devices(self, floor_plan_id: int) -> list[SoueDeviceRecord]:
+        return self.soue_devices.list_soue_devices(floor_plan_id)
+
+    def create_soue_device(self, payload) -> SoueDeviceRecord:
+        return self.soue_devices.create_soue_device(payload)
+
+    def update_soue_device(self, soue_device_id: int, payload) -> SoueDeviceRecord:
+        return self.soue_devices.update_soue_device(soue_device_id, payload)
+
+    def delete_soue_device(self, soue_device_id: int) -> None:
+        self.soue_devices.delete_soue_device(soue_device_id)
+
+    def refresh_soue_device_metadata_for_floor_plan(self, floor_plan_id: int) -> None:
+        self.soue_devices.refresh_metadata_for_floor_plan(floor_plan_id)
 
     def batch_save(self, floor_plan_id: int, payload) -> FloorPlanRecord:
         return self.batch.execute(floor_plan_id, payload)

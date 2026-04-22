@@ -1,33 +1,86 @@
 import React from 'react';
 
-import { SIGNAL_SYSTEM_OPTIONS, formatCableMeters, getSignalSystemLabel } from './helpers';
+import { SIGNAL_SYSTEM_OPTIONS, formatCableMeters } from './helpers';
+
+const TOGGLE_TRACK_STYLE = {
+  display: 'grid',
+  gridTemplateColumns: `repeat(${SIGNAL_SYSTEM_OPTIONS.length}, minmax(0, 1fr))`,
+  gap: '2px',
+  padding: '2px',
+  borderRadius: '999px',
+  border: '1px solid rgba(15, 143, 124, 0.18)',
+  background: 'rgba(15, 143, 124, 0.06)',
+  minWidth: '230px',
+};
 
 export default function SignalSystemSidebarSection({
   currentSignalSystem,
   signalBranchSummary,
+  summaryItems = null,
+  deviceCountLabel = '\u0418\u0437\u0432\u0435\u0449\u0430\u0442\u0435\u043b\u0435\u0439',
   onSwitchSignalSystem,
+  embedded = false,
 }) {
-  return (
-    <div className="sidebar-section">
-      <h3>Тип сигнализации</h3>
-      <div style={{ display: 'grid', gap: '8px' }}>
-        {SIGNAL_SYSTEM_OPTIONS.map((option) => (
-          <button
-            key={option.key}
-            className={`tool-button ${currentSignalSystem === option.key ? 'active' : ''}`}
-            style={{ textAlign: 'left' }}
-            onClick={() => onSwitchSignalSystem(option.key)}
-          >
-            <div>{option.label}</div>
-            <div style={{ fontSize: '11px', color: '#6c757d', fontWeight: 400 }}>{option.hint}</div>
-          </button>
+  const resolvedSummaryItems = summaryItems?.length
+    ? summaryItems
+    : [
+      { key: 'devices', label: deviceCountLabel, value: signalBranchSummary.detectorCount },
+      { key: 'cable', label: '\u041a\u0430\u0431\u0435\u043b\u044f', value: formatCableMeters(signalBranchSummary.cableLengthM) },
+    ];
+
+  const content = (
+    <div style={{ display: 'grid', gap: '10px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'nowrap' }}>
+        <div style={TOGGLE_TRACK_STYLE}>
+          {SIGNAL_SYSTEM_OPTIONS.map((option) => {
+            const active = currentSignalSystem === option.key;
+            return (
+              <button
+                key={option.key}
+                type="button"
+                className={`tool-button ${active ? 'active' : ''}`}
+                style={{
+                  minHeight: '32px',
+                  padding: '0.45rem 0.9rem',
+                  borderRadius: '999px',
+                  boxShadow: 'none',
+                  transform: 'none',
+                  border: 'none',
+                  background: active ? 'var(--accent)' : 'transparent',
+                  color: active ? '#ffffff' : 'var(--text-secondary)',
+                  whiteSpace: 'nowrap',
+                }}
+                onClick={() => onSwitchSignalSystem(option.key)}
+              >
+                {option.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+      <div style={{ padding: '8px 10px', background: '#f8f9fa', borderRadius: '10px', fontSize: '12px', color: 'var(--text-secondary)' }}>
+        {resolvedSummaryItems.map((item) => (
+          <div key={item.key}>
+            {item.label}
+            {': '}
+            {item.value}
+          </div>
         ))}
       </div>
-      <div style={{ marginTop: '10px', padding: '8px', background: '#f8f9fa', borderRadius: '6px', fontSize: '12px' }}>
-        <div><strong>{getSignalSystemLabel(currentSignalSystem)}</strong></div>
-        <div>Извещателей: {signalBranchSummary.detectorCount}</div>
-        <div>Кабеля: {formatCableMeters(signalBranchSummary.cableLengthM)}</div>
+    </div>
+  );
+
+  if (embedded) {
+    return (
+      <div data-testid="signal-system-section-embedded">
+        {content}
       </div>
+    );
+  }
+
+  return (
+    <div className="sidebar-section">
+      {content}
     </div>
   );
 }

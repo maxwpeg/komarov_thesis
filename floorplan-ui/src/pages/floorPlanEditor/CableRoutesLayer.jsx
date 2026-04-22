@@ -1,13 +1,23 @@
 import React from 'react';
 import { Circle, Group, Line, Rect, Text } from 'react-konva';
 
-import { polylineToKonvaPoints } from './helpers';
+import { polylineToKonvaPoints, shouldShowRouteTerminator, SOUE_VISUAL_STYLE } from './helpers';
+import {
+  placePlanText,
+} from './textPlacement';
 
-const DISPLAY_ROUTE_SPACING = 4;
+const BASE_ROUTE_STROKE_WIDTH = 3;
 const ZC_LABEL_TEXT = 'ZC';
 const ZC_LABEL_FONT_SIZE = 8;
-const ZC_LABEL_PADDING_X = 3;
-const ZC_LABEL_HEIGHT = 12;
+const DETECTOR_SYMBOL_HALF_SIZE = 14;
+const ZC_TERMINATOR_HALF_SIZE = 5.4;
+const ZC_ROUTE_OFFSET = DETECTOR_SYMBOL_HALF_SIZE + ZC_TERMINATOR_HALF_SIZE;
+const ZC_SIDE_VECTORS = {
+  east: { x: 1, y: 0 },
+  west: { x: -1, y: 0 },
+  north: { x: 0, y: -1 },
+  south: { x: 0, y: 1 },
+};
 
 function rectsIntersect(a, b) {
   if (!a || !b) {
@@ -30,39 +40,6 @@ function inflateRect(rect, padding) {
     y: rect.y - padding,
     width: rect.width + (padding * 2),
     height: rect.height + (padding * 2),
-  };
-}
-
-function isRectInsideBounds(rect, bounds) {
-  if (!rect || !bounds) {
-    return true;
-  }
-  return rect.x >= bounds.x
-    && rect.y >= bounds.y
-    && rect.x + rect.width <= bounds.x + bounds.width
-    && rect.y + rect.height <= bounds.y + bounds.height;
-}
-
-function getLabelWidth(text = ZC_LABEL_TEXT) {
-  return (String(text || '').length * ZC_LABEL_FONT_SIZE * 0.62) + (ZC_LABEL_PADDING_X * 2);
-}
-
-function makeLabelRect(centerX, centerY, text = ZC_LABEL_TEXT) {
-  const width = getLabelWidth(text);
-  return {
-    x: centerX - (width / 2),
-    y: centerY - (ZC_LABEL_HEIGHT / 2),
-    width,
-    height: ZC_LABEL_HEIGHT,
-  };
-}
-
-function makeOffsetLabelRect(anchorX, anchorY, dx, dy, text = ZC_LABEL_TEXT) {
-  return {
-    x: anchorX + dx,
-    y: anchorY + dy,
-    width: getLabelWidth(text),
-    height: ZC_LABEL_HEIGHT,
   };
 }
 
@@ -104,6 +81,131 @@ function buildEndpointObstacle(point, size = 14) {
     width: size,
     height: size,
   };
+}
+
+function buildRectObstacle(point, halfWidth, halfHeight) {
+  if (!point) {
+    return null;
+  }
+  return {
+    x: Number(point[0] || 0) - halfWidth,
+    y: Number(point[1] || 0) - halfHeight,
+    width: halfWidth * 2,
+    height: halfHeight * 2,
+  };
+}
+
+function buildZcTerminatorObstacle(point) {
+  return buildRectObstacle(point, ZC_TERMINATOR_HALF_SIZE, ZC_TERMINATOR_HALF_SIZE);
+}
+
+function buildZcTailObstacle(start, end, padding = 3.5) {
+  return buildSegmentObstacle(start, end, padding);
+}
+
+function getPointSignature(point) {
+  if (!point) {
+    return null;
+  }
+  return `${roundDisplayPoint(point[0])}:${roundDisplayPoint(point[1])}`;
+}
+
+function getOrderedSidesForVector(dx, dy) {
+  if (Math.abs(dx) <= 1e-6 && Math.abs(dy) <= 1e-6) {
+    return ['east', 'north', 'south', 'west'];
+  }
+  return Object.entries(ZC_SIDE_VECTORS)
+    .sort((left, right) => {
+      const leftScore = -((left[1].x * dx) + (left[1].y * dy));
+      const rightScore = -((right[1].x * dx) + (right[1].y * dy));
+      if (leftScore !== rightScore) {
+        return leftScore - rightScore;
+      }
+      return left[0].localeCompare(right[0]);
+    })
+    .map(([side]) => side);
+}
+
+function inferUsedSide(centerPoint, polyline) {
+  if (!centerPoint || !Array.isArray(polyline) || polyline.length === 0) {
+    return null;
+  }
+  const centerSignature = getPointSignature(centerPoint);
+  for (let index = polyline.length - 1; index >= 0; index -= 1) {
+    const point = polyline[index];
+    if (getPointSignature(point) === centerSignature) {
+      continue;
+    }
+    const dx = Number(point[0] || 0) - Number(centerPoint[0] || 0);
+    const dy = Number(point[1] || 0) - Number(centerPoint[1] || 0);
+    return getOrderedSidesForVector(dx, dy)[0] || null;
+  }
+  return null;
+}
+
+function getZcTerminatorCandidate(centerPoint, side) {
+  const vector = ZC_SIDE_VECTORS[side] || ZC_SIDE_VECTORS.east;
+  return [
+    roundDisplayPoint(Number(centerPoint?.[0] || 0) + (vector.x * ZC_ROUTE_OFFSET)),
+    roundDisplayPoint(Number(centerPoint?.[1] || 0) + (vector.y * ZC_ROUTE_OFFSET)),
+  ];
+}
+
+function rectMatches(obstacle, candidate) {
+  if (!obstacle || !candidate) {
+    return false;
+  }
+  return (
+    Math.abs(obstacle.x - candidate.x) <= 1e-6
+    && Math.abs(obstacle.y - candidate.y) <= 1e-6
+    && Math.abs(obstacle.width - candidate.width) <= 1e-6
+    && Math.abs(obstacle.height - candidate.height) <= 1e-6
+  );
+}
+
+export function getZcTerminatorPoint({
+  route,
+  polyline,
+  deviceLookup = {},
+  obstacles = [],
+}) {
+  const points = Array.isArray(polyline) ? polyline : [];
+  const lastDeviceId = Array.isArray(route?.device_ids) && route.device_ids.length > 0
+    ? route.device_ids[route.device_ids.length - 1]
+    : null;
+  const device = lastDeviceId !== null && lastDeviceId !== undefined ? deviceLookup[lastDeviceId] : null;
+  const rawEndpoint = points.length ? points[points.length - 1] : null;
+  if (!device || !rawEndpoint) {
+    return rawEndpoint;
+  }
+
+  const centerPoint = [Number(device.x || 0), Number(device.y || 0)];
+  const cablePolyline = points.length > 1 ? points.slice(0, -1) : points;
+  const blockedSide = inferUsedSide(centerPoint, cablePolyline);
+  const preferredSource = cablePolyline.length
+    ? cablePolyline[cablePolyline.length - 1]
+    : rawEndpoint;
+  const preferredDx = Number(centerPoint[0] || 0) - Number(preferredSource?.[0] || 0);
+  const preferredDy = Number(centerPoint[1] || 0) - Number(preferredSource?.[1] || 0);
+  const orderedSides = getOrderedSidesForVector(preferredDx, preferredDy);
+  const candidateSides = blockedSide && orderedSides.includes(blockedSide) && orderedSides.length > 1
+    ? [...orderedSides.filter((side) => side !== blockedSide), blockedSide]
+    : orderedSides;
+
+  for (const side of candidateSides) {
+    const candidate = getZcTerminatorCandidate(centerPoint, side);
+    const tailObstacle = buildZcTailObstacle(centerPoint, candidate);
+    const terminatorObstacle = buildZcTerminatorObstacle(candidate);
+    const collides = (obstacles || []).some((obstacle) => (
+      (tailObstacle && rectsIntersect(obstacle, tailObstacle))
+      || (terminatorObstacle && rectsIntersect(obstacle, terminatorObstacle))
+    ));
+    if (!collides) {
+      return candidate;
+    }
+  }
+
+  return rawEndpoint;
 }
 
 function ZcTerminator({ x, y, isSelected, isHovered }) {
@@ -167,28 +269,12 @@ function getSegmentKey(start, end) {
   return `v:${x}:${y1}:${y2}`;
 }
 
-function buildSpreadOffsets(count) {
+function buildSpreadOffsets(count, spacingStep = BASE_ROUTE_STROKE_WIDTH) {
   if (count <= 1) {
     return [0];
   }
   const midpoint = (count - 1) / 2;
-  return Array.from({ length: count }, (_, index) => (index - midpoint) * DISPLAY_ROUTE_SPACING);
-}
-
-function buildSelectedSpreadOffsets(count) {
-  if (count <= 1) {
-    return [0];
-  }
-  const offsets = [0];
-  let distance = 1;
-  while (offsets.length < count) {
-    offsets.push(-distance * DISPLAY_ROUTE_SPACING);
-    if (offsets.length < count) {
-      offsets.push(distance * DISPLAY_ROUTE_SPACING);
-    }
-    distance += 1;
-  }
-  return offsets;
+  return Array.from({ length: count }, (_, index) => (index - midpoint) * spacingStep);
 }
 
 function offsetSegment(start, end, offset) {
@@ -283,7 +369,7 @@ function getTerminalDirection(polyline) {
   return { x: 1, y: 0 };
 }
 
-export function buildDisplayCableRoutes(routes, selectedRouteId = null) {
+export function buildDisplayCableRoutes(routes, spacingStep = BASE_ROUTE_STROKE_WIDTH) {
   const preparedRoutes = (routes || []).map((route, index) => ({
     route,
     routeId: route?.id,
@@ -312,22 +398,15 @@ export function buildDisplayCableRoutes(routes, selectedRouteId = null) {
       return;
     }
     const ordered = [...entries].sort((left, right) => {
-      const leftSelected = left.routeId === selectedRouteId ? 1 : 0;
-      const rightSelected = right.routeId === selectedRouteId ? 1 : 0;
-      if (leftSelected !== rightSelected) {
-        return rightSelected - leftSelected;
-      }
       if (left.routeNumber !== right.routeNumber) {
         return left.routeNumber - right.routeNumber;
       }
       if (left.routeId !== right.routeId) {
-        return Number(left.routeId || 0) - Number(right.routeId || 0);
+        return String(left.routeId || '').localeCompare(String(right.routeId || ''));
       }
       return left.routeIndex - right.routeIndex;
     });
-    const offsets = selectedRouteId !== null && selectedRouteId !== undefined && ordered.some((entry) => entry.routeId === selectedRouteId)
-      ? buildSelectedSpreadOffsets(ordered.length)
-      : buildSpreadOffsets(ordered.length);
+    const offsets = buildSpreadOffsets(ordered.length, spacingStep);
     ordered.forEach((entry, index) => {
       offsetLookup.set(`${entry.routeId}:${entry.segmentIndex}`, offsets[index] || 0);
     });
@@ -351,43 +430,29 @@ export function getZcLabelLayout({
     return null;
   }
   const end = points[points.length - 1];
-  const direction = getTerminalDirection(points);
-  const normal = { x: -direction.y, y: direction.x };
-  const labelRect = makeLabelRect(0, 0, text);
-  const forwardDistance = (terminatorSize / 2) + (labelRect.width / 2) + 6;
-  const sideDistance = (labelRect.height / 2) + 6;
-  const farForwardDistance = forwardDistance + labelRect.width + 4;
-  const obstacleRects = (obstacles || []).filter(Boolean);
-
-  const makeCandidateRect = (distance, normalOffset = 0, directionMultiplier = 1) => makeLabelRect(
-    Number(end[0] || 0) + (direction.x * distance * directionMultiplier) + (normal.x * normalOffset),
-    Number(end[1] || 0) + (direction.y * distance * directionMultiplier) + (normal.y * normalOffset),
+  const placement = placePlanText({
     text,
-  );
-
-  const candidates = [
-    makeCandidateRect(forwardDistance, 0, 1),
-    makeCandidateRect(forwardDistance, sideDistance, 1),
-    makeCandidateRect(forwardDistance, -sideDistance, 1),
-    makeCandidateRect(forwardDistance, 0, -1),
-  ];
-  const fallback = makeCandidateRect(farForwardDistance, 0, 1);
-
-  const isAvailable = (candidate) => (
-    isRectInsideBounds(candidate, stageBounds)
-    && !obstacleRects.some((obstacle) => rectsIntersect(candidate, obstacle))
-  );
-
-  return candidates.find(isAvailable) || fallback;
+    fontSize: ZC_LABEL_FONT_SIZE,
+    strategy: 'anchor',
+    anchor: { x: Number(end[0] || 0), y: Number(end[1] || 0) },
+    symbolHalfWidth: terminatorSize / 2,
+    symbolHalfHeight: terminatorSize / 2,
+    preferredVector: getTerminalDirection(points),
+    obstacles,
+    bounds: stageBounds,
+  });
+  return placement?.rect || null;
 }
 
 export default function CableRoutesLayer({
   routes,
   selectedElement,
+  selectedCableSegment,
   hoveredElement,
   activeCableHandle,
   isRouteBlocked,
   onSelectRoute,
+  onSelectSegment,
   onHoverEnter,
   onHoverMove,
   onHoverLeave,
@@ -396,50 +461,97 @@ export default function CableRoutesLayer({
   onSegmentDragStart,
   onSegmentDragEnd,
   onZcLabelDragEnd,
+  deviceLookup = {},
   labelObstacles = [],
   stageBounds = null,
 }) {
-  const selectedRouteId = selectedElement?.type === 'cable-route' ? selectedElement.id : null;
-  const displayRouteMap = buildDisplayCableRoutes(routes, selectedRouteId);
-  const routeObstacles = React.useMemo(() => (
-    (routes || []).flatMap((route) => {
+  const displayRouteMap = buildDisplayCableRoutes(routes, BASE_ROUTE_STROKE_WIDTH);
+  const routeDisplayData = React.useMemo(() => {
+    const baseRouteObstacles = (routes || []).flatMap((route) => {
       const displayPolyline = displayRouteMap[route.id] || route.polyline_points || [];
+      const basePolyline = shouldShowRouteTerminator(route) && displayPolyline.length > 1
+        ? displayPolyline.slice(0, -1)
+        : displayPolyline;
       return [
-        ...buildPolylineObstacles(displayPolyline, 4),
-        buildEndpointObstacle(displayPolyline[displayPolyline.length - 1], 16),
+        ...buildPolylineObstacles(basePolyline, 4),
+        buildEndpointObstacle(basePolyline[basePolyline.length - 1], 16),
       ].filter(Boolean);
-    })
-  ), [displayRouteMap, routes]);
+    });
+
+    const placedZcObstacles = [];
+    const displayData = {};
+    (routes || []).forEach((route) => {
+      const displayPolyline = displayRouteMap[route.id] || route.polyline_points || [];
+      const shouldShowZc = shouldShowRouteTerminator(route) && displayPolyline.length > 0;
+      const basePolyline = shouldShowZc && displayPolyline.length > 1
+        ? displayPolyline.slice(0, -1)
+        : displayPolyline;
+      const zcPoint = shouldShowZc
+        ? getZcTerminatorPoint({
+          route,
+          polyline: displayPolyline,
+          deviceLookup,
+          obstacles: [...labelObstacles, ...baseRouteObstacles, ...placedZcObstacles],
+        })
+        : null;
+      const finalPolyline = zcPoint ? [...basePolyline, zcPoint] : basePolyline;
+      const ownTailObstacles = zcPoint && basePolyline.length
+        ? [
+          buildZcTailObstacle(basePolyline[basePolyline.length - 1], zcPoint),
+          buildZcTerminatorObstacle(zcPoint),
+        ].filter(Boolean)
+        : [];
+      displayData[route.id] = {
+        polyline: finalPolyline,
+        zcPoint,
+        ownTailObstacles,
+      };
+      placedZcObstacles.push(...ownTailObstacles);
+    });
+
+    return {
+      displayData,
+      routeObstacles: [...baseRouteObstacles, ...placedZcObstacles],
+    };
+  }, [deviceLookup, displayRouteMap, labelObstacles, routes]);
 
   return routes.map((route) => {
     const isSelected = selectedElement?.type === 'cable-route' && selectedElement?.id === route.id;
     const isHovered = hoveredElement?.type === 'cable-route' && hoveredElement?.id === route.id;
     const isBlocked = typeof isRouteBlocked === 'function' ? isRouteBlocked(route.id) : false;
-    const displayPolyline = displayRouteMap[route.id] || route.polyline_points || [];
-    const shouldShowZc = route.system_type === 'non_addressable'
-      && ['zone_loop', 'manual_line'].includes(route.route_kind)
-      && displayPolyline.length > 0;
-    const zcPoint = shouldShowZc ? displayPolyline[displayPolyline.length - 1] : null;
+    const routeDisplay = routeDisplayData.displayData[route.id] || {};
+    const displayPolyline = routeDisplay.polyline || displayRouteMap[route.id] || route.polyline_points || [];
+    const shouldShowZc = shouldShowRouteTerminator(route) && displayPolyline.length > 0;
+    const zcPoint = shouldShowZc ? (routeDisplay.zcPoint || displayPolyline[displayPolyline.length - 1]) : null;
     const terminatorSize = isSelected || isHovered ? 12.6 : 10.8;
     const savedZcLayout = zcPoint
       && route.zc_label_dx !== null
       && route.zc_label_dx !== undefined
       && route.zc_label_dy !== null
       && route.zc_label_dy !== undefined
-      ? makeOffsetLabelRect(zcPoint[0], zcPoint[1], route.zc_label_dx, route.zc_label_dy)
+      ? { dx: route.zc_label_dx, dy: route.zc_label_dy }
       : null;
-    const zcLabelLayout = shouldShowZc
-      ? savedZcLayout || getZcLabelLayout({
-        polyline: displayPolyline,
-        terminatorSize,
+    const zcLabelPlacement = shouldShowZc
+      ? placePlanText({
+        text: ZC_LABEL_TEXT,
+        fontSize: ZC_LABEL_FONT_SIZE,
+        strategy: 'anchor',
+        anchor: { x: Number(zcPoint[0] || 0), y: Number(zcPoint[1] || 0) },
+        symbolHalfWidth: terminatorSize / 2,
+        symbolHalfHeight: terminatorSize / 2,
+        preferredVector: getTerminalDirection(displayPolyline),
+        preferredOffset: savedZcLayout,
         obstacles: [
           ...labelObstacles,
-          ...routeObstacles.filter((obstacle) => !rectsIntersect(obstacle, buildEndpointObstacle(zcPoint, 18))),
+          ...routeDisplayData.routeObstacles.filter((obstacle) => !routeDisplay.ownTailObstacles?.some((ownObstacle) => rectMatches(obstacle, ownObstacle))),
         ],
-        stageBounds,
+        bounds: stageBounds,
       })
       : null;
-    const routeStroke = isSelected ? '#b91c1c' : (isHovered ? '#dc2626' : '#ef4444');
+    const baseColor = String(route?.subsystem_type || 'sps') === 'soue' ? SOUE_VISUAL_STYLE.base : '#ef4444';
+    const hoverColor = String(route?.subsystem_type || 'sps') === 'soue' ? SOUE_VISUAL_STYLE.hover : '#dc2626';
+    const selectedColor = String(route?.subsystem_type || 'sps') === 'soue' ? SOUE_VISUAL_STYLE.selected : '#b91c1c';
+    const routeStroke = isSelected ? selectedColor : (isHovered ? hoverColor : baseColor);
 
     return (
       <React.Fragment key={`cable-route-${route.id}`}>
@@ -466,16 +578,29 @@ export default function CableRoutesLayer({
             isHovered={isHovered}
           />
         )}
-        {zcLabelLayout && (
+        {zcLabelPlacement?.leaderPolyline && (
+          <Line
+            points={zcLabelPlacement.leaderPolyline.flat()}
+            stroke={routeStroke}
+            strokeWidth={1.2}
+            dash={[4, 3]}
+            lineCap="round"
+            lineJoin="round"
+            listening={false}
+          />
+        )}
+        {zcLabelPlacement?.rect && (
           <Text
             text={ZC_LABEL_TEXT}
-            x={zcLabelLayout.x}
-            y={zcLabelLayout.y}
-            width={zcLabelLayout.width}
+            x={zcLabelPlacement.rect.x}
+            y={zcLabelPlacement.rect.y}
+            width={zcLabelPlacement.rect.width}
             align="center"
             fontSize={ZC_LABEL_FONT_SIZE}
             fontFamily="GOST A"
             fill={routeStroke}
+            wrap="none"
+            ellipsis={false}
             listening={!isBlocked}
             draggable={!isBlocked}
             onClick={(e) => {
@@ -492,7 +617,7 @@ export default function CableRoutesLayer({
             y={point[1]}
             radius={5}
             fill={activeCableHandle?.routeId === route.id && activeCableHandle?.pointIndex === pointIndex ? '#fee2e2' : '#ffffff'}
-            stroke="#dc2626"
+            stroke={hoverColor}
             strokeWidth={2}
             listening={!isBlocked}
             draggable={!isBlocked && pointIndex !== 0 && pointIndex !== (route.polyline_points || []).length - 1}
@@ -505,6 +630,7 @@ export default function CableRoutesLayer({
           if (!nextPoint) {
             return null;
           }
+          const isSegmentSelected = selectedCableSegment?.routeId === route.id && selectedCableSegment?.segmentIndex === pointIndex;
           return (
             <Rect
               key={`cable-route-segment-${route.id}-${pointIndex}`}
@@ -512,13 +638,22 @@ export default function CableRoutesLayer({
               y={(point[1] + nextPoint[1]) / 2 - 4}
               width={8}
               height={8}
-              fill={activeCableHandle?.routeId === route.id && activeCableHandle?.insertIndex === pointIndex + 1 ? '#dc2626' : '#ffffff'}
-              stroke="#dc2626"
-              strokeWidth={1.5}
+              fill={activeCableHandle?.routeId === route.id && activeCableHandle?.insertIndex === pointIndex + 1
+                ? '#dc2626'
+                : (isSegmentSelected ? '#fee2e2' : '#ffffff')}
+              stroke={hoverColor}
+              strokeWidth={isSegmentSelected ? 2.2 : 1.5}
               cornerRadius={2}
               listening={!isBlocked}
               draggable={!isBlocked}
-              onDragStart={!isBlocked ? (() => onSegmentDragStart(route.id, pointIndex + 1)) : undefined}
+              onClick={!isBlocked ? ((e) => {
+                e.cancelBubble = true;
+                onSelectSegment?.(route, pointIndex);
+              }) : undefined}
+              onDragStart={!isBlocked ? (() => {
+                onSelectSegment?.(route, pointIndex);
+                onSegmentDragStart(route.id, pointIndex + 1);
+              }) : undefined}
               onDragEnd={!isBlocked ? ((e) => onSegmentDragEnd(route, pointIndex + 1, e)) : undefined}
             />
           );

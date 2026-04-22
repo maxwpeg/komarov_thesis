@@ -2,6 +2,8 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Circle, Group, Image as KonvaImage, Line, Rect, Text } from 'react-konva';
 import Konva from 'konva';
 
+import { SOUE_VISUAL_STYLE } from './helpers';
+
 export function DeleteButton({ x, y, onClick }) {
   return (
     <Group x={x} y={y}>
@@ -18,14 +20,24 @@ export function DeleteButton({ x, y, onClick }) {
           e.target.getStage().container().style.cursor = 'default';
         }}
       />
-      <Text
-        text="x"
-        fontSize={18}
-        fontFamily="GOST A"
-        fill="#ffffff"
-        fontStyle="bold"
-        x={-4.5}
-        y={-9}
+      <Line
+        points={[-5.5, -5.5, 5.5, 5.5]}
+        stroke="#ffffff"
+        strokeWidth={2.6}
+        lineCap="round"
+        onClick={onClick}
+        onMouseEnter={(e) => {
+          e.target.getStage().container().style.cursor = 'pointer';
+        }}
+        onMouseLeave={(e) => {
+          e.target.getStage().container().style.cursor = 'default';
+        }}
+      />
+      <Line
+        points={[-5.5, 5.5, 5.5, -5.5]}
+        stroke="#ffffff"
+        strokeWidth={2.6}
+        lineCap="round"
         onClick={onClick}
         onMouseEnter={(e) => {
           e.target.getStage().container().style.cursor = 'pointer';
@@ -193,7 +205,7 @@ export function SignalInstrumentSymbol({
   }
 
   const size = 28;
-  const text = instrumentType === 'loop_controller' ? '\u041a' : '\u041e';
+  const text = instrumentType === 'loop_controller' ? 'Рљ' : 'Рћ';
   return (
     <Group x={x} y={y} onClick={onClick} {...rest}>
       {highlight && (
@@ -229,6 +241,85 @@ export function SignalInstrumentSymbol({
         fontFamily="GOST A"
         listening={false}
       />
+    </Group>
+  );
+}
+
+function ExitSignCircleSymbol({ stroke, fill }) {
+  return (
+    <>
+      <Circle
+        radius={13}
+        fill={fill}
+        stroke={stroke}
+        strokeWidth={2}
+      />
+      <Line
+        points={[-7, -7, 7, 7]}
+        stroke={stroke}
+        strokeWidth={2}
+        lineCap="round"
+        listening={false}
+      />
+      <Line
+        points={[-7, 7, 7, -7]}
+        stroke={stroke}
+        strokeWidth={2}
+        lineCap="round"
+        listening={false}
+      />
+    </>
+  );
+}
+
+function SirenReferenceSymbol({ stroke }) {
+  return (
+    <>
+      <Rect
+        x={-10.2}
+        y={-9}
+        width={7.2}
+        height={18}
+        fill="#ffffff"
+        stroke={stroke}
+        strokeWidth={2}
+      />
+      <Line
+        points={[-3, -9, 9.6, -22, 9.6, 22, -3, 9]}
+        fill="#ffffff"
+        stroke={stroke}
+        strokeWidth={2}
+        closed
+        lineJoin="round"
+        listening={false}
+      />
+    </>
+  );
+}
+
+export function SoueDeviceSymbol({
+  x,
+  y,
+  deviceType,
+  isSelected,
+  isHovered,
+  onClick,
+  ...rest
+}) {
+  const stroke = isSelected ? SOUE_VISUAL_STYLE.selected : (isHovered ? SOUE_VISUAL_STYLE.hover : SOUE_VISUAL_STYLE.base);
+  const accent = isHovered ? '#eef0ff' : SOUE_VISUAL_STYLE.fill;
+
+  if (deviceType === 'siren') {
+    return (
+      <Group x={x} y={y} onClick={onClick} {...rest}>
+        <SirenReferenceSymbol stroke={stroke} />
+      </Group>
+    );
+  }
+
+  return (
+    <Group x={x} y={y} onClick={onClick} {...rest}>
+      <ExitSignCircleSymbol stroke={stroke} fill={accent} />
     </Group>
   );
 }

@@ -790,8 +790,9 @@ def test_zkspc_detect_and_commit_unlock_branch_steps(api_server: str):
     assert commit_response.status_code == 200
     committed_payload = commit_response.json()
     assert committed_payload["pipeline_state"]["steps"]["zkspc"]["status"] == "validated"
-    assert committed_payload["pipeline_state"]["branches"]["non_addressable"]["steps"]["fire_alarms"]["status"] == "draft"
-    assert committed_payload["pipeline_state"]["branches"]["addressable"]["steps"]["devices_cables"]["status"] == "draft"
+    assert committed_payload["pipeline_state"]["branches"]["common"]["steps"]["signal_instruments"]["status"] == "draft"
+    assert committed_payload["pipeline_state"]["branches"]["non_addressable"]["steps"]["fire_alarms"]["status"] == "locked"
+    assert committed_payload["pipeline_state"]["branches"]["addressable"]["steps"]["devices_cables"]["status"] == "locked"
 
 
 def test_branch_specific_fire_alarm_saves_do_not_overwrite_other_system(api_server: str):
@@ -981,3 +982,227 @@ def test_signal_instrument_creation_and_cable_routes_work_per_branch(api_server:
     )
     assert pipeline_state.status_code == 200
     assert pipeline_state.json()["branches"]["non_addressable"]["steps"]["devices_cables"]["status"] == "validated"
+
+
+def test_merge_routes_for_already_merged_devices_keeps_routes_stable(api_server: str):
+    floor_plan, room = prepare_validated_room_plan(api_server)
+
+    detect_response = requests.post(
+        f"{api_server}/api/floor-plans/{floor_plan['id']}/pipeline/zkspc/detect",
+        timeout=10,
+    )
+    assert detect_response.status_code == 200
+    zkspc_zone_id = detect_response.json()["floor_plan"]["zkspc_zones"][0]["id"]
+
+    commit_response = requests.post(
+        f"{api_server}/api/floor-plans/{floor_plan['id']}/pipeline/zkspc/commit",
+        json={
+            "zones": [
+                {
+                    "id": zkspc_zone_id,
+                    "zone_number": 1,
+                    "name": "Zone 1",
+                    "room_ids": [room["id"]],
+                    "is_manual": True,
+                    "is_locked": False,
+                }
+            ]
+        },
+        timeout=10,
+    )
+    assert commit_response.status_code == 200
+
+    alarms_response = requests.post(
+        f"{api_server}/api/floor-plans/{floor_plan['id']}/batch-save",
+        json={
+            "create_fire_alarms": [
+                {
+                    "floor_plan_id": floor_plan["id"],
+                    "x": 15,
+                    "y": 25,
+                    "device_type": "smoke_detector",
+                    "coverage_radius": 4500,
+                    "system_type": "non_addressable",
+                    "zkspc_zone_id": zkspc_zone_id,
+                    "loop_number": 1,
+                    "device_number": 1,
+                },
+                {
+                    "floor_plan_id": floor_plan["id"],
+                    "x": 75,
+                    "y": 25,
+                    "device_type": "smoke_detector",
+                    "coverage_radius": 4500,
+                    "system_type": "non_addressable",
+                    "zkspc_zone_id": zkspc_zone_id,
+                    "loop_number": 1,
+                    "device_number": 2,
+                },
+            ]
+        },
+        timeout=10,
+    )
+    assert alarms_response.status_code == 200
+
+    instrument_response = requests.post(
+        f"{api_server}/api/signal-instruments",
+        json={
+            "floor_plan_id": floor_plan["id"],
+            "system_type": "non_addressable",
+            "instrument_type": "control_panel",
+            "x": 10,
+            "y": 10,
+        },
+        timeout=10,
+    )
+    assert instrument_response.status_code == 200
+    instrument = instrument_response.json()
+
+    recalc_response = requests.post(
+        f"{api_server}/api/floor-plans/{floor_plan['id']}/cable-routes/recalculate",
+        json={"system_type": "non_addressable", "use_shared_trunk": True},
+        timeout=10,
+    )
+    assert recalc_response.status_code == 200
+    routes = recalc_response.json()
+    assert routes
+    merged_device_ids = routes[0]["device_ids"]
+    assert len(merged_device_ids) == 2
+
+    merge_response = requests.post(
+        f"{api_server}/api/signal-instruments/{instrument['id']}/merge-routes",
+        json={
+            "system_type": "non_addressable",
+            "subsystem_type": "sps",
+            "device_ids": merged_device_ids,
+        },
+        timeout=10,
+    )
+    assert merge_response.status_code == 200
+    merged_routes = merge_response.json()
+    assert merged_routes
+    assert sorted(merged_routes[0]["device_ids"]) == sorted(merged_device_ids)
+    assert all(route["length_m"] > 0 for route in merged_routes)
+
+
+def test_step_feedback_routes_capture_wall_and_opening_samples(api_server: str, tmp_path: Path):
+    image_path = tmp_path / "step-feedback.png"
+    Image.new("RGB", (240, 240), color="white").save(image_path)
+
+    project = create_project(api_server)
+    floor_plan = create_floor_plan(api_server, project["id"], scale_factor=10.0, image_path=image_path)
+
+    walls_detect = requests.post(
+        f"{api_server}/api/floor-plans/{floor_plan['id']}/pipeline/walls/detect",
+        timeout=10,
+    )
+    assert walls_detect.status_code == 200
+    assert walls_detect.json()["pipeline_state"]["steps"]["walls"]["status"] == "draft"
+
+    walls_commit = requests.post(
+        f"{api_server}/api/floor-plans/{floor_plan['id']}/pipeline/walls/commit",
+        json={
+            "changes": {
+                "create_walls": [
+                    {
+                        "floor_plan_id": floor_plan["id"],
+                        "x1": 20,
+                        "y1": 60,
+                        "x2": 180,
+                        "y2": 60,
+                        "thickness": 200,
+                        "is_load_bearing": False,
+                        "material": None,
+                        "length_m": 1.6,
+                        "length_source": "manual",
+                    }
+                ],
+            },
+            "wall_lengths": [],
+        },
+        timeout=10,
+    )
+    assert walls_commit.status_code == 200
+    committed_wall = walls_commit.json()["floor_plan"]["walls"][0]
+    assert walls_commit.json()["pipeline_state"]["steps"]["walls"]["revision"] == 1
+
+    walls_feedback = requests.post(
+        f"{api_server}/api/floor-plans/{floor_plan['id']}/pipeline/walls/feedback",
+        json={
+            "step_revision": 1,
+            "issue_tags": ["missed"],
+            "notes": "manual wall added after detection",
+        },
+        timeout=10,
+    )
+    assert walls_feedback.status_code == 200
+    walls_feedback_payload = walls_feedback.json()
+    assert walls_feedback_payload["step"] == "walls"
+    assert walls_feedback_payload["status"] == "approved"
+    assert walls_feedback_payload["pending_counts"]["approved"] == 1
+
+    openings_detect = requests.post(
+        f"{api_server}/api/floor-plans/{floor_plan['id']}/pipeline/openings/detect",
+        timeout=10,
+    )
+    assert openings_detect.status_code == 200
+    assert openings_detect.json()["pipeline_state"]["steps"]["openings"]["status"] == "draft"
+
+    openings_commit = requests.post(
+        f"{api_server}/api/floor-plans/{floor_plan['id']}/pipeline/openings/commit",
+        json={
+            "changes": {
+                "create_doors": [
+                    {
+                        "floor_plan_id": floor_plan["id"],
+                        "x": 70,
+                        "y": 55,
+                        "width": 30,
+                        "height": 10,
+                        "wall_id": committed_wall["id"],
+                    }
+                ],
+            },
+        },
+        timeout=10,
+    )
+    assert openings_commit.status_code == 200
+    assert openings_commit.json()["pipeline_state"]["steps"]["openings"]["revision"] == 1
+
+    openings_feedback = requests.post(
+        f"{api_server}/api/floor-plans/{floor_plan['id']}/pipeline/openings/feedback",
+        json={
+            "step_revision": 1,
+            "issue_tags": ["missed", "wrong_class"],
+            "notes": "door restored manually",
+        },
+        timeout=10,
+    )
+    assert openings_feedback.status_code == 200
+    openings_feedback_payload = openings_feedback.json()
+    assert openings_feedback_payload["step"] == "openings"
+    assert openings_feedback_payload["status"] == "approved"
+    assert openings_feedback_payload["pending_counts"]["approved"] == 1
+
+    pipeline_state = requests.get(
+        f"{api_server}/api/floor-plans/{floor_plan['id']}/pipeline-state",
+        timeout=10,
+    )
+    assert pipeline_state.status_code == 200
+    pipeline_payload = pipeline_state.json()
+    assert pipeline_payload["steps"]["walls"]["feedback_status"] == "approved"
+    assert pipeline_payload["steps"]["walls"]["feedback_submitted_revision"] == 1
+    assert pipeline_payload["steps"]["openings"]["feedback_status"] == "approved"
+    assert pipeline_payload["steps"]["openings"]["feedback_submitted_revision"] == 1
+
+    stats_response = requests.get(
+        f"{api_server}/api/recognition-feedback/stats",
+        timeout=10,
+    )
+    assert stats_response.status_code == 200
+    stats_payload = stats_response.json()
+    steps = {item["step"]: item for item in stats_payload["steps"]}
+    assert steps["walls"]["pending_counts"]["approved"] == 1
+    assert steps["openings"]["pending_counts"]["approved"] == 1
+    assert steps["walls"]["thresholds"]["approved_examples"] == 50
+    assert steps["openings"]["thresholds"]["approved_examples"] == 75

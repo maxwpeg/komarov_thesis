@@ -7,6 +7,8 @@ from sqlalchemy.orm import Session
 from backend.modules.documents.application.use_cases import DocumentsUseCases
 from backend.modules.documents.infrastructure.pdf_adapter import PdfGeneratorAdapter
 from backend.modules.documents.infrastructure.sqlalchemy_repository import SqlAlchemyDocumentReadRepository
+from backend.modules.equipment.application.use_cases import EquipmentUseCases
+from backend.modules.equipment.infrastructure.sqlalchemy_repository import SqlAlchemyEquipmentRepository
 from backend.modules.elements_geometry.application.use_cases import ElementsGeometryUseCases
 from backend.modules.elements_geometry.infrastructure.sqlalchemy_repository import SqlAlchemyElementsRepository
 from backend.modules.floor_plans.application.use_cases import FloorPlanUseCases
@@ -31,6 +33,11 @@ from backend.services.pipeline_service import PipelineService
 def build_project_use_cases(session: Session) -> ProjectUseCases:
     """Build project use cases with explicit repository and transaction wiring."""
     return ProjectUseCases(SqlAlchemyProjectRepository(session), SqlAlchemyUnitOfWork(session))
+
+
+def build_equipment_use_cases(session: Session, storage: StorageService) -> EquipmentUseCases:
+    """Build equipment catalog use cases."""
+    return EquipmentUseCases(SqlAlchemyEquipmentRepository(session, storage), SqlAlchemyUnitOfWork(session))
 
 
 def build_floor_plan_use_cases(session: Session, storage: StorageService) -> FloorPlanUseCases:
@@ -79,6 +86,7 @@ def build_documents_use_cases(session: Session) -> DocumentsUseCases:
     """Build document-generation use cases."""
     return DocumentsUseCases(
         SqlAlchemyDocumentReadRepository(session),
+        SqlAlchemyUnitOfWork(session),
         PdfGeneratorAdapter(),
         SqlAlchemyEventPublisher(session),
     )

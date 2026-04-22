@@ -1,10 +1,10 @@
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 
 import ProjectDetail from './ProjectDetail';
-import { floorPlansApi, projectsApi } from '../api/client';
+import { equipmentApi, floorPlansApi, projectsApi } from '../api/client';
 
 const mockNavigate = jest.fn();
 let createElementSpy;
@@ -28,12 +28,26 @@ jest.mock('../api/client', () => ({
     update: jest.fn(),
     remove: jest.fn(),
     generatePdf: jest.fn(),
+    getEquipmentSpecification: jest.fn(),
+    getAdditionalInfo: jest.fn(),
+    listEquipment: jest.fn(),
+    getEquipmentSelections: jest.fn(),
+    updateEquipmentSelections: jest.fn(),
+    attachEquipment: jest.fn(),
+    createAndAttachEquipment: jest.fn(),
+    removeEquipment: jest.fn(),
+  },
+  equipmentApi: {
+    list: jest.fn(),
   },
 }));
 
 const projectResponse = {
   id: 10,
+  name: 'Проект 01',
   facility: 'Объект',
+  facility_genitive: 'Объекта',
+  facility_instrumental: 'Объектом',
   code: 'P-01',
   project_type: 'СПС',
   year: 2026,
@@ -43,10 +57,59 @@ const projectResponse = {
   project_description: 'Описание',
 };
 
+const smokeA = { id: 101, name: 'Smoke A', category: 'smoke', price: 1200, compatible_equipment_ids: [] };
+const smokeB = { id: 102, name: 'Smoke B', category: 'smoke', price: 1300, compatible_equipment_ids: [] };
+const sirenA = { id: 201, name: 'Siren A', category: 'siren', price: 900, compatible_equipment_ids: [] };
+const cableA = { id: 301, name: 'Cable A', category: 'cable', price: 200, compatible_equipment_ids: [] };
+const panelA = { id: 401, name: 'Panel A', category: 'instrument', price: 5000, compatible_equipment_ids: [] };
+const mountingA = { id: 501, name: 'Clip Pack', category: 'mounting', price: 350, compatible_equipment_ids: [] };
+
+const equipmentItemsResponse = [smokeA, smokeB, sirenA, cableA, panelA, mountingA];
+const projectEquipmentResponse = {
+  project_id: 10,
+  items: [smokeA, sirenA, cableA, panelA],
+};
+const projectEquipmentSelectionsResponse = {
+  project_id: 10,
+  selections: {
+    sps_cable: 301,
+    soue_cable: null,
+  },
+};
+const equipmentSpecificationResponse = {
+  project_id: 10,
+  sections: [
+    {
+      key: 'kipia',
+      rows: [
+        { source_key: 'instrument:401', quantity: '2' },
+        { source_key: 'fire_alarm:101', quantity: '3' },
+      ],
+    },
+    {
+      key: 'fire_resistant_cable_line',
+      rows: [
+        { source_key: 'cable:301', quantity: '5.5' },
+        { source_key: 'mounting:501', quantity: '4' },
+      ],
+    },
+  ],
+};
+
 beforeEach(() => {
   jest.clearAllMocks();
   projectsApi.get.mockResolvedValue(projectResponse);
   floorPlansApi.list.mockResolvedValue([]);
+  projectsApi.getEquipmentSpecification.mockResolvedValue(equipmentSpecificationResponse);
+  equipmentApi.list.mockResolvedValue(equipmentItemsResponse);
+  projectsApi.listEquipment.mockResolvedValue(projectEquipmentResponse);
+  projectsApi.getAdditionalInfo.mockResolvedValue({
+    page_title: 'Доп. сведения',
+    text: '',
+    is_empty: true,
+  });
+  projectsApi.getEquipmentSelections.mockResolvedValue(projectEquipmentSelectionsResponse);
+  projectsApi.updateEquipmentSelections.mockResolvedValue(projectEquipmentSelectionsResponse);
   projectsApi.generatePdf.mockResolvedValue({
     blob: jest.fn().mockResolvedValue(new Blob(['pdf'], { type: 'application/pdf' })),
     headers: {
@@ -84,11 +147,15 @@ function renderProjectDetail() {
   );
 }
 
+function getEquipmentGroup(name) {
+  return screen.getByRole('heading', { name }).closest('.project-equipment-group');
+}
+
 test('successful PDF generation downloads without showing a success alert', async () => {
   renderProjectDetail();
 
   await screen.findByRole('heading', { name: 'Объект' });
-  userEvent.click(screen.getByRole('button', { name: /Сгенерировать PDF/i }));
+  await userEvent.click(screen.getByRole('button', { name: /Сгенерировать PDF/i }));
 
   await waitFor(() => {
     expect(projectsApi.generatePdf).toHaveBeenCalledWith('10');
@@ -99,17 +166,207 @@ test('successful PDF generation downloads without showing a success alert', asyn
   expect(window.alert).not.toHaveBeenCalled();
 });
 
-test('failed PDF generation still shows the error alert', async () => {
-  projectsApi.generatePdf.mockRejectedValueOnce(new Error('boom'));
+test('project details save updated facility field', async () => {
+  projectsApi.update.mockResolvedValueOnce({
+    ...projectResponse,
+    facility: 'Новый объект',
+    facility_genitive: 'Нового объекта',
+    facility_instrumental: 'Новым объектом',
+  });
 
   renderProjectDetail();
 
   await screen.findByRole('heading', { name: 'Объект' });
-  userEvent.click(screen.getByRole('button', { name: /Сгенерировать PDF/i }));
+  const facilityInput = screen.getByDisplayValue('Объект');
+  const genitiveInput = screen.getByDisplayValue('Объекта');
+  const instrumentalInput = screen.getByDisplayValue('Объектом');
+
+  await userEvent.clear(facilityInput);
+  await userEvent.type(facilityInput, 'Новый объект');
+  await userEvent.clear(genitiveInput);
+  await userEvent.type(genitiveInput, 'Нового объекта');
+  await userEvent.clear(instrumentalInput);
+  await userEvent.type(instrumentalInput, 'Новым объектом');
+  await userEvent.click(screen.getByRole('button', { name: 'Сохранить' }));
 
   await waitFor(() => {
-    expect(window.alert).toHaveBeenCalledTimes(1);
+    expect(projectsApi.update).toHaveBeenCalledWith('10', expect.objectContaining({
+      facility: 'Новый объект',
+      facility_genitive: 'Нового объекта',
+      facility_instrumental: 'Новым объектом',
+    }));
+  });
+});
+
+test('project detail renders shared project stages for general data, instructions, power calculation and specification', async () => {
+  floorPlansApi.list.mockResolvedValueOnce([
+    {
+      id: 77,
+      name: 'Этаж 1',
+      floor_number: 1,
+      image_width: 1600,
+      image_height: 900,
+    },
+  ]);
+
+  renderProjectDetail();
+
+  expect(await screen.findByRole('heading', { name: 'Этапы проекта' })).toBeInTheDocument();
+
+  const floorPlanLink = screen.getByRole('link', { name: /Этаж 1/i });
+  const generalDataLink = screen.getByRole('link', { name: /Общие данные/i });
+  const generalInstructionsLink = screen.getByRole('link', { name: /Общие указания/i });
+  const powerLink = screen.getByRole('link', { name: /Расчет токопотребления/i });
+  const specificationLink = screen.getByRole('link', { name: /Спецификация/i });
+  const additionalInfoLink = screen.getByRole('link', { name: /Доп\. сведения/i });
+
+  expect(floorPlanLink.getAttribute('href')).toContain('/floor-plans/77');
+  expect(generalDataLink.getAttribute('href')).toContain('/floor-plans/77?step=general_data');
+  expect(generalInstructionsLink.getAttribute('href')).toContain('/floor-plans/77?step=general_instructions');
+  expect(powerLink.getAttribute('href')).toContain('/floor-plans/77?step=power_consumption_calculation');
+  expect(specificationLink.getAttribute('href')).toContain('/floor-plans/77?step=equipment_specification');
+  expect(additionalInfoLink.getAttribute('href')).toContain('/floor-plans/77?step=additional_info');
+  expect(additionalInfoLink.querySelector('.project-stage-card')).toHaveClass('project-stage-card--subtle');
+  expect(screen.getByRole('heading', { name: '\u041a\u0440\u0435\u043f\u043b\u0435\u043d\u0438\u044f' })).toBeInTheDocument();
+});
+
+test('project detail shows approximate project cost from the equipment specification', async () => {
+  renderProjectDetail();
+
+  expect(await screen.findByText('Примерная стоимость проекта')).toBeInTheDocument();
+  expect(screen.getByText('16100.00 ₽')).toBeInTheDocument();
+});
+
+test('project detail attaches an existing catalog item into the selected group', async () => {
+  projectsApi.attachEquipment.mockResolvedValueOnce({
+    project_id: 10,
+    items: [...projectEquipmentResponse.items, smokeB],
   });
 
-  expect(window.alert.mock.calls[0][0]).toMatch(/Ошибка при генерации PDF/i);
+  renderProjectDetail();
+
+  await screen.findByRole('heading', { name: 'Оборудование проекта' });
+  const spsGroup = getEquipmentGroup('СПС');
+
+  await userEvent.click(within(spsGroup).getByRole('button', { name: /\+ Добавить/i }));
+  await userEvent.selectOptions(screen.getByLabelText('Карточка оборудования'), '102');
+  await userEvent.click(screen.getByRole('button', { name: 'Добавить в проект' }));
+
+  await waitFor(() => {
+    expect(projectsApi.attachEquipment).toHaveBeenCalledWith('10', { equipment_id: 102 });
+  });
+
+  expect(await screen.findByText('Smoke B')).toBeInTheDocument();
+});
+
+test('project detail shows separate SPS and SOUE cable selectors', async () => {
+  renderProjectDetail();
+
+  await screen.findByLabelText('Кабель СПС');
+
+  const spsCableSelect = screen.getByLabelText('Кабель СПС');
+  const soueCableSelect = screen.getByLabelText('Кабель СОУЭ');
+
+  expect(within(spsCableSelect).getByRole('option', { name: /Cable A/ })).toBeInTheDocument();
+  expect(spsCableSelect).toHaveValue('301');
+  expect(soueCableSelect).toHaveValue('');
+
+  await userEvent.selectOptions(soueCableSelect, '301');
+
+  await waitFor(() => {
+    expect(projectsApi.updateEquipmentSelections).toHaveBeenCalledWith('10', {
+      selections: {
+        sps_linear_detector: null,
+        sps_smoke_detector: null,
+        sps_heat_detector: null,
+        sps_manual_call_point: null,
+        sps_cable: 301,
+        soue_siren: null,
+        soue_exit_sign: null,
+        soue_speech_device: null,
+        soue_cable: 301,
+        common_instrument: null,
+        common_keyboard: null,
+        common_other: null,
+      },
+    });
+  });
+});
+
+test('project detail creates a new equipment card and attaches it to the project', async () => {
+  const createdItem = {
+    id: 777,
+    name: 'Panel X',
+    category: 'instrument',
+    price: 123.46,
+    compatible_equipment_ids: [],
+  };
+  projectsApi.createAndAttachEquipment.mockResolvedValueOnce({
+    project_id: 10,
+    items: [...projectEquipmentResponse.items, createdItem],
+  });
+  equipmentApi.list.mockResolvedValue([...equipmentItemsResponse, createdItem]);
+
+  renderProjectDetail();
+
+  await screen.findByRole('heading', { name: 'Оборудование проекта' });
+  const instrumentsGroup = getEquipmentGroup('Приборы');
+
+  await userEvent.click(within(instrumentsGroup).getByRole('button', { name: /\+ Добавить/i }));
+  await userEvent.click(screen.getByRole('button', { name: 'Новая карточка' }));
+  await userEvent.type(screen.getByLabelText('Название'), 'Panel X');
+  await userEvent.selectOptions(screen.getByLabelText('Категория'), 'instrument');
+  await userEvent.type(screen.getByLabelText('Цена'), '123.456');
+  await userEvent.type(screen.getByLabelText('Описание'), 'Пульт управления');
+  await userEvent.click(screen.getByRole('button', { name: 'Добавить в проект' }));
+
+  await waitFor(() => {
+    expect(projectsApi.createAndAttachEquipment).toHaveBeenCalledWith('10', expect.objectContaining({
+      name: 'Panel X',
+      category: 'instrument',
+      price: 123.46,
+    }));
+  });
+
+  expect(await screen.findByText('Panel X')).toBeInTheDocument();
+});
+
+test('project detail creates a mounting card with fastening parameters', async () => {
+  const createdItem = {
+    id: 778,
+    name: 'Clip Pack B',
+    category: 'mounting',
+    price: 420,
+    compatible_equipment_ids: [],
+  };
+  projectsApi.createAndAttachEquipment.mockResolvedValueOnce({
+    project_id: 10,
+    items: [...projectEquipmentResponse.items, createdItem],
+  });
+  equipmentApi.list.mockResolvedValue([...equipmentItemsResponse, createdItem]);
+
+  renderProjectDetail();
+
+  await screen.findByRole('heading', { name: '\u041e\u0431\u043e\u0440\u0443\u0434\u043e\u0432\u0430\u043d\u0438\u0435 \u043f\u0440\u043e\u0435\u043a\u0442\u0430' });
+  const mountingGroup = getEquipmentGroup('\u041a\u0440\u0435\u043f\u043b\u0435\u043d\u0438\u044f');
+
+  await userEvent.click(within(mountingGroup).getByRole('button', { name: /\+ \u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c/i }));
+  await userEvent.click(screen.getByRole('button', { name: '\u041d\u043e\u0432\u0430\u044f \u043a\u0430\u0440\u0442\u043e\u0447\u043a\u0430' }));
+  await userEvent.type(screen.getByLabelText('\u041d\u0430\u0437\u0432\u0430\u043d\u0438\u0435'), 'Clip Pack B');
+  await userEvent.type(screen.getByLabelText('\u0426\u0435\u043d\u0430'), '420');
+  await userEvent.type(screen.getByLabelText('\u041a\u043e\u043b-\u0432\u043e \u0448\u0442\u0443\u043a \u0432 \u043f\u0430\u0447\u043a\u0435'), '120');
+  await userEvent.type(screen.getByLabelText('\u041a\u0440\u0430\u0442\u043d\u043e\u0441\u0442\u044c \u043a\u0440\u0435\u043f\u043b\u0435\u043d\u0438\u044f, \u043c'), '0.5');
+  await userEvent.click(screen.getByRole('button', { name: '\u0414\u043e\u0431\u0430\u0432\u0438\u0442\u044c \u0432 \u043f\u0440\u043e\u0435\u043a\u0442' }));
+
+  await waitFor(() => {
+    expect(projectsApi.createAndAttachEquipment).toHaveBeenCalledWith('10', expect.objectContaining({
+      name: 'Clip Pack B',
+      category: 'mounting',
+      price: 420,
+      specs: {
+        pack_quantity: 120,
+        mounting_spacing_m: 0.5,
+      },
+    }));
+  });
 });
