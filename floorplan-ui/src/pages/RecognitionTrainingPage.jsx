@@ -2,6 +2,8 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 
 import { recognitionTrainingApi } from '../api/client';
+import { useDialogs } from '../ui/DialogProvider';
+import { pollTaskUntilSettled } from '../utils/backgroundTasks';
 
 const HINT_REASON_LABELS = {
   approved_examples_threshold_met: 'Готово по порогу примеров',
@@ -38,11 +40,14 @@ const INITIAL_RUN_FILTERS = {
   status: '',
 };
 
-function buildImageUrl(relativePath) {
-  if (!relativePath) {
+function buildImageUrl(urlOrPath) {
+  if (!urlOrPath) {
     return null;
   }
-  return `http://localhost:8000/${relativePath.replace(/\\/g, '/')}`;
+  if (/^(https?:)?\/\//i.test(urlOrPath) || String(urlOrPath).startsWith('/')) {
+    return urlOrPath;
+  }
+  return `/${String(urlOrPath).replace(/\\/g, '/')}`;
 }
 
 function formatDateTime(value) {
@@ -135,7 +140,7 @@ function ExamplePreview({ detail, overlayMode }) {
     return <div style={{ color: '#645f57' }}>Выберите пример из таблицы, чтобы увидеть diff и историю.</div>;
   }
   const imageMeta = detail.corrected_snapshot?.image || detail.source_snapshot?.image || {};
-  const imageUrl = buildImageUrl(detail.original_image_path || imageMeta.original_image_path);
+  const imageUrl = buildImageUrl(detail.original_image_url || detail.original_image_path || imageMeta.original_image_url || imageMeta.original_image_path);
   const width = Math.max(Number(imageMeta.width || 0), 1);
   const height = Math.max(Number(imageMeta.height || 0), 1);
   const showSource = overlayMode === 'source' || overlayMode === 'diff';
@@ -152,7 +157,7 @@ function ExamplePreview({ detail, overlayMode }) {
         </div>
       ) : (
         <div style={{ padding: '1rem', borderRadius: '16px', background: '#f3efe8', color: '#645f57' }}>
-          Исходное изображение плана недоступно.
+          РСЃС…РѕРґРЅРѕРµ РёР·РѕР±СЂР°Р¶РµРЅРёРµ РїР»Р°РЅР° РЅРµРґРѕСЃС‚СѓРїРЅРѕ.
         </div>
       )}
     </div>
@@ -224,17 +229,28 @@ function RunArtifacts({ artifacts }) {
       <div>best.pt: {artifacts.has_best_checkpoint ? artifacts.best_checkpoint_path : 'нет'}</div>
       <div>last.pt: {artifacts.has_last_checkpoint ? artifacts.last_checkpoint_path : 'нет'}</div>
       <div>metrics.json: {artifacts.metrics_json_path || 'нет'}</div>
-      <div>params.json: {artifacts.params_json_path || 'нет'}</div>
     </div>
   );
 }
 
-function RunCard({ run, selected, onSelect, onActivate, activating }) {
+function RunCard({
+  run,
+  selected,
+  collapsed,
+  deleting,
+  onSelect,
+  onToggleCollapse,
+  onActivate,
+  onDelete,
+  activating,
+  runLog,
+}) {
   const metrics = run.metrics_summary || {};
   const results = metrics.results || {};
   const resultEntries = Object.entries(results).slice(0, 4);
   const splitCounts = metrics.split_counts || run.batch?.summary?.split_counts || {};
   const hasBestCheckpoint = Boolean(run.artifacts?.has_best_checkpoint);
+  const canDelete = ['succeeded', 'failed', 'canceled'].includes(run.status) && !run.is_active_for_step;
 
   return (
     <div
@@ -250,68 +266,122 @@ function RunCard({ run, selected, onSelect, onActivate, activating }) {
       tabIndex={0}
       style={{ width: '100%', textAlign: 'left', cursor: 'pointer' }}
     >
-      <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap' }}>
+      <div className="training-run-item__header">
         <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
+          <button
+            type="button"
+            className="training-run-item__toggle"
+            onClick={(event) => {
+              event.stopPropagation();
+              onToggleCollapse(run.run_id);
+            }}
+            aria-label={collapsed ? 'Развернуть запуск' : 'Свернуть запуск'}
+          >
+            {collapsed ? '▸' : '▾'}
+          </button>
           <strong>{run.run_id}</strong>
           <span className={`training-status training-status-${run.status}`}>{getRunStatusLabel(run.status)}</span>
           {run.is_active_for_step && <span className="training-status" style={{ background: '#d7f5ef', color: '#0f766e' }}>Активна</span>}
         </div>
-        <div style={{ color: '#8e877d', fontSize: '0.9rem' }}>
-          {formatDateTime(run.finished_at || run.started_at || run.requested_at)}
+        <div className="training-run-item__actions">
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={(event) => {
+              event.stopPropagation();
+              onSelect(run.run_id);
+            }}
+          >
+            Выбрать
+          </button>
+          {canDelete && (
+            <button
+              type="button"
+              className="btn btn-danger"
+              onClick={(event) => {
+                event.stopPropagation();
+                onDelete(run.run_id);
+              }}
+              disabled={deleting}
+            >
+              {deleting ? 'Удаление...' : 'Удалить'}
+            </button>
+          )}
         </div>
       </div>
 
       <div style={{ marginTop: '0.45rem', color: '#645f57' }}>
-        <strong>{run.step}</strong> · samples: {run.batch?.summary?.sample_count ?? metrics.sample_count ?? 0}
-        {' '}· dataset items: {metrics.dataset_item_count ?? run.batch?.summary?.dataset_item_count ?? '—'}
+        <strong>{run.step}</strong> · {formatDateTime(run.finished_at || run.started_at || run.requested_at)}
       </div>
 
-      <div style={{ marginTop: '0.35rem', color: '#645f57', fontSize: '0.92rem' }}>
-        Epochs {run.config?.epochs ?? '—'} · Img {run.config?.imgsz ?? '—'} · Batch {run.config?.batch ?? '—'} · Patience {run.config?.patience ?? '—'}
-      </div>
+      {!collapsed && (
+        <div className="training-run-item__body">
+          <div style={{ marginTop: '0.35rem', color: '#645f57', fontSize: '0.92rem' }}>
+            Samples: {run.batch?.summary?.sample_count ?? metrics.sample_count ?? 0}
+            {' '}· dataset items: {metrics.dataset_item_count ?? run.batch?.summary?.dataset_item_count ?? '—'}
+          </div>
 
-      <div style={{ marginTop: '0.35rem', color: '#645f57', fontSize: '0.92rem' }}>
-        Device: {metrics.requested_device || run.config?.device || '—'} → {metrics.resolved_device || '—'}
-      </div>
+          <div style={{ marginTop: '0.35rem', color: '#645f57', fontSize: '0.92rem' }}>
+            Epochs {run.config?.epochs ?? '—'} · Img {run.config?.imgsz ?? '—'} · Batch {run.config?.batch ?? '—'} · Patience {run.config?.patience ?? '—'}
+          </div>
 
-      <div style={{ marginTop: '0.35rem', color: '#645f57', fontSize: '0.92rem' }}>
-        Split: train {splitCounts.train ?? '—'} · val {splitCounts.val ?? '—'}
-      </div>
+          <div style={{ marginTop: '0.35rem', color: '#645f57', fontSize: '0.92rem' }}>
+            Device: {metrics.requested_device || run.config?.device || '—'} → {metrics.resolved_device || '—'}
+          </div>
 
-      {resultEntries.length > 0 && (
-        <div style={{ marginTop: '0.35rem', color: '#645f57', fontSize: '0.92rem' }}>
-          {resultEntries.map(([key, value]) => `${key}: ${formatMetricValue(value)}`).join(' · ')}
+          <div style={{ marginTop: '0.35rem', color: '#645f57', fontSize: '0.92rem' }}>
+            Split: train {splitCounts.train ?? '—'} · val {splitCounts.val ?? '—'}
+          </div>
+
+          {resultEntries.length > 0 && (
+            <div style={{ marginTop: '0.35rem', color: '#645f57', fontSize: '0.92rem' }}>
+              {resultEntries.map(([key, value]) => `${key}: ${formatMetricValue(value)}`).join(' · ')}
+            </div>
+          )}
+
+          <RunArtifacts artifacts={run.artifacts} />
+
+          {run.error_message && (
+            <div style={{ marginTop: '0.6rem', color: '#b91c1c', fontSize: '0.92rem' }}>
+              {run.error_message}
+            </div>
+          )}
+
+          {selected && (
+            <>
+              <div className="training-run-item__meta" style={{ marginTop: '0.85rem' }}>
+                <div><span>Batch</span><strong>{run.config?.batch ?? '—'}</strong></div>
+                <div><span>Epochs</span><strong>{run.config?.epochs ?? '—'}</strong></div>
+                <div><span>Img size</span><strong>{run.config?.imgsz ?? '—'}</strong></div>
+                <div><span>Task ID</span><strong>{run.background_task_id ?? '—'}</strong></div>
+              </div>
+              <pre className="training-log training-run-item__log">{runLog || 'Лог пока не появился.'}</pre>
+            </>
+          )}
+
+          <div style={{ marginTop: '0.8rem', display: 'flex', gap: '0.6rem', flexWrap: 'wrap' }}>
+            {!run.is_active_for_step && run.status === 'succeeded' && hasBestCheckpoint && (
+              <button
+                type="button"
+                className="btn btn-primary"
+                disabled={activating}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onActivate(run.run_id);
+                }}
+              >
+                {activating ? 'Активация...' : 'Сделать активной'}
+              </button>
+            )}
+          </div>
         </div>
       )}
-
-      <RunArtifacts artifacts={run.artifacts} />
-
-      {run.error_message && (
-        <div style={{ marginTop: '0.6rem', color: '#b91c1c', fontSize: '0.92rem' }}>
-          {run.error_message}
-        </div>
-      )}
-
-      <div style={{ marginTop: '0.8rem', display: 'flex', gap: '0.6rem', flexWrap: 'wrap' }}>
-        {!run.is_active_for_step && run.status === 'succeeded' && hasBestCheckpoint && (
-          <button
-            type="button"
-            className="btn btn-primary"
-            disabled={activating}
-            onClick={(event) => {
-              event.stopPropagation();
-              onActivate(run.run_id);
-            }}
-          >
-            {activating ? 'Активация...' : 'Сделать активной'}
-          </button>
-        )}
-      </div>
     </div>
   );
 }
 
 function RecognitionTrainingPage() {
+  const { confirm, toast } = useDialogs();
   const [overview, setOverview] = useState(null);
   const [examples, setExamples] = useState([]);
   const [runs, setRuns] = useState([]);
@@ -319,6 +389,7 @@ function RecognitionTrainingPage() {
   const [selectedExampleId, setSelectedExampleId] = useState(null);
   const [selectedExample, setSelectedExample] = useState(null);
   const [selectedRunId, setSelectedRunId] = useState(null);
+  const [collapsedRunIds, setCollapsedRunIds] = useState({});
   const [runLog, setRunLog] = useState('');
   const [runForms, setRunForms] = useState({});
   const [overlayMode, setOverlayMode] = useState('diff');
@@ -332,6 +403,7 @@ function RecognitionTrainingPage() {
   const [savingDetail, setSavingDetail] = useState(false);
   const [creatingRunForStep, setCreatingRunForStep] = useState('');
   const [activatingRunId, setActivatingRunId] = useState('');
+  const [deletingRunId, setDeletingRunId] = useState('');
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
 
@@ -522,8 +594,10 @@ function RecognitionTrainingPage() {
       if (selectedRunId && !data.some((item) => item.run_id === selectedRunId)) {
         setSelectedRunId(data[0]?.run_id || null);
       }
+      return data;
     } catch (refreshError) {
       setError(refreshError.message);
+      return [];
     } finally {
       setRunsLoading(false);
     }
@@ -535,6 +609,21 @@ function RecognitionTrainingPage() {
     } catch (refreshError) {
       setError(refreshError.message);
     }
+  };
+
+  const toggleRunCollapsed = (runId) => {
+    setCollapsedRunIds((prev) => ({
+      ...prev,
+      [runId]: !prev[runId],
+    }));
+  };
+
+  const handleSelectRun = (runId) => {
+    setSelectedRunId(runId);
+    setCollapsedRunIds((prev) => ({
+      ...prev,
+      [runId]: false,
+    }));
   };
 
   const handleApplyFilters = async () => {
@@ -603,7 +692,11 @@ function RecognitionTrainingPage() {
       const confirmationText = recommendedBatchSize > 0 && selectedCount < recommendedBatchSize
         ? `Сейчас в batch ${selectedCount} примеров при рекомендуемом размере ${recommendedBatchSize}. ${reasonLabel}. Запустить дообучение принудительно?`
         : `Batch для ${step} еще не соответствует рекомендуемым условиям. ${reasonLabel}. Запустить дообучение принудительно?`;
-      if (!window.confirm(confirmationText)) {
+      const isConfirmed = await confirm(confirmationText, {
+        confirmLabel: 'Запустить',
+        cancelLabel: 'Отмена',
+      });
+      if (!isConfirmed) {
         return;
       }
     }
@@ -620,10 +713,23 @@ function RecognitionTrainingPage() {
         patience: Number(runForms[step]?.patience),
         force,
       };
-      const run = await recognitionTrainingApi.createRun(payload);
-      setSelectedRunId(run.run_id);
-      setMessage(`Run ${run.run_id} поставлен в очередь.`);
-      await Promise.all([refreshOverview(), refreshRuns(), refreshExamples()]);
+      const task = await recognitionTrainingApi.createRun(payload);
+      setMessage(`Задача #${task.id} поставлена в очередь.`);
+      const [nextRuns] = await Promise.all([refreshRuns(), refreshOverview(), refreshExamples()]);
+      const queuedRun = nextRuns.find((item) => item.background_task_id === task.id) || null;
+      if (queuedRun) {
+        setSelectedRunId(queuedRun.run_id);
+        setCollapsedRunIds((prev) => ({ ...prev, [queuedRun.run_id]: false }));
+      }
+      pollTaskUntilSettled(task.id)
+        .then((settledTask) => {
+          if (settledTask.status === 'succeeded') {
+            toast(`Задача #${task.id} завершена.`, { tone: 'info' });
+          }
+        })
+        .catch((pollError) => {
+          console.error('Error polling training task:', pollError);
+        });
     } catch (runError) {
       setError(runError.message);
     } finally {
@@ -643,6 +749,37 @@ function RecognitionTrainingPage() {
       setError(activationError.message);
     } finally {
       setActivatingRunId('');
+    }
+  };
+
+  const handleDeleteRun = async (runId) => {
+    const run = runs.find((item) => item.run_id === runId) || null;
+    if (!run) {
+      return;
+    }
+    const isConfirmed = await confirm(`Удалить запуск ${runId}?`, {
+      confirmLabel: 'Удалить',
+      cancelLabel: 'Отмена',
+    });
+    if (!isConfirmed) {
+      return;
+    }
+
+    setDeletingRunId(runId);
+    setError('');
+    setMessage('');
+    try {
+      await recognitionTrainingApi.deleteRun(runId);
+      setMessage(`Запуск ${runId} удалён.`);
+      if (selectedRunId === runId) {
+        setSelectedRunId(null);
+        setRunLog('');
+      }
+      await Promise.all([refreshRuns(), refreshOverview()]);
+    } catch (deleteError) {
+      setError(deleteError.message);
+    } finally {
+      setDeletingRunId('');
     }
   };
 
@@ -713,7 +850,7 @@ function RecognitionTrainingPage() {
                 <th>Changed</th>
                 <th>Hardness</th>
                 <th>Курация</th>
-                <th>Использований</th>
+                <th>РСЃРїРѕР»СЊР·РѕРІР°РЅРёР№</th>
                 <th>Дата</th>
               </tr>
             </thead>
@@ -769,7 +906,7 @@ function RecognitionTrainingPage() {
                   </div>
                   <div className="training-history-grid">
                     <div>
-                      <h4 style={{ marginBottom: '0.5rem' }}>История batch</h4>
+                      <h4 style={{ marginBottom: '0.5rem' }}>РСЃС‚РѕСЂРёСЏ batch</h4>
                       {(selectedExample.batches || []).length ? (
                         <ul className="training-history-list">
                           {selectedExample.batches.map((batchItem) => (
@@ -782,7 +919,7 @@ function RecognitionTrainingPage() {
                       ) : <div style={{ color: '#645f57' }}>Еще не входил в export batch.</div>}
                     </div>
                     <div>
-                      <h4 style={{ marginBottom: '0.5rem' }}>История run</h4>
+                      <h4 style={{ marginBottom: '0.5rem' }}>РСЃС‚РѕСЂРёСЏ run</h4>
                       {(selectedExample.runs || []).length ? (
                         <ul className="training-history-list">
                           {selectedExample.runs.map((runItem) => (
@@ -812,23 +949,25 @@ function RecognitionTrainingPage() {
             <label>Статус<select value={runFilters.status} onChange={(event) => setRunFilters((prev) => ({ ...prev, status: event.target.value }))}><option value="">Все</option><option value="queued">Queued</option><option value="running">Running</option><option value="succeeded">Succeeded</option><option value="failed">Failed</option><option value="canceled">Canceled</option></select></label>
           </div>
 
-          <div className="training-runs-list">
-            {visibleRuns.map((run) => (
-              <RunCard
-                key={run.run_id}
-                run={run}
-                selected={selectedRunId === run.run_id}
-                onSelect={setSelectedRunId}
-                onActivate={handleActivateRun}
-                activating={activatingRunId === run.run_id}
-              />
-            ))}
-            {!visibleRuns.length && <div style={{ color: '#645f57' }}>По текущим фильтрам запусков нет.</div>}
-          </div>
-
-          <div style={{ marginTop: '1rem' }}>
-            <h4 style={{ marginBottom: '0.5rem' }}>Лог запуска</h4>
-            <pre className="training-log">{runLog || 'Выберите run, чтобы увидеть лог.'}</pre>
+          <div className="training-runs-layout">
+            <div className="training-runs-list">
+              {visibleRuns.map((run) => (
+                <RunCard
+                  key={run.run_id}
+                  run={run}
+                  selected={selectedRunId === run.run_id}
+                  collapsed={Boolean(collapsedRunIds[run.run_id])}
+                  deleting={deletingRunId === run.run_id}
+                  onSelect={handleSelectRun}
+                  onToggleCollapse={toggleRunCollapsed}
+                  onActivate={handleActivateRun}
+                  onDelete={handleDeleteRun}
+                  activating={activatingRunId === run.run_id}
+                  runLog={selectedRunId === run.run_id ? runLog : ''}
+                />
+              ))}
+              {!visibleRuns.length && <div style={{ color: '#645f57' }}>По текущим фильтрам запусков нет.</div>}
+            </div>
           </div>
         </div>
       </div>

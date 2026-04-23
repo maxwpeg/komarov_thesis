@@ -3,9 +3,11 @@ import { Link } from 'react-router-dom';
 
 import { useAuth } from '../auth/AuthContext';
 import { projectsApi } from '../api/client';
+import { useDialogs } from '../ui/DialogProvider';
 
 function ProjectList() {
   const { user } = useAuth();
+  const { confirm, toast } = useDialogs();
   const [projects, setProjects] = useState([]);
   const [loading, setLoading] = useState(true);
 
@@ -43,7 +45,11 @@ function ProjectList() {
     event.preventDefault();
     event.stopPropagation();
 
-    if (!window.confirm(`Удалить проект "${projectName}"? Это действие необратимо.`)) {
+    const isConfirmed = await confirm(
+      `Удалить проект "${projectName}"? Это действие необратимо.`,
+      { confirmLabel: 'Удалить', cancelLabel: 'Отмена' },
+    );
+    if (!isConfirmed) {
       return;
     }
 
@@ -52,7 +58,7 @@ function ProjectList() {
       await reloadProjects();
     } catch (error) {
       console.error('Error deleting project:', error);
-      alert('Ошибка при удалении проекта');
+      toast('Ошибка при удалении проекта.', { tone: 'error' });
     }
   };
 
@@ -76,7 +82,7 @@ function ProjectList() {
             const displayName = project.facility || project.name;
             const ownerLabel = project.owner_user?.full_name || 'Без владельца';
             return (
-              <div key={project.id} style={{ position: 'relative' }}>
+              <div key={project.id} className="project-card-shell">
                 <Link
                   to={`/projects/${project.id}`}
                   style={{ textDecoration: 'none' }}
@@ -95,27 +101,16 @@ function ProjectList() {
                     </p>
                   </div>
                 </Link>
-                <button
-                  onClick={(event) => handleDeleteProject(event, project.id, displayName)}
-                  style={{
-                    position: 'absolute',
-                    top: '10px',
-                    right: '10px',
-                    background: '#dc3545',
-                    color: 'white',
-                    border: 'none',
-                    borderRadius: '4px',
-                    padding: '5px 10px',
-                    cursor: 'pointer',
-                    fontSize: '18px',
-                    fontWeight: 'bold',
-                    fontFamily: 'Arial, sans-serif',
-                    zIndex: 10,
-                  }}
-                  title="Удалить проект"
-                >
-                  ×
-                </button>
+                <div className="project-card-actions">
+                  <button
+                    type="button"
+                    className="project-card-actions__delete"
+                    onClick={(event) => handleDeleteProject(event, project.id, displayName)}
+                    title="Удалить проект"
+                  >
+                    ×
+                  </button>
+                </div>
               </div>
             );
           })}

@@ -32,6 +32,7 @@ from backend.signal_planning import (
     should_show_zc_terminator,
 )
 from backend.services.pipeline_state_helpers import update_signal_branch_state
+from backend.zkspc_geometry import build_zone_display_geometry
 
 
 class SignalService:
@@ -91,6 +92,7 @@ class SignalService:
                 is_manual=zone_payload.is_manual,
                 is_locked=zone_payload.is_locked,
                 compliance_warnings=warnings,
+                display_geometry=build_zone_display_geometry(rooms),
             )
             self.db.add(zone)
             self.db.flush()

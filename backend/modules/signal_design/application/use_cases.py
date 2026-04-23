@@ -34,6 +34,7 @@ from backend.signal_planning import (
     normalize_branch_route_numbers,
     should_show_zc_terminator,
 )
+from backend.zkspc_geometry import build_zone_display_geometry
 
 
 def _default_zone_warnings(room_count: int, area_sqm: float) -> list[str]:
@@ -92,6 +93,7 @@ class ZkspcUseCases:
                     "is_manual": zone_payload.is_manual,
                     "is_locked": zone_payload.is_locked,
                     "compliance_warnings": _default_zone_warnings(len(room_ids), area_sqm),
+                    "display_geometry": build_zone_display_geometry(rooms),
                 }
             )
             self.repository.add(zone)

@@ -1,9 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { equipmentApi } from '../api/client';
+import { useDialogs } from '../ui/DialogProvider';
+import FileDropField from '../ui/FileDropField';
 import {
   buildEquipmentAssetUrl,
-  buildEquipmentImageUrl,
   EQUIPMENT_CATEGORY_OPTIONS,
   formatEquipmentPrice,
   getEquipmentCategoryLabel,
@@ -33,6 +34,9 @@ function createEmptyEquipmentDraft(category = 'linear') {
     image_path: null,
     label_pdf_path: null,
     manual_pdf_path: null,
+    image_url: null,
+    label_pdf_url: null,
+    manual_pdf_url: null,
   };
 }
 
@@ -54,6 +58,9 @@ function draftFromItem(item) {
     image_path: item.image_path ?? null,
     label_pdf_path: item.label_pdf_path ?? null,
     manual_pdf_path: item.manual_pdf_path ?? null,
+    image_url: item.image_url ?? null,
+    label_pdf_url: item.label_pdf_url ?? null,
+    manual_pdf_url: item.manual_pdf_url ?? null,
   };
 }
 
@@ -101,30 +108,35 @@ function getCompatibleEquipmentItems(selectedIds, equipmentItems) {
   });
 }
 
+function resolveEquipmentAssetUrl(assetUrl, assetPath) {
+  return buildEquipmentAssetUrl(assetUrl || assetPath);
+}
+
 function EquipmentAssetField({
   label,
   accept,
-  inputName,
   pendingFile,
   savedPath,
+  savedUrl,
   onChange,
+  className = '',
 }) {
-  const assetUrl = buildEquipmentAssetUrl(savedPath);
+  const assetUrl = resolveEquipmentAssetUrl(savedUrl, savedPath);
   const displayName = pendingFile?.name || getAssetName(savedPath) || 'Файл не выбран';
 
   return (
-    <div className="equipment-upload-field">
+    <div className={`equipment-upload-field${className ? ` ${className}` : ''}`}>
       <div className="equipment-upload-field__label">{label}</div>
       <div className="equipment-upload-field__actions">
-        <label className="equipment-file-button">
-          <span>{pendingFile || savedPath ? 'Заменить файл' : 'Выбрать файл'}</span>
-          <input
-            aria-label={inputName}
-            type="file"
-            accept={accept}
-            onChange={onChange}
-          />
-        </label>
+        <FileDropField
+          className="equipment-upload-field__dropzone"
+          compact
+          accept={accept}
+          title={label}
+          description={pendingFile || savedPath ? 'Перетащите новый файл или кликните для замены.' : 'Перетащите файл или выберите его вручную.'}
+          buttonLabel={pendingFile || savedPath ? 'Заменить файл' : 'Выбрать файл'}
+          onSelect={onChange}
+        />
         {assetUrl && (
           <a className="btn btn-secondary" href={assetUrl} target="_blank" rel="noreferrer">
             Открыть
@@ -172,8 +184,8 @@ function EquipmentPdfPreview({ label, assetPath }) {
   );
 }
 
-function EquipmentAssetLinkCard({ label, assetPath, emptyText = 'Файл пока не загружен' }) {
-  const assetUrl = buildEquipmentAssetUrl(assetPath);
+function EquipmentAssetLinkCard({ label, assetPath, assetUrl: persistedUrl, emptyText = 'Файл пока не загружен' }) {
+  const assetUrl = resolveEquipmentAssetUrl(persistedUrl, assetPath);
   const assetName = getAssetName(assetPath);
 
   return (
@@ -416,6 +428,7 @@ function EquipmentSpecSummary({ category, specs }) {
 }
 
 export default function EquipmentCatalogPage() {
+  const { confirm } = useDialogs();
   const [equipmentItems, setEquipmentItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
@@ -582,7 +595,11 @@ export default function EquipmentCatalogPage() {
     if (!selectedItem) {
       return;
     }
-    if (!window.confirm(`Удалить оборудование "${selectedItem.name}"?`)) {
+    const isConfirmed = await confirm(`Удалить оборудование "${selectedItem.name}"?`, {
+      confirmLabel: 'Удалить',
+      cancelLabel: 'Отмена',
+    });
+    if (!isConfirmed) {
       return;
     }
 
@@ -605,9 +622,12 @@ export default function EquipmentCatalogPage() {
   const modalTitle = modalState.mode === 'create'
     ? 'Новая карточка оборудования'
     : (modalItem?.name || 'Оборудование');
-  const modalImageUrl = buildEquipmentImageUrl(
-    pendingImageFile ? null : (isEditing ? equipmentDraft.image_path : modalItem?.image_path),
-  );
+  const modalImageUrl = pendingImageFile
+    ? null
+    : resolveEquipmentAssetUrl(
+      isEditing ? equipmentDraft.image_url : modalItem?.image_url,
+      isEditing ? equipmentDraft.image_path : modalItem?.image_path,
+    );
   const modalSpecEntries = getEquipmentSpecEntries(
     modalItem?.category || equipmentDraft.category,
     modalItem?.specs || (isEditing ? buildSpecsPayload(equipmentDraft.category, equipmentDraft.specs) : {}),
@@ -720,27 +740,30 @@ export default function EquipmentCatalogPage() {
                   <div className="equipment-modal__asset-grid">
                     <EquipmentAssetField
                       label="Изображение"
+                      className="equipment-upload-field--image"
                       accept="image/*"
-                      inputName="Изображение"
                       pendingFile={pendingImageFile}
                       savedPath={equipmentDraft.image_path}
-                      onChange={(event) => setPendingImageFile(event.target.files?.[0] || null)}
+                      savedUrl={equipmentDraft.image_url}
+                      onChange={setPendingImageFile}
                     />
                     <EquipmentAssetField
                       label="Этикетка"
+                      className="equipment-upload-field--label"
                       accept={DOCUMENT_ACCEPT}
-                      inputName="Этикетка"
                       pendingFile={pendingLabelFile}
                       savedPath={equipmentDraft.label_pdf_path}
-                      onChange={(event) => setPendingLabelFile(event.target.files?.[0] || null)}
+                      savedUrl={equipmentDraft.label_pdf_url}
+                      onChange={setPendingLabelFile}
                     />
                     <EquipmentAssetField
                       label="Руководство"
+                      className="equipment-upload-field--manual"
                       accept={DOCUMENT_ACCEPT}
-                      inputName="Руководство"
                       pendingFile={pendingManualFile}
                       savedPath={equipmentDraft.manual_pdf_path}
-                      onChange={(event) => setPendingManualFile(event.target.files?.[0] || null)}
+                      savedUrl={equipmentDraft.manual_pdf_url}
+                      onChange={setPendingManualFile}
                     />
                   </div>
                 </div>
@@ -803,8 +826,8 @@ export default function EquipmentCatalogPage() {
                     <div className="equipment-modal__image equipment-modal__image--large equipment-modal__image--placeholder">Пока без изображения</div>
                   )}
                   <div className="equipment-document-grid">
-                    <EquipmentAssetLinkCard label="Этикетка" assetPath={modalItem?.label_pdf_path} />
-                    <EquipmentAssetLinkCard label="Руководство" assetPath={modalItem?.manual_pdf_path} />
+                    <EquipmentAssetLinkCard label="Этикетка" assetPath={modalItem?.label_pdf_path} assetUrl={modalItem?.label_pdf_url} />
+                    <EquipmentAssetLinkCard label="Руководство" assetPath={modalItem?.manual_pdf_path} assetUrl={modalItem?.manual_pdf_url} />
                   </div>
                 </div>
                 <div className="equipment-detail-grid equipment-detail-grid--large">

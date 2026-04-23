@@ -1,0 +1,5 @@
+path: C:/Users/slkfs/komarov_thesis/storage_objects/recognition_training/20260423181126_098c03f3_openings/dataset
+train: images/train
+val: images/val
+test: images/test
+names: {"0": "door", "1": "window"}

@@ -48,6 +48,18 @@ async function apiRequest(path, options = {}) {
   return response.text();
 }
 
+function appendQueryParams(path, params = {}) {
+  const searchParams = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === '') {
+      return;
+    }
+    searchParams.set(key, String(value));
+  });
+  const query = searchParams.toString();
+  return query ? `${path}?${query}` : path;
+}
+
 export const authApi = {
   login(payload) {
     return apiRequest('/api/auth/login', {
@@ -120,8 +132,10 @@ export const projectsApi = {
   generatePdf(projectId) {
     return apiRequest(`/api/projects/${projectId}/generate-pdf`, {
       method: 'POST',
-      rawResponse: true,
     });
+  },
+  getPdfPreview(projectId, params = {}) {
+    return apiRequest(appendQueryParams(`/api/projects/${projectId}/pdf-preview`, params));
   },
   getEquipmentSpecification(projectId) {
     return apiRequest(`/api/projects/${projectId}/equipment-specification`);
@@ -204,6 +218,23 @@ export const projectsApi = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
+  },
+};
+
+export const backgroundTasksApi = {
+  list(filters = {}) {
+    const params = new URLSearchParams();
+    Object.entries(filters).forEach(([key, value]) => {
+      if (value === undefined || value === null || value === '') {
+        return;
+      }
+      params.set(key, String(value));
+    });
+    const suffix = params.toString() ? `?${params.toString()}` : '';
+    return apiRequest(`/api/background-tasks${suffix}`);
+  },
+  get(taskId) {
+    return apiRequest(`/api/background-tasks/${taskId}`);
   },
 };
 
@@ -428,6 +459,11 @@ export const recognitionTrainingApi = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
+    });
+  },
+  deleteRun(runId) {
+    return apiRequest(`/api/recognition-training/runs/${runId}`, {
+      method: 'DELETE',
     });
   },
   activateRun(runId) {

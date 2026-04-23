@@ -36,11 +36,10 @@ function UsersPage() {
     try {
       const data = await usersApi.list();
       setUsers(data);
-      const nextSelectedUser =
-        data.find((item) => item.id === preferredUserId)
-        || data.find((item) => item.id === selectedUserId)
-        || data[0]
-        || null;
+      const resolvedSelectedUserId = preferredUserId !== null ? preferredUserId : selectedUserId;
+      const nextSelectedUser = resolvedSelectedUserId === null
+        ? null
+        : data.find((item) => item.id === resolvedSelectedUserId) || null;
       setSelectedUserId(nextSelectedUser?.id ?? null);
       setEditForm(buildEditDraft(nextSelectedUser));
     } catch (error) {
@@ -57,6 +56,14 @@ function UsersPage() {
   }, []);
 
   const selectedUser = users.find((item) => item.id === selectedUserId) || null;
+  const isEditingSelectedUser = Boolean(selectedUser);
+
+  const clearSelectedUser = () => {
+    setSelectedUserId(null);
+    setEditForm(buildEditDraft(null));
+    setResetPassword('');
+    setBanner('');
+  };
 
   const handleCreateChange = (event) => {
     const { name, value, type, checked } = event.target;
@@ -89,7 +96,7 @@ function UsersPage() {
       const createdUser = await usersApi.create(createForm);
       setCreateForm(createUserDraft());
       setResetPassword('');
-      await loadUsers(createdUser.id);
+      await loadUsers(null);
       setBanner(`Пользователь ${createdUser.full_name} создан`);
     } catch (error) {
       console.error('Error creating user:', error);
@@ -138,7 +145,7 @@ function UsersPage() {
   };
 
   return (
-    <div className="users-page">
+    <div className="users-page" onClick={clearSelectedUser}>
       <div className="users-page__hero project-list-container">
         <h1>Пользователи</h1>
         <p className="users-page__subtitle">
@@ -152,50 +159,111 @@ function UsersPage() {
       </div>
 
       <div className="users-page__grid">
-        <section className="project-list-container users-page__panel">
-          <div className="users-page__panel-header">
-            <h2>Создать пользователя</h2>
-          </div>
-          <form className="users-form" onSubmit={handleCreateUser}>
-            <label className="users-form__field">
-              <span>Полное имя</span>
-              <input name="full_name" value={createForm.full_name} onChange={handleCreateChange} required />
-            </label>
-            <label className="users-form__field">
-              <span>Логин</span>
-              <input name="username" value={createForm.username} onChange={handleCreateChange} required />
-            </label>
-            <label className="users-form__field">
-              <span>Роль</span>
-              <select name="role" value={createForm.role} onChange={handleCreateChange}>
-                <option value="engineer">Инженер</option>
-                <option value="developer">Разработчик</option>
-              </select>
-            </label>
-            <label className="users-form__field">
-              <span>Стартовый пароль</span>
-              <input
-                type="password"
-                name="password"
-                autoComplete="new-password"
-                value={createForm.password}
-                onChange={handleCreateChange}
-                required
-              />
-            </label>
-            <label className="users-form__checkbox">
-              <input
-                type="checkbox"
-                name="is_active"
-                checked={createForm.is_active}
-                onChange={handleCreateChange}
-              />
-              <span>Активная учетная запись</span>
-            </label>
-            <button type="submit" className="btn btn-primary" disabled={isSaving}>
-              {isSaving ? 'Сохранение...' : 'Создать'}
-            </button>
-          </form>
+        <section className="project-list-container users-page__panel users-page__panel--form" onClick={(event) => event.stopPropagation()}>
+          {isEditingSelectedUser ? (
+            <div className="users-page__form-stack">
+              <form className="users-form" onSubmit={handleSaveUser}>
+                <div className="users-page__editor-header">
+                  <h3>{selectedUser.full_name}</h3>
+                  <span>{selectedUser.role === 'developer' ? 'Разработчик' : 'Инженер'}</span>
+                </div>
+                <label className="users-form__field">
+                  <span>Полное имя</span>
+                  <input name="full_name" value={editForm.full_name} onChange={handleEditChange} required />
+                </label>
+                <label className="users-form__field">
+                  <span>Логин</span>
+                  <input name="username" value={editForm.username} onChange={handleEditChange} required />
+                </label>
+                <label className="users-form__field">
+                  <span>Роль</span>
+                  <select name="role" value={editForm.role} onChange={handleEditChange}>
+                    <option value="engineer">Инженер</option>
+                    <option value="developer">Разработчик</option>
+                  </select>
+                </label>
+                <label className="users-form__checkbox">
+                  <input
+                    type="checkbox"
+                    name="is_active"
+                    checked={editForm.is_active}
+                    onChange={handleEditChange}
+                  />
+                  <span>Активная учетная запись</span>
+                </label>
+                <div className="users-form__actions">
+                  <button type="submit" className="btn btn-primary" disabled={isSaving}>
+                    {isSaving ? 'Сохранение...' : 'Сохранить изменения'}
+                  </button>
+                </div>
+              </form>
+
+              <form className="users-form users-form--secondary" onSubmit={handleResetPassword}>
+                <h3>Сброс пароля</h3>
+                <label className="users-form__field">
+                  <span>Новый пароль</span>
+                  <input
+                    type="password"
+                    autoComplete="new-password"
+                    value={resetPassword}
+                    onChange={(event) => setResetPassword(event.target.value)}
+                    required
+                  />
+                </label>
+                <button type="submit" className="btn btn-secondary" disabled={isSaving || !resetPassword.trim()}>
+                  Обновить пароль
+                </button>
+              </form>
+            </div>
+          ) : (
+            <form className="users-page__form-stack" onSubmit={handleCreateUser}>
+              <div className="users-form">
+                <div className="users-page__editor-header users-page__editor-header--placeholder">
+                  <h3>Новый пользователь</h3>
+                </div>
+                <label className="users-form__field">
+                  <span>Полное имя</span>
+                  <input name="full_name" value={createForm.full_name} onChange={handleCreateChange} required />
+                </label>
+                <label className="users-form__field">
+                  <span>Логин</span>
+                  <input name="username" value={createForm.username} onChange={handleCreateChange} required />
+                </label>
+                <label className="users-form__field">
+                  <span>Роль</span>
+                  <select name="role" value={createForm.role} onChange={handleCreateChange}>
+                    <option value="engineer">Инженер</option>
+                    <option value="developer">Разработчик</option>
+                  </select>
+                </label>
+              </div>
+              <div className="users-form users-form--secondary">
+                <label className="users-form__field">
+                  <span>Стартовый пароль</span>
+                  <input
+                    type="password"
+                    name="password"
+                    autoComplete="new-password"
+                    value={createForm.password}
+                    onChange={handleCreateChange}
+                    required
+                  />
+                </label>
+                <label className="users-form__checkbox">
+                  <input
+                    type="checkbox"
+                    name="is_active"
+                    checked={createForm.is_active}
+                    onChange={handleCreateChange}
+                  />
+                  <span>Активная учетная запись</span>
+                </label>
+                <button type="submit" className="btn btn-primary" disabled={isSaving}>
+                  {isSaving ? 'Сохранение...' : 'Создать'}
+                </button>
+              </div>
+            </form>
+          )}
         </section>
 
         <section className="project-list-container users-page__panel users-page__panel--wide">
@@ -205,14 +273,16 @@ function UsersPage() {
           {loading ? (
             <div className="loading">Загрузка пользователей...</div>
           ) : (
-            <div className="users-page__workspace">
-              <div className="users-page__list">
+            <div className="users-page__list">
                 {users.map((user) => (
                   <button
                     key={user.id}
                     type="button"
                     className={`users-page__list-item ${selectedUserId === user.id ? 'users-page__list-item--active' : ''}`}
-                    onClick={() => handleSelectUser(user)}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      handleSelectUser(user);
+                    }}
                   >
                     <strong>{user.full_name}</strong>
                     <span>{user.username}</span>
@@ -220,66 +290,9 @@ function UsersPage() {
                     <span>{user.is_active ? 'Активен' : 'Отключен'}</span>
                   </button>
                 ))}
-              </div>
-
-              <div className="users-page__editor">
-                {selectedUser ? (
-                  <>
-                    <form className="users-form" onSubmit={handleSaveUser}>
-                      <div className="users-page__editor-header">
-                        <h3>{selectedUser.full_name}</h3>
-                        <span>{selectedUser.role === 'developer' ? 'Разработчик' : 'Инженер'}</span>
-                      </div>
-                      <label className="users-form__field">
-                        <span>Полное имя</span>
-                        <input name="full_name" value={editForm.full_name} onChange={handleEditChange} required />
-                      </label>
-                      <label className="users-form__field">
-                        <span>Логин</span>
-                        <input name="username" value={editForm.username} onChange={handleEditChange} required />
-                      </label>
-                      <label className="users-form__field">
-                        <span>Роль</span>
-                        <select name="role" value={editForm.role} onChange={handleEditChange}>
-                          <option value="engineer">Инженер</option>
-                          <option value="developer">Разработчик</option>
-                        </select>
-                      </label>
-                      <label className="users-form__checkbox">
-                        <input
-                          type="checkbox"
-                          name="is_active"
-                          checked={editForm.is_active}
-                          onChange={handleEditChange}
-                        />
-                        <span>Активная учетная запись</span>
-                      </label>
-                      <button type="submit" className="btn btn-primary" disabled={isSaving}>
-                        {isSaving ? 'Сохранение...' : 'Сохранить изменения'}
-                      </button>
-                    </form>
-
-                    <form className="users-form users-form--secondary" onSubmit={handleResetPassword}>
-                      <h3>Сброс пароля</h3>
-                      <label className="users-form__field">
-                        <span>Новый пароль</span>
-                        <input
-                          type="password"
-                          autoComplete="new-password"
-                          value={resetPassword}
-                          onChange={(event) => setResetPassword(event.target.value)}
-                          required
-                        />
-                      </label>
-                      <button type="submit" className="btn btn-secondary" disabled={isSaving || !resetPassword.trim()}>
-                        Обновить пароль
-                      </button>
-                    </form>
-                  </>
-                ) : (
+                {!users.length && (
                   <div className="users-page__empty">Пользователи пока не созданы.</div>
                 )}
-              </div>
             </div>
           )}
         </section>

@@ -192,9 +192,13 @@ class ProjectRead(APIModel):
     facility_address: str | None = None
     project_description: str | None = None
     stage: str
+    additional_info_text: str | None = None
     number_of_floors: int
     owner_user_id: int | None = None
     owner_user: UserSummaryRead | None = None
+    latest_pdf_path: str | None = None
+    latest_pdf_url: str | None = None
+    latest_pdf_generated_at: datetime | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -291,8 +295,11 @@ class EquipmentItemRead(APIModel):
     alarm_current_ma: float | None = None
     smoke_addressing: SmokeAddressing | None = None
     image_path: str | None = None
+    image_url: str | None = None
     label_pdf_path: str | None = None
+    label_pdf_url: str | None = None
     manual_pdf_path: str | None = None
+    manual_pdf_url: str | None = None
     compatible_equipment_ids: list[int] = Field(default_factory=list)
     created_at: datetime | None = None
     updated_at: datetime | None = None
@@ -1110,6 +1117,7 @@ class ZkspcZoneRead(APIModel):
     is_manual: bool = False
     is_locked: bool = False
     compliance_warnings: list[str] = Field(default_factory=list)
+    display_geometry: list[list[list[float]]] = Field(default_factory=list)
 
 
 class ZkspcZoneCommit(APIModel):
@@ -1233,7 +1241,9 @@ class FloorPlanRead(APIModel):
     floor_number: int
     name: str | None = None
     original_image_path: str | None = None
+    original_image_url: str | None = None
     processed_image_path: str | None = None
+    processed_image_url: str | None = None
     image_width: int | None = None
     image_height: int | None = None
     scale_factor: float
@@ -1268,6 +1278,7 @@ class RecognitionProcessRead(APIModel):
 class DebugImageRead(APIModel):
     step: str
     path: str
+    asset_url: str | None = None
 
 
 class RecognitionRead(APIModel):
@@ -1278,6 +1289,7 @@ class RecognitionRead(APIModel):
     error_message: str | None = None
     processed_at: datetime | None = None
     debug_artifacts_dir: str | None = None
+    debug_artifacts_url: str | None = None
     debug_images: list[DebugImageRead] = Field(default_factory=list)
 
 
@@ -1382,6 +1394,10 @@ class RecognitionTrainingRunRead(APIModel):
     is_active_for_step: bool = False
     artifact_dir: str | None = None
     log_path: str | None = None
+    artifact_dir_url: str | None = None
+    log_url: str | None = None
+    background_task_id: int | None = None
+    background_task: BackgroundTaskRead | None = None
     error_message: str | None = None
     requested_at: datetime | None = None
     started_at: datetime | None = None
@@ -1438,6 +1454,7 @@ class RecognitionTrainingExampleDetailRead(RecognitionTrainingExampleSummaryRead
     corrected_snapshot: dict[str, Any] = Field(default_factory=dict)
     diff_summary: dict[str, Any] = Field(default_factory=dict)
     original_image_path: str | None = None
+    original_image_url: str | None = None
     batches: list[RecognitionTrainingExampleBatchRead] = Field(default_factory=list)
     runs: list[RecognitionTrainingRunRead] = Field(default_factory=list)
 
@@ -1484,6 +1501,7 @@ class RecognitionTrainingRunCreateRequest(APIModel):
 class RecognitionTrainingRunLogRead(APIModel):
     run_id: str
     log_path: str | None = None
+    log_url: str | None = None
     content: str = ""
 
 
@@ -1494,6 +1512,42 @@ class HealthRead(APIModel):
 
 class MessageRead(APIModel):
     message: str
+
+
+class BackgroundTaskSummaryRead(APIModel):
+    id: int
+    task_type: str
+    status: str
+    requested_by_user_id: int | None = None
+    requested_by_user: UserSummaryRead | None = None
+    project_id: int | None = None
+    floor_plan_id: int | None = None
+    attempts: int = 0
+    error_message: str | None = None
+    dedupe_key: str | None = None
+    resource_path: str | None = None
+    created_at: datetime | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    heartbeat_at: datetime | None = None
+
+
+class BackgroundTaskRead(BackgroundTaskSummaryRead):
+    payload: dict[str, Any] = Field(default_factory=dict)
+    result_payload: dict[str, Any] = Field(default_factory=dict)
+    updated_at: datetime | None = None
+
+
+class ProjectPdfPreviewRead(APIModel):
+    project_id: int
+    pdf_path: str | None = None
+    pdf_url: str | None = None
+    generated_at: datetime | None = None
+    stage_key: str | None = None
+    floor_plan_id: int | None = None
+    page_number: int | None = None
+    page_title: str | None = None
+    current_task: BackgroundTaskRead | None = None
 
 
 class FeedbackCreate(APIModel):

@@ -117,6 +117,8 @@ class Project(Base):
     power_consumption_overrides = Column(JSON, nullable=True)
     additional_info_text = Column(Text, nullable=True)
     owner_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    latest_pdf_path = Column(String(500), nullable=True)
+    latest_pdf_generated_at = Column(DateTime, nullable=True)
     
     number_of_floors = Column(Integer, default=1)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
@@ -155,9 +157,12 @@ class Project(Base):
             "general_data_overrides": self.general_data_overrides or {},
             "general_instructions_overrides": self.general_instructions_overrides or {},
             "power_consumption_overrides": self.power_consumption_overrides or {},
+            "additional_info_text": self.additional_info_text,
             "number_of_floors": self.number_of_floors,
             "owner_user_id": self.owner_user_id,
             "owner_user": owner,
+            "latest_pdf_path": self.latest_pdf_path,
+            "latest_pdf_generated_at": self.latest_pdf_generated_at.isoformat() if self.latest_pdf_generated_at else None,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
@@ -871,6 +876,7 @@ class ZkspcZone(Base):
     is_manual = Column(Boolean, default=False)
     is_locked = Column(Boolean, default=False)
     compliance_warnings = Column(JSON, nullable=True)
+    display_geometry = Column(JSON, nullable=True)
 
     floor_plan = relationship("FloorPlan", back_populates="zkspc_zones")
     room_links = relationship("ZkspcZoneRoom", back_populates="zone", cascade="all, delete-orphan")
@@ -888,6 +894,7 @@ class ZkspcZone(Base):
             "is_manual": self.is_manual,
             "is_locked": self.is_locked,
             "compliance_warnings": self.compliance_warnings or [],
+            "display_geometry": self.display_geometry or [],
         }
 
 
@@ -1211,6 +1218,7 @@ class RecognitionTrainingRun(Base):
     metrics_summary = Column(JSON, nullable=True)
     artifact_dir = Column(String(500), nullable=True)
     log_path = Column(String(500), nullable=True)
+    background_task_id = Column(Integer, ForeignKey("background_tasks.id"), nullable=True, index=True)
     error_message = Column(Text, nullable=True)
     requested_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
     started_at = Column(DateTime, nullable=True)
@@ -1219,6 +1227,7 @@ class RecognitionTrainingRun(Base):
     floor_plan = relationship("FloorPlan", back_populates="recognition_training_runs")
     training_batch = relationship("RecognitionTrainingBatch", back_populates="training_runs")
     active_model_links = relationship("RecognitionActiveModel", back_populates="training_run")
+    background_task = relationship("BackgroundTask", back_populates="training_runs")
 
     def to_dict(self):
         return {
@@ -1232,10 +1241,68 @@ class RecognitionTrainingRun(Base):
             "metrics_summary": self.metrics_summary or {},
             "artifact_dir": self.artifact_dir,
             "log_path": self.log_path,
+            "background_task_id": self.background_task_id,
             "error_message": self.error_message,
             "requested_at": self.requested_at.isoformat() if self.requested_at else None,
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "finished_at": self.finished_at.isoformat() if self.finished_at else None,
+        }
+
+
+class BackgroundTask(Base):
+    """Persistent background task for async worker execution."""
+
+    __tablename__ = "background_tasks"
+
+    id = Column(Integer, primary_key=True, index=True)
+    task_type = Column(String(64), nullable=False, index=True)
+    status = Column(String(32), nullable=False, default="queued", index=True)
+    requested_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=True, index=True)
+    floor_plan_id = Column(Integer, ForeignKey("floor_plans.id"), nullable=True, index=True)
+    payload = Column(JSON, nullable=True)
+    result_payload = Column(JSON, nullable=True)
+    error_message = Column(Text, nullable=True)
+    attempts = Column(Integer, nullable=False, default=0)
+    heartbeat_at = Column(DateTime, nullable=True, index=True)
+    started_at = Column(DateTime, nullable=True, index=True)
+    finished_at = Column(DateTime, nullable=True, index=True)
+    dedupe_key = Column(String(255), nullable=True, index=True)
+    resource_path = Column(String(255), nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
+    updated_at = Column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    requested_by_user = relationship("User")
+    project = relationship("Project")
+    floor_plan = relationship("FloorPlan")
+    training_runs = relationship("RecognitionTrainingRun", back_populates="background_task")
+
+    def to_dict(self):
+        requested_by = self.requested_by_user.to_summary_dict() if self.requested_by_user is not None else None
+        return {
+            "id": self.id,
+            "task_type": self.task_type,
+            "status": self.status,
+            "requested_by_user_id": self.requested_by_user_id,
+            "requested_by_user": requested_by,
+            "project_id": self.project_id,
+            "floor_plan_id": self.floor_plan_id,
+            "payload": self.payload or {},
+            "result_payload": self.result_payload or {},
+            "error_message": self.error_message,
+            "attempts": self.attempts,
+            "heartbeat_at": self.heartbeat_at.isoformat() if self.heartbeat_at else None,
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "finished_at": self.finished_at.isoformat() if self.finished_at else None,
+            "dedupe_key": self.dedupe_key,
+            "resource_path": self.resource_path,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
 
 

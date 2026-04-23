@@ -21,6 +21,11 @@ from backend.auth import (
     require_wall_access,
     require_window_access,
 )
+from backend.background_jobs import (
+    TASK_FIRE_ALARM_AUTO_LAYOUT,
+    TASK_SOUE_AUTO_LAYOUT,
+    dedupe_key_for_task,
+)
 from backend.database import get_db
 from backend.dependencies import (
     get_elements_geometry_use_cases,
@@ -29,6 +34,7 @@ from backend.dependencies import (
 )
 from backend.fire_alarm_placement import calculate_fire_alarm_layout
 from backend.mappers import (
+    background_task_read,
     cable_route_read,
     dimension_read,
     door_read,
@@ -46,6 +52,7 @@ from backend.modules.elements_geometry.application.use_cases import ElementsGeom
 from backend.modules.floor_plans.application.use_cases import FloorPlanUseCases
 from backend.modules.signal_design.application.use_cases import SignalDesignUseCases
 from backend.schemas import (
+    BackgroundTaskRead,
     BatchSaveRequest,
     BatchSaveResult,
     CableRouteRead,
@@ -84,6 +91,7 @@ from backend.schemas import (
     WindowUpdate,
     ZkspcZoneRead,
 )
+from backend.services.background_task_service import BackgroundTaskService
 
 
 router = APIRouter(tags=["elements"], dependencies=[Depends(require_current_user)])
@@ -345,20 +353,25 @@ def list_fire_alarms(
 
 @router.post(
     "/api/floor-plans/{floor_plan_id}/fire-alarms/auto-layout",
-    response_model=FireAlarmAutoLayoutRead,
+    response_model=BackgroundTaskRead,
+    status_code=202,
     dependencies=[Depends(require_floor_plan_access)],
 )
 def auto_layout_fire_alarms(
     floor_plan_id: int,
     system_type: str = Query("non_addressable"),
-    signal_service: SignalDesignUseCases = Depends(get_signal_design_use_cases),
-) -> FireAlarmAutoLayoutRead:
-    layout = signal_service.auto_layout_fire_alarms(floor_plan_id, system_type)
-    return FireAlarmAutoLayoutRead(
-        devices=layout["all_devices"],
-        summary=layout["summary"],
-        warnings=layout.get("warnings", []),
+    current_user: AuthenticatedUser = Depends(require_floor_plan_access),
+    db: Session = Depends(get_db),
+) -> BackgroundTaskRead:
+    task = BackgroundTaskService(db).enqueue(
+        task_type=TASK_FIRE_ALARM_AUTO_LAYOUT,
+        requested_by_user_id=current_user.id,
+        floor_plan_id=floor_plan_id,
+        payload={"floor_plan_id": floor_plan_id, "system_type": system_type},
+        dedupe_key=dedupe_key_for_task(TASK_FIRE_ALARM_AUTO_LAYOUT, floor_plan_id=floor_plan_id),
+        resource_path=f"/floor-plans/{floor_plan_id}",
     )
+    return background_task_read(task)
 
 
 @router.patch("/api/fire-alarms/{fire_alarm_id}", response_model=FireAlarmRead, dependencies=[Depends(require_fire_alarm_access)])
@@ -408,20 +421,25 @@ def list_soue_devices(
 
 @router.post(
     "/api/floor-plans/{floor_plan_id}/soue-devices/auto-layout",
-    response_model=SoueDeviceAutoLayoutRead,
+    response_model=BackgroundTaskRead,
+    status_code=202,
     dependencies=[Depends(require_floor_plan_access)],
 )
 def auto_layout_soue_devices(
     floor_plan_id: int,
     system_type: str = Query("non_addressable"),
-    signal_service: SignalDesignUseCases = Depends(get_signal_design_use_cases),
-) -> SoueDeviceAutoLayoutRead:
-    layout = signal_service.auto_layout_soue_devices(floor_plan_id, system_type)
-    return SoueDeviceAutoLayoutRead(
-        devices=layout["devices"],
-        summary=layout["summary"],
-        warnings=layout.get("warnings", []),
+    current_user: AuthenticatedUser = Depends(require_floor_plan_access),
+    db: Session = Depends(get_db),
+) -> BackgroundTaskRead:
+    task = BackgroundTaskService(db).enqueue(
+        task_type=TASK_SOUE_AUTO_LAYOUT,
+        requested_by_user_id=current_user.id,
+        floor_plan_id=floor_plan_id,
+        payload={"floor_plan_id": floor_plan_id, "system_type": system_type},
+        dedupe_key=dedupe_key_for_task(TASK_SOUE_AUTO_LAYOUT, floor_plan_id=floor_plan_id),
+        resource_path=f"/floor-plans/{floor_plan_id}",
     )
+    return background_task_read(task)
 
 
 @router.patch("/api/soue-devices/{soue_device_id}", response_model=SoueDeviceRead, dependencies=[Depends(require_soue_device_access)])

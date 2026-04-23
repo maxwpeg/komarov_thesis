@@ -7,15 +7,19 @@ export default function ZkspcSidebarSection({
   visibleRooms,
   roomDisplayNumberMap,
   selectedZkspcRooms,
+  isCreatingZone,
   pipelineActionLoading,
   roomsValidated,
   onDetect,
   onCommit,
-  onMergeSelected,
+  onStartCreate,
+  onCreateZone,
+  onCancelCreate,
   onToggleRoom,
   onMoveSelectedRoomsToZone,
   onToggleLock,
   onSplit,
+  onDelete,
 }) {
   return (
     <div className="sidebar-section">
@@ -27,10 +31,27 @@ export default function ZkspcSidebarSection({
         <button className="tool-button" onClick={onCommit} disabled={pipelineActionLoading || !currentZkspcZones.length}>
           Подтвердить
         </button>
-        <button className="tool-button" onClick={onMergeSelected} disabled={selectedZkspcRooms.length < 2}>
-          Объединить
+        <button className={`tool-button ${isCreatingZone ? 'active' : ''}`} onClick={onStartCreate}>
+          Добавить ЗКСПС
         </button>
       </div>
+
+      {isCreatingZone && (
+        <div style={{ marginBottom: '10px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          <div style={{ fontSize: '12px', color: '#6c757d' }}>
+            Выделите помещения на холсте или в списке, затем создайте новый ЗКСПС.
+          </div>
+          <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+            <button className="tool-button active" onClick={onCreateZone} disabled={!selectedZkspcRooms.length}>
+              Создать ({selectedZkspcRooms.length})
+            </button>
+            <button className="tool-button" onClick={onCancelCreate}>
+              Отмена
+            </button>
+          </div>
+        </div>
+      )}
+
       <ul className="element-list">
         {currentZkspcZones.map((zone) => (
           <li key={`zkspc-${zone.id ?? zone.zone_number}`} className="element-item" style={{ alignItems: 'flex-start' }}>
@@ -40,7 +61,7 @@ export default function ZkspcSidebarSection({
                 <strong>{zone.name || `ЗКСПС ${zone.zone_number}`}</strong>
               </div>
               <div style={{ fontSize: '11px', color: '#6c757d' }}>
-                Площадь: {Number(zone.area_sqm || 0).toFixed(2)} м2 • Помещений: {zone.room_ids?.length || 0}
+                Площадь: {Number(zone.area_sqm || 0).toFixed(2)} м² • Помещений: {zone.room_ids?.length || 0}
               </div>
               <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', marginTop: '6px' }}>
                 {(zone.room_ids || []).map((roomId) => {
@@ -63,7 +84,7 @@ export default function ZkspcSidebarSection({
                 </div>
               ))}
             </div>
-            <div style={{ display: 'flex', gap: '4px', marginLeft: '8px' }}>
+            <div style={{ display: 'flex', gap: '4px', marginLeft: '8px', flexWrap: 'wrap' }}>
               <button
                 className="tool-button"
                 style={{ fontSize: '11px', padding: '3px 6px' }}
@@ -73,10 +94,13 @@ export default function ZkspcSidebarSection({
                 Перенести
               </button>
               <button className="tool-button" style={{ fontSize: '11px', padding: '3px 6px' }} onClick={() => onToggleLock(zone.id ?? zone.zone_number)}>
-                {zone.is_locked ? 'Unlock' : 'Lock'}
+                {zone.is_locked ? 'Разблокировать' : 'Зафиксировать'}
               </button>
               <button className="tool-button" style={{ fontSize: '11px', padding: '3px 6px' }} onClick={() => onSplit(zone.id ?? zone.zone_number)}>
-                Split
+                Разделить
+              </button>
+              <button className="tool-button" style={{ fontSize: '11px', padding: '3px 6px' }} onClick={() => onDelete(zone.id ?? zone.zone_number)}>
+                Удалить
               </button>
             </div>
           </li>

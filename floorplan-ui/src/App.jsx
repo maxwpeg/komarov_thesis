@@ -18,8 +18,11 @@ import FloorPlanEditor from './pages/FloorPlanEditor';
 import LoginPage from './pages/LoginPage';
 import ProjectDetail from './pages/ProjectDetail';
 import ProjectList from './pages/ProjectList';
+import ProjectPdfPreviewPage from './pages/ProjectPdfPreviewPage';
 import RecognitionTrainingPage from './pages/RecognitionTrainingPage';
 import UsersPage from './pages/UsersPage';
+import WorkerTasksPage from './pages/WorkerTasksPage';
+import { DialogProvider } from './ui/DialogProvider';
 
 function AuthLoadingGate() {
   return (
@@ -119,14 +122,13 @@ function ProtectedAppShell() {
 
   const navItems = user?.role === 'developer'
     ? [
-      { to: '/', label: 'Проекты' },
       { to: '/create-project', label: 'Новый проект' },
       { to: '/equipment', label: 'Оборудование' },
       { to: '/recognition-training', label: 'Дообучение' },
+      { to: '/worker-tasks', label: 'Задачи' },
       { to: '/users', label: 'Пользователи' },
     ]
     : [
-      { to: '/', label: 'Проекты' },
       { to: '/create-project', label: 'Новый проект' },
       { to: '/equipment', label: 'Оборудование' },
     ];
@@ -170,10 +172,15 @@ function ProtectedAppShell() {
           <Route path="/create-project" element={<CreateProject />} />
           <Route path="/equipment" element={<EquipmentCatalogPage />} />
           <Route path="/projects/:projectId" element={<ProjectDetail />} />
+          <Route path="/projects/:projectId/preview" element={<ProjectPdfPreviewPage />} />
           <Route path="/floor-plans/:floorPlanId" element={<FloorPlanEditor />} />
           <Route
             path="/recognition-training"
             element={user?.role === 'developer' ? <RecognitionTrainingPage /> : <Navigate to="/" replace />}
+          />
+          <Route
+            path="/worker-tasks"
+            element={user?.role === 'developer' ? <WorkerTasksPage /> : <Navigate to="/" replace />}
           />
           <Route
             path="/users"
@@ -215,11 +222,13 @@ function AppRoutes() {
 function App() {
   return (
     <Router>
-      <AuthProvider>
-        <div className="app">
-          <AppRoutes />
-        </div>
-      </AuthProvider>
+      <DialogProvider>
+        <AuthProvider>
+          <div className="app">
+            <AppRoutes />
+          </div>
+        </AuthProvider>
+      </DialogProvider>
     </Router>
   );
 }

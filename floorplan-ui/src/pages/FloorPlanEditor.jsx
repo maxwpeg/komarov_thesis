@@ -2,6 +2,8 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { Stage, Layer, Line, Rect, Circle, Text, Arc, Group } from 'react-konva';
 import { elementsApi, equipmentApi, floorPlansApi, pipelineApi, projectsApi, recognitionApi } from '../api/client';
+import { useDialogs } from '../ui/DialogProvider';
+import { pollTaskUntilSettled } from '../utils/backgroundTasks';
 import {
   clampViewportPan,
   clampHoverPanelPosition,
@@ -41,6 +43,7 @@ import SignalSystemSidebarSection from './floorPlanEditor/SignalSystemSidebarSec
 import ZkspcSidebarSection from './floorPlanEditor/ZkspcSidebarSection';
 import {
   COMMON_SIGNAL_SYSTEM,
+  buildZoneDisplayGeometry,
   SIGNAL_INSTRUMENT_OPTIONS,
   buildZkspcStyleMap,
   buildRoomZoneMap,
@@ -1142,6 +1145,7 @@ function FloorPlanEditor() {
   const { floorPlanId } = useParams();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
+  const { confirm, prompt, toast } = useDialogs();
   const requestedViewStep = searchParams.get('step');
   const WALL_COLOR = '#39FF14';
   const stageRef = useRef(null);
@@ -1284,6 +1288,7 @@ function FloorPlanEditor() {
   const [savingPlanMeta, setSavingPlanMeta] = useState(false);
   const [selectedElements, setSelectedElements] = useState([]);
   const [selectedZkspcRooms, setSelectedZkspcRooms] = useState([]);
+  const [isCreatingZkspcZone, setIsCreatingZkspcZone] = useState(false);
   const [selectionRect, setSelectionRect] = useState(null);
   const [isSelecting, setIsSelecting] = useState(false);
   const [isRoomZoneDrawing, setIsRoomZoneDrawing] = useState(false);
@@ -1353,7 +1358,11 @@ function FloorPlanEditor() {
     return parsedValue > 0 ? parsedValue * 1000 : DEFAULT_WALL_THICKNESS_MM;
   }, [newWallThicknessDraft]);
   const flipWallAlignment = useCallback(() => 'center', []);
-  const currentZkspcZones = zkspcDraftZones.length ? zkspcDraftZones : zkspcZones;
+  const hasZkspcDraftChanges = useMemo(
+    () => JSON.stringify(zkspcDraftZones) !== JSON.stringify(zkspcZones),
+    [zkspcDraftZones, zkspcZones],
+  );
+  const currentZkspcZones = hasZkspcDraftChanges ? zkspcDraftZones : zkspcZones;
   const roomZoneMap = useMemo(() => buildRoomZoneMap(currentZkspcZones), [currentZkspcZones]);
   const projectEquipmentById = useMemo(
     () => Object.fromEntries(projectEquipmentItems.map((item) => [item.id, item])),
@@ -1405,7 +1414,21 @@ function FloorPlanEditor() {
     }
     return fallbackLabel;
   }, [getEquipmentNameById, linkedCableOptions, projectEquipmentSelections]);
-  const promptEquipmentSelection = useCallback((title, options) => {
+  const buildDraftZone = useCallback((zone) => {
+    const roomIds = Array.from(new Set(zone?.room_ids || [])).sort((left, right) => left - right);
+    const zoneRooms = rooms
+      .filter((room) => !deletedElements.some((del) => del.type === 'rooms' && del.id === room.id))
+      .filter((room) => roomIds.includes(room.id))
+      .filter((room) => room.boundary_points?.length >= 3);
+    return {
+      ...zone,
+      room_ids: roomIds,
+      room_count: roomIds.length,
+      area_sqm: zoneRooms.reduce((sum, room) => sum + Number(room.area_sqm || 0), 0),
+      display_geometry: buildZoneDisplayGeometry(zoneRooms),
+    };
+  }, [deletedElements, rooms]);
+  const promptEquipmentSelection = useCallback(async (title, options) => {
     if (!options.length) {
       return null;
     }
@@ -1414,17 +1437,24 @@ function FloorPlanEditor() {
       '',
       ...options.map((option, index) => `${index + 1}. ${option.label}`),
     ].join('\n');
-    const response = window.prompt(promptText, '1');
+    const response = await prompt(promptText, {
+      title: 'Выбор оборудования',
+      confirmLabel: 'Выбрать',
+      cancelLabel: 'Отмена',
+      defaultValue: '1',
+      placeholder: 'Введите номер варианта',
+    });
     if (response === null) {
       return null;
     }
     const selectedIndex = Number(response) - 1;
     if (!Number.isInteger(selectedIndex) || selectedIndex < 0 || selectedIndex >= options.length) {
+      toast('Номер варианта указан неверно.', { tone: 'error' });
       return null;
     }
     return options[selectedIndex];
-  }, []);
-  const resolveProjectEquipmentSelection = useCallback((categories, title) => {
+  }, [prompt, toast]);
+  const resolveProjectEquipmentSelection = useCallback(async (categories, title) => {
     const options = getProjectEquipmentOptions(categories);
     if (!options.length) {
       return null;
@@ -1432,7 +1462,7 @@ function FloorPlanEditor() {
     if (options.length === 1) {
       return options[0].id;
     }
-    const selected = promptEquipmentSelection(
+    const selected = await promptEquipmentSelection(
       title,
       options.map((item) => ({
         id: item.id,
@@ -1456,7 +1486,7 @@ function FloorPlanEditor() {
       return linkedOptions[0].id;
     }
 
-    const selected = promptEquipmentSelection(
+    const selected = await promptEquipmentSelection(
       'Выберите оборудование для прибора',
       [
         ...linkedOptions.map((item) => ({
@@ -1531,7 +1561,7 @@ function FloorPlanEditor() {
       updateLocalSignalBranchState(route.system_type, buildCableRouteStepUpdate(route));
     } catch (error) {
       console.error('Error deleting cable route segment:', error);
-      alert('РќРµ СѓРґР°Р»РѕСЃСЊ СѓРґР°Р»РёС‚СЊ СЃРµРіРјРµРЅС‚ РєР°Р±РµР»СЏ.');
+      alert('Не удалось удалить сегмент кабеля.');
     }
   }, [
     cableRoutes,
@@ -1547,13 +1577,9 @@ function FloorPlanEditor() {
   const ZOOM_STEP = 0.1;
   const userZoom = viewport.zoom;
   const stagePanOffset = viewport.pan;
-  const imageUrl = floorPlan?.original_image_path 
-    ? `http://localhost:8000/${floorPlan.original_image_path.replace(/\\/g, '/')}`
-    : null;
+  const imageUrl = floorPlan?.original_image_url || floorPlan?.original_image_path || null;
   const selectedDebugImage = debugImages.find((debugImg) => debugImg.path === selectedDebugImagePath) || null;
-  const displayedImageUrl = selectedDebugImage
-    ? `http://localhost:8000/${selectedDebugImage.path.replace(/\\/g, '/')}`
-    : imageUrl;
+  const displayedImageUrl = selectedDebugImage?.asset_url || selectedDebugImage?.path || imageUrl;
   const effectiveImageWidth = Math.max(
     1,
     Number(
@@ -1813,6 +1839,8 @@ function FloorPlanEditor() {
     setSignalInstruments(data.signal_instruments || []);
     setCableRoutes(data.cable_routes || []);
     setActiveSignalSystemType(normalizeSignalSystemType(data.active_signal_system_type));
+    setSelectedZkspcRooms([]);
+    setIsCreatingZkspcZone(false);
   }, []);
 
   const fetchPipelineState = useCallback(async () => {
@@ -3922,19 +3950,25 @@ function FloorPlanEditor() {
     }
     try {
       setPipelineActionLoading(true);
-      let response = null;
+      let task = null;
       if (step === 'walls') {
-        response = await pipelineApi.detectWalls(floorPlanId);
+        task = await pipelineApi.detectWalls(floorPlanId);
       } else if (step === 'openings') {
-        response = await pipelineApi.detectOpenings(floorPlanId);
+        task = await pipelineApi.detectOpenings(floorPlanId);
       } else if (step === 'rooms') {
-        response = await pipelineApi.detectRooms(floorPlanId);
+        task = await pipelineApi.detectRooms(floorPlanId);
       } else if (step === 'zkspc') {
-        response = await pipelineApi.detectZkspc(floorPlanId);
+        task = await pipelineApi.detectZkspc(floorPlanId);
       }
-      if (response) {
-        applyPipelineResponse(response);
+      if (task?.id) {
+        toast(`Задача распознавания шага "${step}" поставлена в очередь.`, { tone: 'info' });
+        const settledTask = await pollTaskUntilSettled(task.id);
+        if (settledTask.status !== 'succeeded') {
+          throw new Error(settledTask.error_message || `Задача шага "${step}" завершилась со статусом ${settledTask.status}.`);
+        }
+        await fetchFloorPlan();
         resetStepFeedbackUiState(step);
+        toast(`Шаг "${step}" обновлён.`, { tone: 'info' });
       }
     } catch (error) {
       console.error(`Error detecting ${step}:`, error);
@@ -3943,7 +3977,7 @@ function FloorPlanEditor() {
     } finally {
       setPipelineActionLoading(false);
     }
-  }, [applyPipelineResponse, floorPlanId, hasBlockingDraftChangesForStep, resetStepFeedbackUiState]);
+  }, [fetchFloorPlan, floorPlanId, hasBlockingDraftChangesForStep, resetStepFeedbackUiState, toast]);
 
   const handleCommitStep = useCallback(async (step) => {
     try {
@@ -3953,9 +3987,6 @@ function FloorPlanEditor() {
       const prospectiveScaleFactor = Number(buildPlanMetaPayload()?.scale_factor ?? floorPlan?.scale_factor ?? 0);
       if (step === 'walls' && !(prospectiveScaleFactor > 1.000001)) {
         alert('Перед подтверждением стен задайте масштаб на шаге 1.');
-        setPipelineActionLoading(false);
-        return false;
-        alert('РџРµСЂРµРґ РїРѕРґС‚РІРµСЂР¶РґРµРЅРёРµРј СЃС‚РµРЅ Р·Р°РґР°Р№С‚Рµ РјР°СЃС€С‚Р°Р± РЅР° С€Р°РіРµ 1.');
         setPipelineActionLoading(false);
         return false;
       }
@@ -4767,29 +4798,42 @@ function FloorPlanEditor() {
     ));
   }, []);
 
-  const handleMergeSelectedZkspcRooms = useCallback(() => {
-    if (selectedZkspcRooms.length < 2) {
+  const handleStartCreateZkspcZone = useCallback(() => {
+    setIsCreatingZkspcZone(true);
+    setSelectedZkspcRooms([]);
+  }, []);
+
+  const handleCancelCreateZkspcZone = useCallback(() => {
+    setIsCreatingZkspcZone(false);
+    setSelectedZkspcRooms([]);
+  }, []);
+
+  const handleCreateZkspcZone = useCallback(() => {
+    if (!selectedZkspcRooms.length) {
       return;
     }
     const selectedSet = new Set(selectedZkspcRooms);
-    const remainingZones = currentZkspcZones.filter((zone) => !(zone.room_ids || []).some((roomId) => selectedSet.has(roomId)));
-    const selectedRooms = rooms
-      .filter((room) => !deletedElements.some((del) => del.type === 'rooms' && del.id === room.id))
-      .filter((room) => selectedSet.has(room.id));
+    const remainingZones = currentZkspcZones
+      .map((zone) => buildDraftZone({
+        ...zone,
+        room_ids: (zone.room_ids || []).filter((roomId) => !selectedSet.has(roomId)),
+        is_manual: true,
+      }))
+      .filter((zone) => (zone.room_ids || []).length > 0);
     const nextZoneNumber = Math.max(0, ...remainingZones.map((zone) => Number(zone.zone_number || 0))) + 1;
-    const mergedZone = {
+    const createdZone = buildDraftZone({
       id: null,
       zone_number: nextZoneNumber,
       name: `ЗКСПС ${nextZoneNumber}`,
       room_ids: [...selectedSet],
-      area_sqm: selectedRooms.reduce((sum, room) => sum + Number(room.area_sqm || 0), 0),
-      room_count: selectedSet.size,
       is_manual: true,
       is_locked: false,
       compliance_warnings: [],
-    };
-    setZkspcDraftZones([...remainingZones, mergedZone]);
-  }, [selectedZkspcRooms, currentZkspcZones, rooms, deletedElements]);
+    });
+    setZkspcDraftZones([...remainingZones, createdZone]);
+    setSelectedZkspcRooms([]);
+    setIsCreatingZkspcZone(false);
+  }, [buildDraftZone, currentZkspcZones, selectedZkspcRooms]);
 
   const handleSplitZkspcZone = useCallback((zoneId) => {
     const targetZone = currentZkspcZones.find((zone) => (zone.id ?? zone.zone_number) === zoneId);
@@ -4798,27 +4842,31 @@ function FloorPlanEditor() {
     }
     const remainingZones = currentZkspcZones.filter((zone) => (zone.id ?? zone.zone_number) !== zoneId);
     const nextZones = (targetZone.room_ids || []).map((roomId, index) => {
-      const room = rooms.find((item) => item.id === roomId);
       const nextZoneNumber = Math.max(0, ...remainingZones.map((zone) => Number(zone.zone_number || 0))) + index + 1;
-      return {
+      return buildDraftZone({
         id: null,
         zone_number: nextZoneNumber,
         name: `ЗКСПС ${nextZoneNumber}`,
         room_ids: [roomId],
-        area_sqm: Number(room?.area_sqm || 0),
-        room_count: 1,
         is_manual: true,
         is_locked: false,
         compliance_warnings: [],
-      };
+      });
     });
     setZkspcDraftZones([...remainingZones, ...nextZones]);
-  }, [currentZkspcZones, rooms]);
+  }, [buildDraftZone, currentZkspcZones]);
 
   const handleToggleZkspcLock = useCallback((zoneId) => {
     setZkspcDraftZones((prev) => prev.map((zone) => (
-      (zone.id ?? zone.zone_number) === zoneId ? { ...zone, is_locked: !zone.is_locked } : zone
+      (zone.id ?? zone.zone_number) === zoneId
+        ? buildDraftZone({ ...zone, is_locked: !zone.is_locked })
+        : zone
     )));
+  }, [buildDraftZone]);
+
+  const handleDeleteZkspcZone = useCallback((zoneId) => {
+    setZkspcDraftZones((prev) => prev.filter((zone) => (zone.id ?? zone.zone_number) !== zoneId));
+    setSelectedZkspcRooms([]);
   }, []);
 
   const handleMoveSelectedRoomsToZone = useCallback((zoneId) => {
@@ -4831,28 +4879,23 @@ function FloorPlanEditor() {
         const zoneKey = zone.id ?? zone.zone_number;
         if (zoneKey === zoneId) {
           const roomIds = Array.from(new Set([...(zone.room_ids || []), ...selectedZkspcRooms])).sort((a, b) => a - b);
-          const movedRooms = rooms.filter((room) => roomIds.includes(room.id));
-          return {
+          return buildDraftZone({
             ...zone,
             room_ids: roomIds,
-            room_count: roomIds.length,
-            area_sqm: movedRooms.reduce((sum, room) => sum + Number(room.area_sqm || 0), 0),
             is_manual: true,
-          };
+          });
         }
         const roomIds = (zone.room_ids || []).filter((roomId) => !selectedSet.has(roomId));
-        const remainingRooms = rooms.filter((room) => roomIds.includes(room.id));
-        return {
+        return buildDraftZone({
           ...zone,
           room_ids: roomIds,
-          room_count: roomIds.length,
-          area_sqm: remainingRooms.reduce((sum, room) => sum + Number(room.area_sqm || 0), 0),
           is_manual: true,
-        };
+        });
       })
       .filter((zone) => (zone.room_ids || []).length > 0));
     setSelectedZkspcRooms([]);
-  }, [selectedZkspcRooms, rooms]);
+    setIsCreatingZkspcZone(false);
+  }, [buildDraftZone, selectedZkspcRooms]);
 
   const buildCableStepUpdate = useCallback((subsystemType, activeStep = null) => (
     String(subsystemType || 'sps') === 'soue'
@@ -5770,7 +5813,7 @@ function FloorPlanEditor() {
     setHasUnsavedChanges(true);
   }, [floorPlanId, saveToHistory]);
 
-  const handleCreateDraftFireAlarm = useCallback((deviceType, x, y, overrides = {}) => {
+  const handleCreateDraftFireAlarm = useCallback(async (deviceType, x, y, overrides = {}) => {
     const categories = FIRE_ALARM_EQUIPMENT_CATEGORIES[deviceType] || [];
     const matchingEquipment = getProjectEquipmentOptions(categories);
     let selectedEquipmentId = overrides.equipment_id ?? null;
@@ -5778,7 +5821,7 @@ function FloorPlanEditor() {
       if (matchingEquipment.length === 1) {
         selectedEquipmentId = matchingEquipment[0].id;
       } else if (matchingEquipment.length > 1) {
-        selectedEquipmentId = resolveProjectEquipmentSelection(
+        selectedEquipmentId = await resolveProjectEquipmentSelection(
           categories,
           `Выберите оборудование проекта для "${getFireAlarmDisplayLabel(deviceType)}"`,
         );
@@ -5853,13 +5896,25 @@ function FloorPlanEditor() {
 
   const handleAutoLayoutFireAlarms = useCallback(async () => {
     const visiblePersisted = branchFireAlarms.filter((alarm) => !deletedElements.some((del) => del.type === 'fire-alarms' && del.id === alarm.id));
-    if ((visiblePersisted.length || newFireAlarms.length) && !window.confirm('Текущая расстановка извещателей будет заменена. Продолжить?')) {
-      return;
+    if (visiblePersisted.length || newFireAlarms.length) {
+      const isConfirmed = await confirm('Текущая расстановка извещателей будет заменена. Продолжить?', {
+        confirmLabel: 'Заменить',
+        cancelLabel: 'Отмена',
+      });
+      if (!isConfirmed) {
+        return;
+      }
     }
 
     try {
       setFireAlarmActionLoading(true);
-      const preview = await floorPlansApi.autoLayoutFireAlarms(floorPlanId, currentSignalSystem);
+      const task = await floorPlansApi.autoLayoutFireAlarms(floorPlanId, currentSignalSystem);
+      toast('Авторасстановка извещателей поставлена в очередь.', { tone: 'info' });
+      const settledTask = await pollTaskUntilSettled(task.id);
+      if (settledTask.status !== 'succeeded') {
+        throw new Error(settledTask.error_message || 'Авторасстановка извещателей завершилась с ошибкой.');
+      }
+      const preview = settledTask.result_payload || {};
       if ((preview.warnings || []).length > 0) {
         setFireAlarmWarnings(preview.warnings || []);
         setViewStep('zkspc');
@@ -5892,8 +5947,8 @@ function FloorPlanEditor() {
     } finally {
       setFireAlarmActionLoading(false);
     }
-  }, [branchFireAlarms, deletedElements, newFireAlarms.length, floorPlanId, saveToHistory, currentSignalSystem, setNewFireAlarms, setFireAlarmWarnings]);
-  const handleCreateDraftSoueDevice = useCallback((deviceType, x, y, overrides = {}) => {
+  }, [branchFireAlarms, confirm, currentSignalSystem, deletedElements, floorPlanId, newFireAlarms.length, saveToHistory, setFireAlarmWarnings, setNewFireAlarms, toast]);
+  const handleCreateDraftSoueDevice = useCallback(async (deviceType, x, y, overrides = {}) => {
     const categories = SOUE_DEVICE_EQUIPMENT_CATEGORIES[deviceType] || [];
     const matchingEquipment = getProjectEquipmentOptions(categories);
     let selectedEquipmentId = overrides.equipment_id ?? null;
@@ -5901,7 +5956,7 @@ function FloorPlanEditor() {
       if (matchingEquipment.length === 1) {
         selectedEquipmentId = matchingEquipment[0].id;
       } else if (matchingEquipment.length > 1) {
-        selectedEquipmentId = resolveProjectEquipmentSelection(
+        selectedEquipmentId = await resolveProjectEquipmentSelection(
           categories,
           `Выберите оборудование проекта для "${deviceType === 'siren' ? 'Сирена' : 'Табло'}"`,
         );
@@ -5963,12 +6018,24 @@ function FloorPlanEditor() {
 
   const handleAutoLayoutSoueDevices = useCallback(async () => {
     const visiblePersisted = branchSoueDevices.filter((device) => !deletedElements.some((del) => del.type === 'soue-devices' && del.id === device.id));
-    if ((visiblePersisted.length || newSoueDevices.length) && !window.confirm('Текущая расстановка СОУЭ будет заменена. Продолжить?')) {
-      return;
+    if (visiblePersisted.length || newSoueDevices.length) {
+      const isConfirmed = await confirm('Текущая расстановка СОУЭ будет заменена. Продолжить?', {
+        confirmLabel: 'Заменить',
+        cancelLabel: 'Отмена',
+      });
+      if (!isConfirmed) {
+        return;
+      }
     }
     try {
       setSoueActionLoading(true);
-      const preview = await floorPlansApi.autoLayoutSoueDevices(floorPlanId, currentSharedSignalSystem);
+      const task = await floorPlansApi.autoLayoutSoueDevices(floorPlanId, currentSharedSignalSystem);
+      toast('Авторасстановка СОУЭ поставлена в очередь.', { tone: 'info' });
+      const settledTask = await pollTaskUntilSettled(task.id);
+      if (settledTask.status !== 'succeeded') {
+        throw new Error(settledTask.error_message || 'Авторасстановка СОУЭ завершилась с ошибкой.');
+      }
+      const preview = settledTask.result_payload || {};
       saveToHistory();
       setDeletedElements((prev) => {
         const retained = prev.filter((item) => item.type !== 'soue-devices' || !branchSoueDevices.some((device) => device.id === item.id));
@@ -6009,7 +6076,7 @@ function FloorPlanEditor() {
     } finally {
       setSoueActionLoading(false);
     }
-  }, [branchSoueDevices, currentSharedSignalSystem, deletedElements, floorPlan?.scale_factor, floorPlanId, newSoueDevices.length, resolveSoueDevicePlacement, rooms, saveToHistory, setNewSoueDevices, setSoueWarnings]);
+  }, [branchSoueDevices, confirm, currentSharedSignalSystem, deletedElements, floorPlan?.scale_factor, floorPlanId, newSoueDevices.length, resolveSoueDevicePlacement, rooms, saveToHistory, setNewSoueDevices, setSoueWarnings, toast]);
 
   // eslint-disable-next-line no-unused-vars
   const handleRecognize = async (debug = false) => {
@@ -6019,7 +6086,12 @@ function FloorPlanEditor() {
       setRecognitionFeedbackError('');
       setDebugImages([]);
       setSelectedDebugImagePath(null);
-      await recognitionApi.process(floorPlanId, debug);
+      const task = await recognitionApi.process(floorPlanId, debug);
+      toast('Распознавание поставлено в очередь.', { tone: 'info' });
+      const settledTask = await pollTaskUntilSettled(task.id);
+      if (settledTask.status !== 'succeeded') {
+        throw new Error(settledTask.error_message || 'Распознавание завершилось с ошибкой.');
+      }
       const recognitionData = await recognitionApi.get(floorPlanId, debug);
       setRecognitionMeta(recognitionData);
       setRecognition(recognitionData.recognition_result);
@@ -7742,13 +7814,14 @@ function FloorPlanEditor() {
   const showOpeningsOnCanvas = (currentViewStep === 'openings' || currentViewStep === 'rooms' || currentViewStep === 'zkspc' || currentViewStep === 'signal_instruments' || currentViewStep === 'fire_alarms' || currentViewStep === 'devices_cables' || currentViewStep === 'soue_devices' || currentViewStep === 'soue_cables')
     && (currentViewStep === 'openings' || openingsValidated);
   const showRoomsOnCanvas = currentViewStep === 'rooms' || currentViewStep === 'zkspc';
-  const showZkspcOverlayOnCanvas = currentViewStep === 'zkspc';
+  const showZkspcOverlayOnCanvas = currentViewStep === 'zkspc' || isPostZkspcView;
   const showDimensionsOnCanvas = currentViewStep === 'walls';
   const showFireAlarmsOnCanvas = currentViewStep === 'fire_alarms' || currentViewStep === 'devices_cables';
   const showSoueDevicesOnCanvas = currentViewStep === 'soue_devices' || currentViewStep === 'soue_cables';
   const showCableRoutesOnCanvas = currentViewStep === 'devices_cables' || currentViewStep === 'soue_cables';
   const showSignalInstrumentsOnCanvas = ['signal_instruments', 'fire_alarms', 'devices_cables', 'soue_devices', 'soue_cables'].includes(currentViewStep);
   const showRoomsSidebar = currentViewStep === 'rooms';
+  const roomCreationToolActive = currentViewStep === 'rooms' && selectedTool === 'add-room';
   const showZkspcSidebar = currentViewStep === 'zkspc';
   const showFireAlarmSidebar = currentViewStep === 'fire_alarms';
   const showSoueSidebar = currentViewStep === 'soue_devices';
@@ -9364,15 +9437,19 @@ function FloorPlanEditor() {
             visibleRooms={visibleRooms}
             roomDisplayNumberMap={roomDisplayNumberMap}
             selectedZkspcRooms={selectedZkspcRooms}
+            isCreatingZone={isCreatingZkspcZone}
             pipelineActionLoading={pipelineActionLoading}
             roomsValidated={roomsValidated}
             onDetect={() => handleDetectStep('zkspc')}
             onCommit={() => handleCommitStep('zkspc')}
-            onMergeSelected={handleMergeSelectedZkspcRooms}
+            onStartCreate={handleStartCreateZkspcZone}
+            onCreateZone={handleCreateZkspcZone}
+            onCancelCreate={handleCancelCreateZkspcZone}
             onToggleRoom={handleToggleZkspcRoom}
             onMoveSelectedRoomsToZone={handleMoveSelectedRoomsToZone}
             onToggleLock={handleToggleZkspcLock}
             onSplit={handleSplitZkspcZone}
+            onDelete={handleDeleteZkspcZone}
           />
         )}
 
@@ -9735,15 +9812,15 @@ function FloorPlanEditor() {
                     mergeInstrumentId === hoverPanel.id ? (
                       <>
                         <button className="tool-button" onClick={handleMergeCableRoutes}>
-                          РџСЂРёРјРµРЅРёС‚СЊ СЃРІРµРґРµРЅРёРµ
+                          Применить сведение
                         </button>
                         <button className="tool-button" onClick={handleCancelMergeCableRoutes}>
-                          РћС‚РјРµРЅР°
+                          Отмена
                         </button>
                       </>
                     ) : (
                       <button className="tool-button" onClick={() => handleStartMergeCableRoutes(hoverPanel.data)}>
-                        РЎРІРµСЃС‚Рё РґР°С‚С‡РёРєРё
+                        Свести датчики
                       </button>
                     )
                   )}
@@ -9960,12 +10037,20 @@ function FloorPlanEditor() {
             </>
           )}
           {currentViewStep === 'rooms' && (
-            <button
-              className={`tool-button ${selectedTool === 'room-zone' ? 'active' : ''}`}
-              onClick={() => setSelectedTool('room-zone')}
-            >
-              Добавить зону
-            </button>
+            <>
+              <button
+                className={`tool-button ${selectedTool === 'add-room' ? 'active' : ''}`}
+                onClick={() => setSelectedTool('add-room')}
+              >
+                Добавить помещение
+              </button>
+              <button
+                className={`tool-button ${selectedTool === 'room-zone' ? 'active' : ''}`}
+                onClick={() => setSelectedTool('room-zone')}
+              >
+                Добавить зону
+              </button>
+            </>
           )}
           {currentViewStep === 'fire_alarms' && (
             <>
@@ -10616,6 +10701,11 @@ function FloorPlanEditor() {
                   </button>}
                 </div>
               )}
+            </div>
+          )}
+          {roomCreationToolActive && (
+            <div className="editor-stage__mode-hint">
+              Протяните прямоугольник на плане, чтобы добавить помещение.
             </div>
           )}
           {containerSize.width > 0 && containerSize.height > 0 && (
@@ -12011,7 +12101,10 @@ function FloorPlanEditor() {
                 const zoneColor = zone
                   ? (zkspcStyleMap[Number(zone.zone_number || 1)]?.color || getZkspcStyle(zone, floorPlan?.id).color)
                   : '#7c3aed';
-                const roomStrokeColor = isPostZkspcView
+                const shouldHideRoomBoundary = Boolean(zone) && (currentViewStep === 'zkspc' || isPostZkspcView);
+                const roomStrokeColor = shouldHideRoomBoundary
+                  ? 'rgba(0,0,0,0)'
+                  : isPostZkspcView
                   ? '#111111'
                   : (currentViewStep === 'zkspc' || currentViewStep === 'devices_cables')
                     ? zoneColor
@@ -12026,7 +12119,7 @@ function FloorPlanEditor() {
                     <Line
                       points={points}
                       stroke={roomStrokeColor}
-                      strokeWidth={isSelected || isHovered ? 3 : 2}
+                      strokeWidth={shouldHideRoomBoundary ? 0 : (isSelected || isHovered ? 3 : 2)}
                       closed
                       fill={roomFillColor}
                       listening={!isBlocked && !zkspcRoomBlocked}
@@ -12134,6 +12227,9 @@ function FloorPlanEditor() {
                 if (!zoneRooms.length) {
                   return null;
                 }
+                const zonePolygons = Array.isArray(zone.display_geometry) && zone.display_geometry.length
+                  ? zone.display_geometry
+                  : buildZoneDisplayGeometry(zoneRooms);
 
                 return (
                   <React.Fragment key={`zkspc-overlay-${zone.id || zone.zone_number}`}>
@@ -12174,18 +12270,19 @@ function FloorPlanEditor() {
                               />
                             ))}
                           </Group>
-                          {currentViewStep === 'zkspc' && (
-                            <Line
-                              points={flatPoints}
-                              stroke={zoneStyle.outlineColor}
-                              strokeWidth={2}
-                              closed
-                              listening={false}
-                            />
-                          )}
                         </Group>
                       );
                     })}
+                    {zonePolygons.map((polygon, polygonIndex) => (
+                      <Line
+                        key={`zkspc-outline-${zone.id || zone.zone_number}-${polygonIndex}`}
+                        points={polygon.flat()}
+                        stroke={zoneStyle.outlineColor}
+                        strokeWidth={2}
+                        closed
+                        listening={false}
+                      />
+                    ))}
                     {zoneLabelLayout?.leaderPolyline && (
                       <Line
                         points={zoneLabelLayout.leaderPolyline.flat()}
@@ -12988,6 +13085,11 @@ function FloorPlanEditor() {
 }
 
 export default FloorPlanEditor;
+
+
+
+
+
 
 
 

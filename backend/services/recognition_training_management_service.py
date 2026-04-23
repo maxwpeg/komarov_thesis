@@ -18,6 +18,8 @@ from typing import Any
 from PIL import Image, ImageOps
 from sqlalchemy.orm import Session, joinedload
 
+from backend.assets import build_asset_url
+from backend.bootstrap import relative_to_root
 from backend.config import settings
 from backend.errors import AppError
 from backend.models import (
@@ -28,6 +30,7 @@ from backend.models import (
     RecognitionTrainingBatchExample,
     RecognitionTrainingRun,
 )
+from backend.modules.shared.infrastructure.persistence.models import BackgroundTask
 from backend.services.recognition_training_feedback_service import (
     DETECTOR_VERSION,
     SUPPORTED_FEEDBACK_STEPS,
@@ -188,6 +191,9 @@ class RecognitionTrainingManagementService:
                 "corrected_snapshot": example.corrected_snapshot,
                 "diff_summary": example.diff_summary,
                 "original_image_path": example.floor_plan.original_image_path if example.floor_plan is not None else None,
+                "original_image_url": build_asset_url(
+                    example.floor_plan.original_image_path if example.floor_plan is not None else None
+                ),
                 "batches": [],
                 "runs": [],
             }
@@ -269,7 +275,10 @@ class RecognitionTrainingManagementService:
         active_models = self._active_model_map_by_step()
         runs = (
             self.db.query(RecognitionTrainingRun)
-            .options(joinedload(RecognitionTrainingRun.training_batch))
+            .options(
+                joinedload(RecognitionTrainingRun.training_batch),
+                joinedload(RecognitionTrainingRun.background_task),
+            )
             .order_by(RecognitionTrainingRun.requested_at.desc(), RecognitionTrainingRun.id.desc())
             .all()
         )
@@ -287,17 +296,19 @@ class RecognitionTrainingManagementService:
 
     def get_run_log(self, run_id: str, *, tail: int = 200) -> dict[str, Any]:
         run = self._get_run_model(run_id)
-        log_path = Path(run.log_path) if run.log_path else None
+        log_path = self._resolve_storage_path(run.log_path)
         if log_path is None or not log_path.exists():
             return {
                 "run_id": run_id,
-                "log_path": str(log_path) if log_path else None,
+                "log_path": run.log_path,
+                "log_url": build_asset_url(run.log_path),
                 "content": "",
             }
         lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
         return {
             "run_id": run_id,
-            "log_path": str(log_path),
+            "log_path": run.log_path,
+            "log_url": build_asset_url(run.log_path),
             "content": "\n".join(lines[-max(int(tail), 1):]),
         }
 
@@ -389,7 +400,7 @@ class RecognitionTrainingManagementService:
         if batch_model is None:
             raise AppError(500, "recognition_training_batch_missing", "Training batch was not persisted")
 
-        artifact_dir = (settings.outputs_dir / "recognition_training" / run_id).resolve()
+        artifact_dir = self._task_artifact_dir(run_id)
         artifact_dir.mkdir(parents=True, exist_ok=True)
         log_path = artifact_dir / "stdout.log"
         log_path.touch(exist_ok=True)
@@ -408,8 +419,8 @@ class RecognitionTrainingManagementService:
                 ),
                 "force": bool(force),
             },
-            artifact_dir=str(artifact_dir),
-            log_path=str(log_path),
+            artifact_dir=self._storage_relative_path(artifact_dir),
+            log_path=self._storage_relative_path(log_path),
             requested_at=datetime.now(timezone.utc),
         )
         self.db.add(run)
@@ -434,9 +445,9 @@ class RecognitionTrainingManagementService:
         if batch is None:
             raise AppError(404, "recognition_training_batch_not_found", "Training batch not found")
 
-        artifact_dir = Path(run.artifact_dir or (settings.outputs_dir / "recognition_training" / run_id)).resolve()
+        artifact_dir = self._resolve_storage_path(run.artifact_dir) or self._task_artifact_dir(run_id)
         artifact_dir.mkdir(parents=True, exist_ok=True)
-        run.artifact_dir = str(artifact_dir)
+        run.artifact_dir = self._storage_relative_path(artifact_dir)
         run.status = "running"
         run.started_at = datetime.now(timezone.utc)
         run.error_message = None
@@ -770,6 +781,7 @@ class RecognitionTrainingManagementService:
             "notes": example.notes,
             "curation_status": example.curation_status or "approved",
             "times_used": len(used_run_ids),
+            "original_image_url": build_asset_url(floor_plan.original_image_path if floor_plan is not None else None),
         }
 
     def _serialize_run(
@@ -783,6 +795,10 @@ class RecognitionTrainingManagementService:
         payload["artifacts"] = self._collect_run_artifacts(run)
         active_model = (active_models or {}).get(run.step)
         payload["is_active_for_step"] = bool(active_model is not None and active_model.training_run_id == run.id)
+        payload["artifact_dir_url"] = None
+        payload["log_url"] = build_asset_url(run.log_path)
+        if run.background_task is not None:
+            payload["background_task"] = run.background_task.to_dict()
         return payload
 
     def _serialize_active_model(self, active_model: RecognitionActiveModel | None) -> dict[str, Any] | None:
@@ -794,7 +810,7 @@ class RecognitionTrainingManagementService:
         return payload
 
     def _collect_run_artifacts(self, run: RecognitionTrainingRun) -> dict[str, Any]:
-        artifact_dir = Path(run.artifact_dir) if run.artifact_dir else None
+        artifact_dir = self._resolve_storage_path(run.artifact_dir) if run.artifact_dir else None
         best_checkpoint_path = None
         last_checkpoint_path = None
         metrics_json_path = None
@@ -804,10 +820,10 @@ class RecognitionTrainingManagementService:
             last_candidate = artifact_dir / "last.pt"
             metrics_candidate = artifact_dir / "metrics.json"
             params_candidate = artifact_dir / "params.json"
-            best_checkpoint_path = str(best_candidate) if best_candidate.exists() else None
-            last_checkpoint_path = str(last_candidate) if last_candidate.exists() else None
-            metrics_json_path = str(metrics_candidate) if metrics_candidate.exists() else None
-            params_json_path = str(params_candidate) if params_candidate.exists() else None
+            best_checkpoint_path = self._storage_relative_path(best_candidate) if best_candidate.exists() else None
+            last_checkpoint_path = self._storage_relative_path(last_candidate) if last_candidate.exists() else None
+            metrics_json_path = self._storage_relative_path(metrics_candidate) if metrics_candidate.exists() else None
+            params_json_path = self._storage_relative_path(params_candidate) if params_candidate.exists() else None
         return {
             "best_checkpoint_path": best_checkpoint_path,
             "last_checkpoint_path": last_checkpoint_path,
@@ -841,6 +857,7 @@ class RecognitionTrainingManagementService:
         run = (
             self.db.query(RecognitionTrainingRun)
             .options(
+                joinedload(RecognitionTrainingRun.background_task),
                 joinedload(RecognitionTrainingRun.training_batch)
                 .joinedload(RecognitionTrainingBatch.example_links)
                 .joinedload(RecognitionTrainingBatchExample.feedback_example)
@@ -878,6 +895,7 @@ class RecognitionTrainingManagementService:
                 continue
             error_message = "Training runner did not start and remained queued beyond the startup grace period."
             log_path = Path(run.log_path) if run.log_path else None
+            log_path = self._resolve_storage_path(run.log_path)
             if log_path is not None and log_path.exists():
                 log_tail = log_path.read_text(encoding="utf-8", errors="replace")[-4000:].strip()
                 if log_tail:
@@ -898,6 +916,41 @@ class RecognitionTrainingManagementService:
     @staticmethod
     def _training_defaults(step: str) -> dict[str, Any]:
         return dict(TRAINING_PARAMETER_DEFAULTS[step])
+
+    def delete_run(self, run_id: str) -> None:
+        run = self._get_run_model(run_id)
+        if run.status in ACTIVE_TRAINING_RUN_STATUSES:
+            raise AppError(409, "recognition_training_run_active", "Active training runs cannot be deleted")
+        if run.active_model_links:
+            raise AppError(409, "recognition_training_run_active_model", "Active model run cannot be deleted")
+        artifact_dir = self._resolve_storage_path(run.artifact_dir)
+        if artifact_dir is not None:
+            self.storage.delete_absolute_path(artifact_dir)
+        if run.background_task_id is not None:
+            task = self.db.query(BackgroundTask).filter(BackgroundTask.id == run.background_task_id).first()
+            if task is not None and task.status not in ACTIVE_TRAINING_RUN_STATUSES:
+                self.db.delete(task)
+        self.db.delete(run)
+        self.db.commit()
+
+    def _resolve_storage_path(self, path_value: str | None) -> Path | None:
+        if not path_value:
+            return None
+        candidate = Path(path_value)
+        if candidate.is_absolute():
+            return candidate
+        resolved = self.storage.absolute_path(path_value)
+        return resolved if resolved is not None else candidate.resolve()
+
+    def _storage_relative_path(self, path: Path) -> str:
+        resolved = path.resolve()
+        object_root = settings.object_storage_dir.resolve()
+        if resolved == object_root or object_root in resolved.parents:
+            return str(resolved.relative_to(object_root)).replace("\\", "/")
+        return relative_to_root(resolved)
+
+    def _task_artifact_dir(self, run_id: str) -> Path:
+        return (settings.object_storage_dir / "recognition_training" / run_id).resolve()
 
     def _training_config(
         self,

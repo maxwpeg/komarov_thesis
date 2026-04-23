@@ -90,6 +90,10 @@ def _ensure_backward_compatible_columns() -> None:
                 connection.exec_driver_sql("ALTER TABLE projects ADD COLUMN power_consumption_overrides JSON")
             if "additional_info_text" not in project_columns:
                 connection.exec_driver_sql("ALTER TABLE projects ADD COLUMN additional_info_text TEXT")
+            if "latest_pdf_path" not in project_columns:
+                connection.exec_driver_sql("ALTER TABLE projects ADD COLUMN latest_pdf_path VARCHAR(500)")
+            if "latest_pdf_generated_at" not in project_columns:
+                connection.exec_driver_sql("ALTER TABLE projects ADD COLUMN latest_pdf_generated_at DATETIME")
         if "dimensions" not in table_names:
             dimensions_columns = set()
         else:
@@ -435,6 +439,21 @@ def _ensure_backward_compatible_columns() -> None:
                 """
             )
 
+        if "zkspc_zones" in table_names:
+            zkspc_columns = {column["name"] for column in inspector.get_columns("zkspc_zones")}
+            if "display_geometry" not in zkspc_columns:
+                connection.exec_driver_sql("ALTER TABLE zkspc_zones ADD COLUMN display_geometry JSON")
+
+        if "recognition_training_runs" in table_names:
+            training_run_columns = {column["name"] for column in inspector.get_columns("recognition_training_runs")}
+            if "background_task_id" not in training_run_columns:
+                connection.exec_driver_sql("ALTER TABLE recognition_training_runs ADD COLUMN background_task_id INTEGER")
+
+        if "background_tasks" in table_names:
+            background_task_columns = {column["name"] for column in inspector.get_columns("background_tasks")}
+            if "resource_path" not in background_task_columns:
+                connection.exec_driver_sql("ALTER TABLE background_tasks ADD COLUMN resource_path VARCHAR(255)")
+
 
 def _ensure_performance_indexes() -> None:
     """Create frequently used indexes in a compatibility-safe way."""
@@ -463,8 +482,15 @@ def _ensure_performance_indexes() -> None:
         "CREATE INDEX IF NOT EXISTS ix_training_batch_example_lookup ON recognition_training_batch_examples (training_batch_id, feedback_example_id)",
         "CREATE INDEX IF NOT EXISTS ix_training_run_status_requested ON recognition_training_runs (status, requested_at)",
         "CREATE INDEX IF NOT EXISTS ix_training_run_step_finished ON recognition_training_runs (step, finished_at)",
+        "CREATE INDEX IF NOT EXISTS ix_training_run_background_task_id ON recognition_training_runs (background_task_id)",
         "CREATE UNIQUE INDEX IF NOT EXISTS ix_active_model_step_unique ON recognition_active_models (step)",
         "CREATE INDEX IF NOT EXISTS ix_active_model_run_lookup ON recognition_active_models (training_run_id)",
+        "CREATE INDEX IF NOT EXISTS ix_background_tasks_status_created ON background_tasks (status, created_at)",
+        "CREATE INDEX IF NOT EXISTS ix_background_tasks_type_status_created ON background_tasks (task_type, status, created_at)",
+        "CREATE INDEX IF NOT EXISTS ix_background_tasks_dedupe_status ON background_tasks (dedupe_key, status)",
+        "CREATE INDEX IF NOT EXISTS ix_background_tasks_project_status ON background_tasks (project_id, status)",
+        "CREATE INDEX IF NOT EXISTS ix_background_tasks_floor_plan_status ON background_tasks (floor_plan_id, status)",
+        "CREATE INDEX IF NOT EXISTS ix_background_tasks_requested_by_status ON background_tasks (requested_by_user_id, status)",
         "CREATE INDEX IF NOT EXISTS ix_audit_events_created_at ON audit_events (created_at)",
         "CREATE INDEX IF NOT EXISTS ix_audit_events_floor_plan_step ON audit_events (floor_plan_id, pipeline_step)",
         "CREATE INDEX IF NOT EXISTS ix_audit_events_project_use_case ON audit_events (project_id, use_case)",

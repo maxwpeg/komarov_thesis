@@ -3,6 +3,9 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 
 import { useAuth } from '../auth/AuthContext';
 import { equipmentApi, floorPlansApi, projectsApi, usersApi } from '../api/client';
+import { useDialogs } from '../ui/DialogProvider';
+import FileDropField from '../ui/FileDropField';
+import { pollTaskUntilSettled } from '../utils/backgroundTasks';
 import {
   formatEquipmentPrice,
   getEquipmentCategoryLabel,
@@ -77,6 +80,20 @@ function buildSharedStageHref(floorPlanId, stepKey) {
     return null;
   }
   return `/floor-plans/${floorPlanId}?step=${stepKey}`;
+}
+
+function buildProjectStagePreviewHref(projectId, { stageKey, floorPlanId }) {
+  const params = new URLSearchParams();
+  if (stageKey) {
+    params.set('stageKey', stageKey);
+  }
+  if (floorPlanId) {
+    params.set('floorPlanId', floorPlanId);
+  }
+  const query = params.toString();
+  return query
+    ? `/projects/${projectId}/preview?${query}`
+    : `/projects/${projectId}/preview`;
 }
 
 function createProjectEquipmentDraft(defaultCategory = 'other') {
@@ -159,6 +176,7 @@ function ProjectDetail() {
   const { projectId } = useParams();
   const navigate = useNavigate();
   const { user } = useAuth();
+  const { confirm, toast } = useDialogs();
   const isDeveloper = user?.role === 'developer';
 
   const [project, setProject] = useState(null);
@@ -170,6 +188,7 @@ function ProjectDetail() {
   const [projectEquipmentSelections, setProjectEquipmentSelections] = useState({});
   const [additionalInfoMeta, setAdditionalInfoMeta] = useState(null);
   const [equipmentSpecification, setEquipmentSpecification] = useState(null);
+  const [pdfPreview, setPdfPreview] = useState(null);
 
   const [loading, setLoading] = useState(true);
   const [equipmentLoading, setEquipmentLoading] = useState(true);
@@ -252,7 +271,7 @@ function ProjectDetail() {
   useEffect(() => {
     const loadProject = async () => {
       try {
-        const [projectData, floorPlansData, additionalInfo, specification] = await Promise.all([
+        const [projectData, floorPlansData, additionalInfo, specification, previewData] = await Promise.all([
           projectsApi.get(projectId),
           floorPlansApi.list(projectId),
           projectsApi.getAdditionalInfo(projectId).catch(() => ({
@@ -261,16 +280,19 @@ function ProjectDetail() {
             is_empty: true,
           })),
           projectsApi.getEquipmentSpecification(projectId).catch(() => null),
+          projectsApi.getPdfPreview(projectId).catch(() => null),
         ]);
         setProject(projectData);
         setProjectForm(buildProjectForm(projectData));
         setFloorPlans(floorPlansData);
         setAdditionalInfoMeta(additionalInfo);
         setEquipmentSpecification(specification);
+        setPdfPreview(previewData);
       } catch (error) {
         console.error('Error fetching project:', error);
         setAdditionalInfoMeta({ page_title: 'Доп. сведения', text: '', is_empty: true });
         setEquipmentSpecification(null);
+        setPdfPreview(null);
       } finally {
         setLoading(false);
       }
@@ -324,6 +346,53 @@ function ProjectDetail() {
       isActive = false;
     };
   }, [isDeveloper]);
+
+  useEffect(() => {
+    const taskId = pdfPreview?.current_task?.id;
+    const taskStatus = pdfPreview?.current_task?.status;
+    if (!taskId || ['succeeded', 'failed', 'canceled'].includes(taskStatus)) {
+      return undefined;
+    }
+
+    let cancelled = false;
+    pollTaskUntilSettled(taskId, {
+      onUpdate: (task) => {
+        if (!cancelled) {
+          setPdfPreview((prev) => ({
+            ...(prev || { project_id: Number(projectId) }),
+            current_task: task,
+          }));
+        }
+      },
+    })
+      .then(async (task) => {
+        if (cancelled) {
+          return;
+        }
+        const [projectData, previewData] = await Promise.all([
+          projectsApi.get(projectId),
+          projectsApi.getPdfPreview(projectId),
+        ]);
+        if (cancelled) {
+          return;
+        }
+        setProject(projectData);
+        setProjectForm(buildProjectForm(projectData));
+        setPdfPreview(previewData);
+        if (task.status === 'succeeded') {
+          toast('PDF проекта готов.', { tone: 'info' });
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          console.error('Error polling PDF task:', error);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [pdfPreview?.current_task?.id, pdfPreview?.current_task?.status, projectId, toast]);
 
   const handleProjectFieldChange = (event) => {
     const { name, value } = event.target;
@@ -474,9 +543,6 @@ function ProjectDetail() {
   };
 
   const handleRemoveProjectEquipment = async (item) => {
-    if (!window.confirm(`Убрать "${item.name}" из оборудования проекта?`)) {
-      return;
-    }
     setEquipmentSaving(true);
     setEquipmentMessage('');
     try {
@@ -539,57 +605,15 @@ function ProjectDetail() {
     }
   };
 
-  const handleGeneratePDF = async () => {
-    setGeneratingPDF(true);
-    try {
-      const response = await projectsApi.generatePdf(projectId);
-      const blob = await response.blob();
-      const url = window.URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-
-      const contentDisposition = response.headers.get('Content-Disposition');
-      let filename = `Проект_${project.code}_${new Date().toISOString().split('T')[0]}.pdf`;
-      if (contentDisposition) {
-        const filenameMatch = contentDisposition.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);
-        if (filenameMatch?.[1]) {
-          filename = filenameMatch[1].replace(/['"]/g, '');
-        }
-      }
-
-      link.download = filename;
-      document.body.appendChild(link);
-      link.click();
-      window.URL.revokeObjectURL(url);
-      document.body.removeChild(link);
-    } catch (error) {
-      console.error('Error generating PDF:', error);
-      alert(`Ошибка при генерации PDF: ${error.message}`);
-    } finally {
-      setGeneratingPDF(false);
-    }
-  };
-
-  const handleDeleteProject = async () => {
-    const displayProjectName = project?.facility || project?.name || `#${projectId}`;
-    if (!window.confirm(`Удалить проект "${displayProjectName}"? Это действие необратимо и удалит все планы этажей.`)) {
-      return;
-    }
-
-    try {
-      await projectsApi.remove(projectId);
-      navigate('/');
-    } catch (error) {
-      console.error('Error deleting project:', error);
-      alert(`Ошибка при удалении проекта: ${error.message}`);
-    }
-  };
-
-  const handleDeleteFloorPlan = async (event, floorPlanId, floorPlanName) => {
+const handleDeleteFloorPlan = async (event, floorPlanId, floorPlanName) => {
     event.preventDefault();
     event.stopPropagation();
 
-    if (!window.confirm(`Удалить план этажа "${floorPlanName}"? Это действие необратимо.`)) {
+    const isConfirmed = await confirm(
+      `Удалить план этажа "${floorPlanName}"? Это действие необратимо.`,
+      { confirmLabel: 'Удалить', cancelLabel: 'Отмена' },
+    );
+    if (!isConfirmed) {
       return;
     }
 
@@ -599,7 +623,107 @@ function ProjectDetail() {
       await loadEquipmentSpecification();
     } catch (error) {
       console.error('Error deleting floor plan:', error);
-      alert(`Ошибка при удалении плана этажа: ${error.message}`);
+      toast(`Ошибка при удалении плана этажа: ${error.message}`, { tone: 'error' });
+    }
+  };
+
+  const requestRemoveProjectEquipment = async (item) => {
+    const isConfirmed = await confirm(`Убрать "${item.name}" из оборудования проекта?`, {
+      confirmLabel: 'Убрать',
+      cancelLabel: 'Отмена',
+    });
+    if (!isConfirmed) {
+      return;
+    }
+    await handleRemoveProjectEquipment(item);
+  };
+
+  const uploadFloorPlanFile = async (file) => {
+    if (!file) {
+      return;
+    }
+
+    const isValidFile = await validateFloorPlanFile(file);
+    if (!isValidFile) {
+      toast(FLOOR_PLAN_UPLOAD_VALIDATION_MESSAGE, { tone: 'error' });
+      return;
+    }
+
+    setUploadingFloor(true);
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('project_id', projectId);
+    formData.append('floor_number', floorPlans.length + 1);
+    formData.append('name', `Этаж ${floorPlans.length + 1}`);
+    formData.append('scale_factor', '10');
+
+    try {
+      const floorPlan = await floorPlansApi.create(formData);
+      await refreshFloorPlans();
+      navigate(`/floor-plans/${floorPlan.id}`);
+    } catch (error) {
+      console.error('Error uploading floor plan:', error);
+      toast(`Ошибка загрузки плана этажа: ${error.message}`, { tone: 'error' });
+    } finally {
+      setUploadingFloor(false);
+    }
+  };
+
+  const requestGeneratePdf = async () => {
+    setGeneratingPDF(true);
+    try {
+      const task = await projectsApi.generatePdf(projectId);
+      setPdfPreview((prev) => ({
+        ...(prev || { project_id: Number(projectId) }),
+        current_task: task,
+      }));
+      toast('Генерация PDF поставлена в очередь.', { tone: 'info' });
+    } catch (error) {
+      console.error('Error generating PDF:', error);
+      toast(`Ошибка при генерации PDF: ${error.message}`, { tone: 'error' });
+    } finally {
+      setGeneratingPDF(false);
+    }
+  };
+
+  const requestDeleteProject = async () => {
+    const displayProjectName = project?.facility || project?.name || `#${projectId}`;
+    const isConfirmed = await confirm(
+      `Удалить проект "${displayProjectName}"? Это действие необратимо и удалит все планы этажей.`,
+      { confirmLabel: 'Удалить', cancelLabel: 'Отмена' },
+    );
+    if (!isConfirmed) {
+      return;
+    }
+
+    try {
+      await projectsApi.remove(projectId);
+      navigate('/');
+    } catch (error) {
+      console.error('Error deleting project:', error);
+      toast(`Ошибка при удалении проекта: ${error.message}`, { tone: 'error' });
+    }
+  };
+
+  const requestDeleteFloorPlan = async (event, floorPlanId, floorPlanName) => {
+    event.preventDefault();
+    event.stopPropagation();
+
+    const isConfirmed = await confirm(
+      `Удалить план этажа "${floorPlanName}"? Это действие необратимо.`,
+      { confirmLabel: 'Удалить', cancelLabel: 'Отмена' },
+    );
+    if (!isConfirmed) {
+      return;
+    }
+
+    try {
+      await floorPlansApi.remove(floorPlanId);
+      setFloorPlans((prev) => prev.filter((item) => item.id !== floorPlanId));
+      await loadEquipmentSpecification();
+    } catch (error) {
+      console.error('Error deleting floor plan:', error);
+      toast(`Ошибка при удалении плана этажа: ${error.message}`, { tone: 'error' });
     }
   };
 
@@ -622,6 +746,10 @@ function ProjectDetail() {
       badge: `Этаж ${floorPlan.floor_number}`,
       meta: `${floorPlan.image_width} × ${floorPlan.image_height}px`,
       href: `/floor-plans/${floorPlan.id}`,
+      previewHref: buildProjectStagePreviewHref(projectId, {
+        floorPlanId: floorPlan.id,
+        stageKey: 'zkspc',
+      }),
       isShared: false,
       isDisabled: false,
       floorPlanId: floorPlan.id,
@@ -633,6 +761,9 @@ function ProjectDetail() {
       badge: 'Общий этап проекта',
       meta: 'Редактируемый лист с ведомостями и текстом подтверждения.',
       href: buildSharedStageHref(sharedStageFloorPlanId, GENERAL_DATA_STEP_KEY),
+      previewHref: sharedStageFloorPlanId
+        ? buildProjectStagePreviewHref(projectId, { stageKey: GENERAL_DATA_STEP_KEY })
+        : null,
       isShared: true,
       isDisabled: !sharedStageFloorPlanId,
     },
@@ -642,6 +773,9 @@ function ProjectDetail() {
       badge: 'Общий этап проекта',
       meta: 'Редактируемый автоматический текст раздела перед генерацией PDF.',
       href: buildSharedStageHref(sharedStageFloorPlanId, GENERAL_INSTRUCTIONS_STEP_KEY),
+      previewHref: sharedStageFloorPlanId
+        ? buildProjectStagePreviewHref(projectId, { stageKey: GENERAL_INSTRUCTIONS_STEP_KEY })
+        : null,
       isShared: true,
       isDisabled: !sharedStageFloorPlanId,
     },
@@ -651,6 +785,9 @@ function ProjectDetail() {
       badge: 'Общий этап проекта',
       meta: 'Учитывает все оборудование проекта',
       href: buildSharedStageHref(sharedStageFloorPlanId, POWER_CONSUMPTION_STEP_KEY),
+      previewHref: sharedStageFloorPlanId
+        ? buildProjectStagePreviewHref(projectId, { stageKey: POWER_CONSUMPTION_STEP_KEY })
+        : null,
       isShared: true,
       isDisabled: !sharedStageFloorPlanId,
     },
@@ -660,6 +797,9 @@ function ProjectDetail() {
       badge: 'Общий этап проекта',
       meta: 'Формируется по всему оборудованию проекта',
       href: buildSharedStageHref(sharedStageFloorPlanId, EQUIPMENT_SPECIFICATION_STEP_KEY),
+      previewHref: sharedStageFloorPlanId
+        ? buildProjectStagePreviewHref(projectId, { stageKey: EQUIPMENT_SPECIFICATION_STEP_KEY })
+        : null,
       isShared: true,
       isDisabled: !sharedStageFloorPlanId,
     },
@@ -671,6 +811,9 @@ function ProjectDetail() {
         ? 'Необязательный текстовый раздел, который будет добавлен в конец PDF.'
         : 'Необязательный текстовый раздел. Пока пустой и подсвечен полупрозрачно.',
       href: buildSharedStageHref(sharedStageFloorPlanId, ADDITIONAL_INFO_STEP_KEY),
+      previewHref: sharedStageFloorPlanId
+        ? buildProjectStagePreviewHref(projectId, { stageKey: ADDITIONAL_INFO_STEP_KEY })
+        : null,
       isShared: true,
       isDisabled: !sharedStageFloorPlanId,
       isSubtle: additionalInfoMeta?.is_empty !== false,
@@ -736,14 +879,28 @@ function ProjectDetail() {
             </div>
           </div>
           <div style={{ display: 'flex', gap: '10px' }}>
-            <button className="btn btn-success" onClick={handleGeneratePDF} disabled={generatingPDF}>
+            <button className="btn btn-success" onClick={requestGeneratePdf} disabled={generatingPDF}>
               {generatingPDF ? 'Генерация PDF...' : 'Сгенерировать PDF'}
             </button>
-            <button className="btn btn-danger" onClick={handleDeleteProject} style={{ background: '#dc3545' }}>
+            <button className="btn btn-danger" onClick={requestDeleteProject} style={{ background: '#dc3545' }}>
               Удалить проект
             </button>
           </div>
         </div>
+
+        {(pdfPreview?.current_task?.status && ['queued', 'running'].includes(pdfPreview.current_task.status)) || project.latest_pdf_generated_at ? (
+          <div className="project-detail-toolbar">
+            {pdfPreview?.current_task?.status && ['queued', 'running'].includes(pdfPreview.current_task.status) ? (
+              <div className="project-detail-toolbar__status">
+                PDF поставлен в очередь и готовится в фоне.
+              </div>
+            ) : (
+              <div className="project-detail-toolbar__status">
+                Последний PDF: {new Date(project.latest_pdf_generated_at).toLocaleString('ru-RU')}
+              </div>
+            )}
+          </div>
+        ) : null}
 
         <section className="project-detail-stages">
           <div className="project-detail-stages__header">
@@ -753,16 +910,17 @@ function ProjectDetail() {
                 Этажи, общий расчет токопотребления и спецификация проекта. Общие этапы используют все оборудование проекта.
               </p>
             </div>
-            <label className="btn btn-primary" style={{ cursor: 'pointer' }}>
-              {uploadingFloor ? 'Загрузка...' : '+ Загрузить план этажа'}
-              <input
-                type="file"
+            <div className="project-detail-stages__upload">
+              <FileDropField
+                compact
                 accept="image/*"
-                onChange={handleUploadFloorPlan}
-                style={{ display: 'none' }}
                 disabled={uploadingFloor}
+                title={uploadingFloor ? 'Загружаем план этажа...' : 'Загрузить план этажа'}
+                description="Можно перетащить изображение прямо сюда."
+                buttonLabel={uploadingFloor ? 'Загрузка...' : 'Выбрать файл'}
+                onSelect={uploadFloorPlanFile}
               />
-            </label>
+            </div>
           </div>
 
           <div className="project-stage-strip">
@@ -791,23 +949,20 @@ function ProjectDetail() {
                   ) : (
                     cardContent
                   )}
+                  {card.previewHref && (
+                    <Link
+                      to={card.previewHref}
+                      className="btn btn-secondary project-stage-card__preview"
+                      onClick={(event) => event.stopPropagation()}
+                    >
+                      PDF
+                    </Link>
+                  )}
                   {!card.isShared && (
                     <button
-                      onClick={(event) => handleDeleteFloorPlan(event, card.floorPlanId, card.floorPlanName)}
-                      style={{
-                        position: 'absolute',
-                        top: '10px',
-                        right: '10px',
-                        background: '#dc3545',
-                        color: 'white',
-                        border: 'none',
-                        borderRadius: '4px',
-                        padding: '5px 10px',
-                        cursor: 'pointer',
-                        fontSize: '18px',
-                        fontWeight: 'bold',
-                        zIndex: 10,
-                      }}
+                      type="button"
+                      className="project-stage-card__delete"
+                      onClick={(event) => requestDeleteFloorPlan(event, card.floorPlanId, card.floorPlanName)}
                       title="Удалить план этажа"
                     >
                       ×
@@ -1108,7 +1263,7 @@ function ProjectDetail() {
                                   <button
                                     type="button"
                                     className="btn btn-secondary"
-                                    onClick={() => handleRemoveProjectEquipment(item)}
+                                    onClick={() => requestRemoveProjectEquipment(item)}
                                     disabled={equipmentSaving}
                                   >
                                     Убрать

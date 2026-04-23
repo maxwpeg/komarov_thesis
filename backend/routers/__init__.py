@@ -1,6 +1,8 @@
 """FastAPI routers."""
 
+from backend.routers.assets import router as assets_router
 from backend.routers.auth import router as auth_router
+from backend.routers.background_tasks import router as background_tasks_router
 from backend.routers.equipment import router as equipment_router
 from backend.routers.elements import router as elements_router
 from backend.routers.floor_plans import router as floor_plans_router
@@ -12,7 +14,9 @@ from backend.routers.recognition_training import router as recognition_training_
 from backend.routers.users import router as users_router
 
 __all__ = [
+    "assets_router",
     "auth_router",
+    "background_tasks_router",
     "equipment_router",
     "elements_router",
     "floor_plans_router",

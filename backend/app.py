@@ -9,7 +9,6 @@ from fastapi import FastAPI
 from fastapi.openapi.utils import get_openapi
 from fastapi.routing import APIRoute
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 
 from backend.bootstrap import configure_logging, ensure_runtime_directories, register_pdf_fonts
 from backend.config import settings
@@ -18,7 +17,9 @@ from backend.errors import install_exception_handlers
 from backend.modules.shared.health.service import HealthService
 from backend.modules.shared.observability.middleware import RequestContextMiddleware
 from backend.routers import (
+    assets_router,
     auth_router,
+    background_tasks_router,
     equipment_router,
     elements_router,
     floor_plans_router,
@@ -30,6 +31,7 @@ from backend.routers import (
     users_router,
 )
 from backend.schemas import HealthRead
+from backend.services.background_worker import worker_controller
 
 
 logger = configure_logging()
@@ -478,7 +480,11 @@ async def lifespan(_: FastAPI):
         register_pdf_fonts()
     except FileNotFoundError:
         logger.warning("PDF fonts are unavailable; PDF generation may fail", exc_info=True)
+    if settings.run_inline_worker:
+        worker_controller.start()
     yield
+    if settings.run_inline_worker:
+        worker_controller.stop()
 
 
 def create_app() -> FastAPI:
@@ -501,12 +507,10 @@ def create_app() -> FastAPI:
     )
     app.add_middleware(RequestContextMiddleware, logger=logger)
 
-    app.mount("/uploads", StaticFiles(directory=str(settings.uploads_dir)), name="uploads")
-    app.mount("/outputs", StaticFiles(directory=str(settings.outputs_dir)), name="outputs")
-    app.mount("/debug_output", StaticFiles(directory=str(settings.debug_output_dir)), name="debug_output")
-
     install_exception_handlers(app)
+    app.include_router(assets_router)
     app.include_router(auth_router)
+    app.include_router(background_tasks_router)
     app.include_router(projects_router)
     app.include_router(equipment_router)
     app.include_router(floor_plans_router)

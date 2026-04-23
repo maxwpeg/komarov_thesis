@@ -1684,9 +1684,12 @@ test('rooms step exposes the add-room drawing action', async () => {
     branches: pipelineStateResponse.branches,
   });
 
-  render(<FloorPlanEditor />);
+  const { container } = render(<FloorPlanEditor />);
 
-  const addRoomButton = await screen.findByRole('button', { name: 'Добавить помещение' });
+  const toolbar = container.querySelector('.editor-toolbar');
+  expect(toolbar).not.toBeNull();
+  const addRoomButton = await within(toolbar).findByRole('button', { name: 'Добавить помещение' });
   fireEvent.click(addRoomButton);
   expect(addRoomButton).toHaveClass('active');
+  expect(screen.getByText('Протяните прямоугольник на плане, чтобы добавить помещение.')).toBeInTheDocument();
 });

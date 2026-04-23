@@ -5,7 +5,9 @@ from __future__ import annotations
 from typing import Any
 
 from backend import schemas
+from backend.assets import build_asset_url
 from backend.models import (
+    BackgroundTask,
     CableRoute,
     Dimension,
     Door,
@@ -30,9 +32,31 @@ def _payload(instance: Any, **kwargs) -> dict[str, Any]:
     if to_dict is None:
         raise TypeError(f"Unsupported object for schema mapping: {type(instance)!r}")
     try:
-        return to_dict(**kwargs)
+        payload = to_dict(**kwargs)
     except TypeError:
-        return to_dict()
+        payload = to_dict()
+    return _inject_asset_urls(payload)
+
+
+def _inject_asset_urls(payload: dict[str, Any]) -> dict[str, Any]:
+    data = dict(payload)
+    if "latest_pdf_path" in data:
+        data["latest_pdf_url"] = build_asset_url(data.get("latest_pdf_path"))
+    if "image_path" in data:
+        data["image_url"] = build_asset_url(data.get("image_path"))
+    if "label_pdf_path" in data:
+        data["label_pdf_url"] = build_asset_url(data.get("label_pdf_path"))
+    if "manual_pdf_path" in data:
+        data["manual_pdf_url"] = build_asset_url(data.get("manual_pdf_path"))
+    if "original_image_path" in data:
+        data["original_image_url"] = build_asset_url(data.get("original_image_path"))
+    if "processed_image_path" in data:
+        data["processed_image_url"] = build_asset_url(data.get("processed_image_path"))
+    if "debug_artifacts_dir" in data:
+        data["debug_artifacts_url"] = build_asset_url(data.get("debug_artifacts_dir"))
+    if "log_path" in data:
+        data["log_url"] = build_asset_url(data.get("log_path"))
+    return data
 
 
 def project_read(project: Project) -> schemas.ProjectRead:
@@ -125,4 +149,8 @@ def floor_plan_read(floor_plan: FloorPlan, include_elements: bool = False) -> sc
 
 
 def recognition_read(recognition: FloorplanRecognition) -> schemas.RecognitionRead:
-    return schemas.RecognitionRead.model_validate(recognition.to_dict())
+    return schemas.RecognitionRead.model_validate(_payload(recognition))
+
+
+def background_task_read(task: BackgroundTask) -> schemas.BackgroundTaskRead:
+    return schemas.BackgroundTaskRead.model_validate(_payload(task))

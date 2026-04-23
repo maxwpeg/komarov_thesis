@@ -4,40 +4,46 @@ from __future__ import annotations
 
 import json
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, status
 
+from backend.background_jobs import TASK_RECOGNITION_PROCESS, dedupe_key_for_task
 from backend.auth import AuthenticatedUser, require_current_user, require_developer, require_floor_plan_access
+from backend.database import get_db
 from backend.dependencies import get_pipeline_use_cases
-from backend.config import settings
 from backend.dependencies import get_recognition_use_cases
+from backend.mappers import background_task_read
 from backend.modules.pipeline.application.use_cases import PipelineUseCases
 from backend.modules.recognition.application.use_cases import RecognitionUseCases
-from backend.schemas import FeedbackCreate, MessageRead, RecognitionFeedbackRead, RecognitionFeedbackStatsRead, RecognitionProcessRead, RecognitionRead
+from backend.schemas import BackgroundTaskRead, FeedbackCreate, MessageRead, RecognitionFeedbackRead, RecognitionFeedbackStatsRead, RecognitionRead
+from backend.services.background_task_service import BackgroundTaskService
+from sqlalchemy.orm import Session
+
+from backend.config import settings
 
 
 router = APIRouter(tags=["recognition"])
 
 
-@router.post("/api/floor-plans/{floor_plan_id}/process", response_model=RecognitionProcessRead)
+@router.post(
+    "/api/floor-plans/{floor_plan_id}/process",
+    response_model=BackgroundTaskRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 def process_floor_plan(
     floor_plan_id: int,
     debug: bool = Query(False),
-    _: AuthenticatedUser = Depends(require_floor_plan_access),
-    service: RecognitionUseCases = Depends(get_recognition_use_cases),
-) -> RecognitionProcessRead:
-    recognition_id, walls, doors, windows, rooms, dimensions = service.process_floor_plan(
-        floor_plan_id,
-        debug=debug,
+    current_user: AuthenticatedUser = Depends(require_floor_plan_access),
+    db: Session = Depends(get_db),
+) -> BackgroundTaskRead:
+    task = BackgroundTaskService(db).enqueue(
+        task_type=TASK_RECOGNITION_PROCESS,
+        requested_by_user_id=current_user.id,
+        floor_plan_id=floor_plan_id,
+        payload={"floor_plan_id": floor_plan_id, "debug": bool(debug)},
+        dedupe_key=dedupe_key_for_task(TASK_RECOGNITION_PROCESS, floor_plan_id=floor_plan_id),
+        resource_path=f"/floor-plans/{floor_plan_id}",
     )
-    return RecognitionProcessRead(
-        message="Floor plan recognized successfully",
-        walls_detected=walls,
-        doors_detected=doors,
-        windows_detected=windows,
-        rooms_detected=rooms,
-        dimensions_detected=dimensions,
-        recognition_id=recognition_id,
-    )
+    return background_task_read(task)
 
 
 @router.get("/api/floor-plans/{floor_plan_id}/recognition", response_model=RecognitionRead)

@@ -493,6 +493,91 @@ export function getZkspcColor(zoneOrNumber, floorPlanId = 0) {
   return getZkspcStyle(zoneOrNumber, floorPlanId).color;
 }
 
+function zonePointKey(point) {
+  return `${Number(point?.[0] || 0).toFixed(3)}:${Number(point?.[1] || 0).toFixed(3)}`;
+}
+
+function zoneEdgeKey(start, end) {
+  const startKey = zonePointKey(start);
+  const endKey = zonePointKey(end);
+  return startKey < endKey ? `${startKey}|${endKey}` : `${endKey}|${startKey}`;
+}
+
+export function buildZoneDisplayGeometry(zoneRooms = []) {
+  const polygons = (zoneRooms || [])
+    .map((room) => (Array.isArray(room?.boundary_points) ? room.boundary_points : room))
+    .filter((polygon) => Array.isArray(polygon) && polygon.length >= 3)
+    .map((polygon) => polygon.map((point) => [Number(point[0]), Number(point[1])]));
+
+  if (!polygons.length) {
+    return [];
+  }
+  if (polygons.length === 1) {
+    return polygons;
+  }
+
+  const edgeUsage = new Map();
+  polygons.forEach((polygon) => {
+    polygon.forEach((point, index) => {
+      const nextPoint = polygon[(index + 1) % polygon.length];
+      const key = zoneEdgeKey(point, nextPoint);
+      edgeUsage.set(key, (edgeUsage.get(key) || 0) + 1);
+    });
+  });
+
+  const remainingEdges = [];
+  polygons.forEach((polygon) => {
+    polygon.forEach((point, index) => {
+      const nextPoint = polygon[(index + 1) % polygon.length];
+      if (edgeUsage.get(zoneEdgeKey(point, nextPoint)) === 1) {
+        remainingEdges.push({
+          start: [point[0], point[1]],
+          end: [nextPoint[0], nextPoint[1]],
+        });
+      }
+    });
+  });
+
+  if (!remainingEdges.length) {
+    return polygons;
+  }
+
+  const rings = [];
+  const used = new Set();
+  while (used.size < remainingEdges.length) {
+    const firstIndex = remainingEdges.findIndex((_, index) => !used.has(index));
+    if (firstIndex < 0) {
+      break;
+    }
+    used.add(firstIndex);
+    const ring = [[...remainingEdges[firstIndex].start]];
+    let cursor = [...remainingEdges[firstIndex].end];
+    const firstKey = zonePointKey(remainingEdges[firstIndex].start);
+
+    while (zonePointKey(cursor) !== firstKey) {
+      ring.push([...cursor]);
+      const nextIndex = remainingEdges.findIndex((edge, index) => (
+        !used.has(index)
+        && (zonePointKey(edge.start) === zonePointKey(cursor) || zonePointKey(edge.end) === zonePointKey(cursor))
+      ));
+      if (nextIndex < 0) {
+        return polygons;
+      }
+      used.add(nextIndex);
+      const nextEdge = remainingEdges[nextIndex];
+      cursor = zonePointKey(nextEdge.start) === zonePointKey(cursor)
+        ? [...nextEdge.end]
+        : [...nextEdge.start];
+    }
+
+    if (ring.length >= 3) {
+      rings.push(ring);
+    }
+  }
+
+  return rings.length ? rings : polygons;
+}
+
 export function buildRoomZoneMap(zones) {
   return zones.reduce((acc, zone) => {
     (zone.room_ids || []).forEach((roomId) => {

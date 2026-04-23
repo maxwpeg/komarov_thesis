@@ -1,0 +1,26 @@
+{
+  "mode": "ultralytics",
+  "step": "openings",
+  "sample_count": 3,
+  "dataset_item_count": 3,
+  "split_counts": {
+    "train": 2,
+    "val": 1,
+    "test": 0
+  },
+  "requested_device": "auto",
+  "resolved_device": "cpu",
+  "device_resolution_reason": "cuda_visible_but_torchvision_nms_unavailable",
+  "results": {
+    "metrics/precision(B)": 0.0,
+    "metrics/recall(B)": 0.0,
+    "metrics/mAP50(B)": 0.0,
+    "metrics/mAP50-95(B)": 0.0,
+    "metrics/precision(M)": 0.0,
+    "metrics/recall(M)": 0.0,
+    "metrics/mAP50(M)": 0.0,
+    "metrics/mAP50-95(M)": 0.0,
+    "fitness": 0.0
+  },
+  "save_dir": "C:\\Users\\slkfs\\komarov_thesis\\storage_objects\\recognition_training\\20260423181126_098c03f3_openings\\ultralytics\\run"
+}

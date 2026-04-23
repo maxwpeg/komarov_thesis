@@ -28,7 +28,12 @@ def configure_logging() -> logging.Logger:
 
 def ensure_runtime_directories() -> None:
     """Ensure local runtime directories exist."""
-    for path in (settings.uploads_dir, settings.outputs_dir, settings.debug_output_dir):
+    for path in (
+        settings.uploads_dir,
+        settings.outputs_dir,
+        settings.debug_output_dir,
+        settings.object_storage_dir,
+    ):
         path.mkdir(parents=True, exist_ok=True)
 
 
@@ -51,4 +56,3 @@ def relative_to_root(path: Path | str) -> str:
     """Return a stable project-root relative path for persisted files."""
     value = Path(path)
     return str(value.resolve().relative_to(settings.project_root.resolve())).replace("\\", "/")
-

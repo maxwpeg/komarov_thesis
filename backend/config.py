@@ -36,6 +36,7 @@ class AppConfig:
     uploads_dir: Path = PROJECT_ROOT / "uploads"
     outputs_dir: Path = PROJECT_ROOT / "outputs"
     debug_output_dir: Path = PROJECT_ROOT / "debug_output"
+    object_storage_dir: Path = PROJECT_ROOT / "storage_objects"
     database_file: Path = PROJECT_ROOT / "floor_plans.db"
     feedback_file: Path = PROJECT_ROOT / "user_feedback.json"
     regular_font_path: Path = PROJECT_ROOT / "GOST_A.TTF"
@@ -53,6 +54,10 @@ class AppConfig:
     bootstrap_developer_username: str | None = os.getenv("BOOTSTRAP_DEVELOPER_USERNAME")
     bootstrap_developer_full_name: str | None = os.getenv("BOOTSTRAP_DEVELOPER_FULL_NAME")
     bootstrap_developer_password: str | None = os.getenv("BOOTSTRAP_DEVELOPER_PASSWORD")
+    asset_public_base_url: str | None = os.getenv("ASSET_PUBLIC_BASE_URL")
+    worker_poll_interval_seconds: float = float(os.getenv("WORKER_POLL_INTERVAL_SECONDS", "2.0"))
+    worker_max_attempts: int = int(os.getenv("WORKER_MAX_ATTEMPTS", "3"))
+    run_inline_worker: bool = os.getenv("RUN_INLINE_WORKER", "1").lower() not in {"0", "false", "no"}
 
     @property
     def database_url(self) -> str:
