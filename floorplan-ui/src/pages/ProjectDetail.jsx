@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 
-import { equipmentApi, floorPlansApi, projectsApi } from '../api/client';
+import { useAuth } from '../auth/AuthContext';
+import { equipmentApi, floorPlansApi, projectsApi, usersApi } from '../api/client';
 import {
   formatEquipmentPrice,
   getEquipmentCategoryLabel,
@@ -13,6 +14,48 @@ const GENERAL_INSTRUCTIONS_STEP_KEY = 'general_instructions';
 const POWER_CONSUMPTION_STEP_KEY = 'power_consumption_calculation';
 const EQUIPMENT_SPECIFICATION_STEP_KEY = 'equipment_specification';
 const ADDITIONAL_INFO_STEP_KEY = 'additional_info';
+const MIN_FLOOR_PLAN_IMAGE_SIZE_PX = 200;
+const FLOOR_PLAN_UPLOAD_VALIDATION_MESSAGE = `Можно загрузить только изображение размером не меньше ${MIN_FLOOR_PLAN_IMAGE_SIZE_PX}x${MIN_FLOOR_PLAN_IMAGE_SIZE_PX} пикселей.`;
+
+function readImageDimensions(file) {
+  return new Promise((resolve, reject) => {
+    const objectUrl = window.URL.createObjectURL(file);
+    const image = new window.Image();
+
+    const cleanup = () => {
+      window.URL.revokeObjectURL(objectUrl);
+    };
+
+    image.onload = () => {
+      cleanup();
+      resolve({
+        width: Number(image.naturalWidth || image.width || 0),
+        height: Number(image.naturalHeight || image.height || 0),
+      });
+    };
+
+    image.onerror = () => {
+      cleanup();
+      reject(new Error('Failed to read image dimensions'));
+    };
+
+    image.src = objectUrl;
+  });
+}
+
+async function validateFloorPlanFile(file) {
+  const normalizedType = String(file?.type || '').toLowerCase();
+  if (normalizedType && !normalizedType.startsWith('image/')) {
+    return false;
+  }
+
+  try {
+    const { width, height } = await readImageDimensions(file);
+    return width >= MIN_FLOOR_PLAN_IMAGE_SIZE_PX && height >= MIN_FLOOR_PLAN_IMAGE_SIZE_PX;
+  } catch (_error) {
+    return false;
+  }
+}
 
 function buildProjectForm(project) {
   return {
@@ -25,6 +68,7 @@ function buildProjectForm(project) {
     engineer: project.engineer ?? '',
     facility_address: project.facility_address ?? '',
     project_description: project.project_description ?? '',
+    owner_user_id: project.owner_user_id ?? '',
   };
 }
 
@@ -114,10 +158,13 @@ function getSpecificationEquipmentId(sourceKey) {
 function ProjectDetail() {
   const { projectId } = useParams();
   const navigate = useNavigate();
+  const { user } = useAuth();
+  const isDeveloper = user?.role === 'developer';
 
   const [project, setProject] = useState(null);
   const [projectForm, setProjectForm] = useState(null);
   const [floorPlans, setFloorPlans] = useState([]);
+  const [ownerUsers, setOwnerUsers] = useState([]);
   const [equipmentItems, setEquipmentItems] = useState([]);
   const [projectEquipmentItems, setProjectEquipmentItems] = useState([]);
   const [projectEquipmentSelections, setProjectEquipmentSelections] = useState({});
@@ -256,12 +303,36 @@ function ProjectDetail() {
     loadEquipment();
   }, [projectId]);
 
+  useEffect(() => {
+    if (!isDeveloper) {
+      setOwnerUsers([]);
+      return;
+    }
+
+    let isActive = true;
+    usersApi.list()
+      .then((items) => {
+        if (isActive) {
+          setOwnerUsers(items.filter((item) => item.role === 'engineer' && item.is_active));
+        }
+      })
+      .catch((error) => {
+        console.error('Error loading project owners:', error);
+      });
+
+    return () => {
+      isActive = false;
+    };
+  }, [isDeveloper]);
+
   const handleProjectFieldChange = (event) => {
     const { name, value } = event.target;
     setProjectForm((prev) => {
       const nextState = {
         ...prev,
-        [name]: name === 'year' ? (value === '' ? '' : Number(value)) : value,
+        [name]: name === 'year' || name === 'owner_user_id'
+          ? (value === '' ? '' : Number(value))
+          : value,
       };
       if (name === 'facility') {
         if (!prev.facility_genitive || prev.facility_genitive === prev.facility) {
@@ -284,7 +355,16 @@ function ProjectDetail() {
     setSavingProject(true);
     setSaveMessage('');
     try {
-      const updatedProject = await projectsApi.update(projectId, projectForm);
+      const payload = {
+        ...projectForm,
+        owner_user_id: isDeveloper
+          ? (projectForm.owner_user_id === '' ? null : Number(projectForm.owner_user_id))
+          : undefined,
+      };
+      if (!isDeveloper) {
+        delete payload.owner_user_id;
+      }
+      const updatedProject = await projectsApi.update(projectId, payload);
       setProject(updatedProject);
       setProjectForm(buildProjectForm(updatedProject));
       setSaveMessage('Изменения сохранены.');
@@ -425,8 +505,16 @@ function ProjectDetail() {
   };
 
   const handleUploadFloorPlan = async (event) => {
-    const file = event.target.files?.[0];
+    const input = event.target;
+    const file = input.files?.[0];
     if (!file) {
+      return;
+    }
+
+    const isValidFile = await validateFloorPlanFile(file);
+    if (!isValidFile) {
+      alert(FLOOR_PLAN_UPLOAD_VALIDATION_MESSAGE);
+      input.value = '';
       return;
     }
 
@@ -447,7 +535,7 @@ function ProjectDetail() {
       alert(`Ошибка загрузки плана этажа: ${error.message}`);
     } finally {
       setUploadingFloor(false);
-      event.target.value = '';
+      input.value = '';
     }
   };
 
@@ -801,6 +889,21 @@ function ProjectDetail() {
                       <input type="text" name="engineer" value={projectForm.engineer} onChange={handleProjectFieldChange} style={{ width: '100%' }} />
                     </td>
                   </tr>
+                  {isDeveloper && (
+                    <tr style={{ borderBottom: '1px solid #dee2e6' }}>
+                      <td style={{ padding: '0.5rem', fontWeight: 'bold' }}>Владелец проекта:</td>
+                      <td style={{ padding: '0.5rem' }}>
+                        <select name="owner_user_id" value={projectForm.owner_user_id} onChange={handleProjectFieldChange} style={{ width: '100%' }}>
+                          <option value="">Без владельца</option>
+                          {ownerUsers.map((owner) => (
+                            <option key={owner.id} value={owner.id}>
+                              {owner.full_name} ({owner.username})
+                            </option>
+                          ))}
+                        </select>
+                      </td>
+                    </tr>
+                  )}
                   <tr style={{ borderBottom: '1px solid #dee2e6' }}>
                     <td style={{ padding: '0.5rem', fontWeight: 'bold' }}>Адрес:</td>
                     <td style={{ padding: '0.5rem' }}>
@@ -924,6 +1027,21 @@ function ProjectDetail() {
                   </tr>
                 </tbody>
               </table>
+              {isDeveloper && (
+                <div className="project-detail-owner-field">
+                  <label className="project-equipment-role">
+                    <span>Владелец проекта</span>
+                    <select name="owner_user_id" value={projectForm.owner_user_id} onChange={handleProjectFieldChange}>
+                      <option value="">Без владельца</option>
+                      {ownerUsers.map((owner) => (
+                        <option key={owner.id} value={owner.id}>
+                          {owner.full_name} ({owner.username})
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+              )}
             </div>
 
             <div className="project-detail-card">

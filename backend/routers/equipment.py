@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, File, UploadFile
 
+from backend.auth import AuthenticatedUser, require_current_user, require_project_access
 from backend.dependencies import get_equipment_use_cases
 from backend.mappers import equipment_item_read, project_equipment_list_read, project_equipment_selections_read
 from backend.modules.equipment.application.use_cases import EquipmentUseCases
@@ -24,6 +25,7 @@ router = APIRouter(tags=["equipment"])
 
 @router.get("/api/equipment", response_model=list[EquipmentItemRead])
 def list_equipment(
+    _: AuthenticatedUser = Depends(require_current_user),
     service: EquipmentUseCases = Depends(get_equipment_use_cases),
 ) -> list[EquipmentItemRead]:
     return [equipment_item_read(item) for item in service.list_items()]
@@ -32,6 +34,7 @@ def list_equipment(
 @router.get("/api/equipment/{equipment_id}", response_model=EquipmentItemRead)
 def get_equipment(
     equipment_id: int,
+    _: AuthenticatedUser = Depends(require_current_user),
     service: EquipmentUseCases = Depends(get_equipment_use_cases),
 ) -> EquipmentItemRead:
     return equipment_item_read(service.get_item(equipment_id))
@@ -40,6 +43,7 @@ def get_equipment(
 @router.post("/api/equipment", response_model=EquipmentItemRead)
 def create_equipment(
     payload: EquipmentItemCreate,
+    _: AuthenticatedUser = Depends(require_current_user),
     service: EquipmentUseCases = Depends(get_equipment_use_cases),
 ) -> EquipmentItemRead:
     return equipment_item_read(service.create_item(payload))
@@ -49,6 +53,7 @@ def create_equipment(
 def update_equipment(
     equipment_id: int,
     payload: EquipmentItemUpdate,
+    _: AuthenticatedUser = Depends(require_current_user),
     service: EquipmentUseCases = Depends(get_equipment_use_cases),
 ) -> EquipmentItemRead:
     return equipment_item_read(service.update_item(equipment_id, payload))
@@ -57,6 +62,7 @@ def update_equipment(
 @router.delete("/api/equipment/{equipment_id}", response_model=MessageRead)
 def delete_equipment(
     equipment_id: int,
+    _: AuthenticatedUser = Depends(require_current_user),
     service: EquipmentUseCases = Depends(get_equipment_use_cases),
 ) -> MessageRead:
     service.delete_item(equipment_id)
@@ -67,6 +73,7 @@ def delete_equipment(
 def upload_equipment_image(
     equipment_id: int,
     image: UploadFile = File(...),
+    _: AuthenticatedUser = Depends(require_current_user),
     service: EquipmentUseCases = Depends(get_equipment_use_cases),
 ) -> EquipmentItemRead:
     return equipment_item_read(service.set_item_image(equipment_id, image))
@@ -76,6 +83,7 @@ def upload_equipment_image(
 def upload_equipment_label_pdf(
     equipment_id: int,
     file: UploadFile = File(...),
+    _: AuthenticatedUser = Depends(require_current_user),
     service: EquipmentUseCases = Depends(get_equipment_use_cases),
 ) -> EquipmentItemRead:
     return equipment_item_read(service.set_item_label_pdf(equipment_id, file))
@@ -85,6 +93,7 @@ def upload_equipment_label_pdf(
 def upload_equipment_manual_pdf(
     equipment_id: int,
     file: UploadFile = File(...),
+    _: AuthenticatedUser = Depends(require_current_user),
     service: EquipmentUseCases = Depends(get_equipment_use_cases),
 ) -> EquipmentItemRead:
     return equipment_item_read(service.set_item_manual_pdf(equipment_id, file))
@@ -93,6 +102,7 @@ def upload_equipment_manual_pdf(
 @router.get("/api/projects/{project_id}/equipment", response_model=ProjectEquipmentListRead)
 def get_project_equipment(
     project_id: int,
+    _: AuthenticatedUser = Depends(require_project_access),
     service: EquipmentUseCases = Depends(get_equipment_use_cases),
 ) -> ProjectEquipmentListRead:
     result = service.get_project_equipment(project_id)
@@ -103,6 +113,7 @@ def get_project_equipment(
 def attach_project_equipment(
     project_id: int,
     payload: ProjectEquipmentAttach,
+    _: AuthenticatedUser = Depends(require_project_access),
     service: EquipmentUseCases = Depends(get_equipment_use_cases),
 ) -> ProjectEquipmentListRead:
     result = service.attach_item_to_project(project_id, payload)
@@ -113,6 +124,7 @@ def attach_project_equipment(
 def create_and_attach_project_equipment(
     project_id: int,
     payload: EquipmentItemCreate,
+    _: AuthenticatedUser = Depends(require_project_access),
     service: EquipmentUseCases = Depends(get_equipment_use_cases),
 ) -> ProjectEquipmentListRead:
     result = service.create_and_attach_item(project_id, payload)
@@ -123,6 +135,7 @@ def create_and_attach_project_equipment(
 def remove_project_equipment(
     project_id: int,
     equipment_id: int,
+    _: AuthenticatedUser = Depends(require_project_access),
     service: EquipmentUseCases = Depends(get_equipment_use_cases),
 ) -> ProjectEquipmentListRead:
     result = service.remove_item_from_project(project_id, equipment_id)
@@ -132,6 +145,7 @@ def remove_project_equipment(
 @router.get("/api/projects/{project_id}/equipment-selections", response_model=ProjectEquipmentSelectionsRead)
 def get_project_equipment_selections(
     project_id: int,
+    _: AuthenticatedUser = Depends(require_project_access),
     service: EquipmentUseCases = Depends(get_equipment_use_cases),
 ) -> ProjectEquipmentSelectionsRead:
     return project_equipment_selections_read(service.get_project_selections(project_id))
@@ -141,6 +155,7 @@ def get_project_equipment_selections(
 def update_project_equipment_selections(
     project_id: int,
     payload: ProjectEquipmentSelectionsUpdate,
+    _: AuthenticatedUser = Depends(require_project_access),
     service: EquipmentUseCases = Depends(get_equipment_use_cases),
 ) -> ProjectEquipmentSelectionsRead:
     return project_equipment_selections_read(service.update_project_selections(project_id, payload))

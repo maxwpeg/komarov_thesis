@@ -859,9 +859,8 @@ test('opens equipment specification step and saves edited specification without 
   }));
   projectsApi.updateEquipmentSpecification.mockImplementation(async (_projectId, payload) => payload);
 
+  mockSearchParams = new URLSearchParams('step=power_consumption_calculation');
   const { unmount } = render(<FloorPlanEditor />);
-
-  fireEvent.click(await screen.findByText('12. Расчет токопотребления'));
 
   const powerTitleInput = await screen.findByLabelText('Заголовок страницы расчета токопотребления');
   fireEvent.change(powerTitleInput, { target: { value: 'Расчет проекта' } });
@@ -930,6 +929,20 @@ test('opens additional info step and saves edited text without side panels', asy
   });
 });
 
+test('default floor plan editor sidebar does not show shared project steps', async () => {
+  render(<FloorPlanEditor />);
+
+  await waitFor(() => {
+    expect(screen.getByText('Пошаговый пайплайн')).toBeInTheDocument();
+  });
+
+  expect(screen.queryByText(/^10\. Общие данные$/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/^11\. Общие указания$/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/^12\. Расчет токопотребления$/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/^13\. Спецификация$/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/^14\. Доп\. сведения$/)).not.toBeInTheDocument();
+});
+
 test('fire alarm step shows branch selector and zkspc overlay without old mixed-save UI', async () => {
   render(<FloorPlanEditor />);
 
@@ -938,10 +951,11 @@ test('fire alarm step shows branch selector and zkspc overlay without old mixed-
   });
 
   expect(screen.getAllByRole('button', { name: 'Расставить' }).length).toBeGreaterThanOrEqual(1);
-  expect(screen.getAllByRole('button', { name: /^Сохранить$/ }).length).toBeGreaterThanOrEqual(1);
+  expect(screen.getAllByRole('button', { name: /^Подтвердить$/ }).length).toBeGreaterThanOrEqual(1);
   expect(screen.getByRole('button', { name: /^Безадресная/i })).toBeInTheDocument();
   expect(screen.getByRole('button', { name: /^Адресная/i })).toBeInTheDocument();
   expect(screen.queryByRole('button', { name: /Сохранить изменения/i })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /^Сохранить$/ })).not.toBeInTheDocument();
   expect(screen.queryByRole('button', { name: /Свести/i })).not.toBeInTheDocument();
 
   const stageQueries = within(screen.getByTestId('konva-Stage'));
@@ -982,11 +996,13 @@ test('devices and cables step renders instrument summary and shows merge actions
   expect(screen.getByText('\u0035. \u041f\u0440\u0438\u0431\u043e\u0440\u044b')).toBeInTheDocument();
   expect(within(spsGroup).getByText(/\u0418\u0437\u0432\u0435\u0449\u0430\u0442\u0435\u043b\u0435\u0439:/i)).toBeInTheDocument();
   expect(within(spsGroup).getByText(/\u041a\u0430\u0431\u0435\u043b\u044f:/i)).toBeInTheDocument();
+  expect(within(spsGroup).getAllByRole('button', { name: /^\u041f\u043e\u0434\u0442\u0432\u0435\u0440\u0434\u0438\u0442\u044c$/ }).length).toBeGreaterThanOrEqual(2);
   expect(screen.getAllByText('Panel A').length).toBeGreaterThan(0);
   expect(screen.getByRole('button', { name: /\u0421\u0432\u0435\u0441\u0442\u0438 \u0438\u0437\u0432\u0435\u0449\u0430\u0442\u0435\u043b\u0438/i })).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /^\u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c$/ })).not.toBeInTheDocument();
 });
 
-test('soue devices step exposes auto-layout, save, and manual device tools', async () => {
+test('soue devices step exposes auto-layout, confirm, and manual device tools', async () => {
   pipelineApi.getState.mockResolvedValueOnce({
     ...pipelineStateResponse,
     branches: {
@@ -1022,11 +1038,52 @@ test('soue devices step exposes auto-layout, save, and manual device tools', asy
   expect(within(soueGroup).getByText('\u0422\u0430\u0431\u043b\u043e \u0438 \u0441\u0438\u0440\u0435\u043d\u044b')).toBeInTheDocument();
   expect(within(soueGroup).getByText('\u041a\u0430\u0431\u0435\u043b\u0438')).toBeInTheDocument();
   expect(screen.getAllByRole('button', { name: '\u0420\u0430\u0441\u0441\u0442\u0430\u0432\u0438\u0442\u044c' }).length).toBeGreaterThanOrEqual(1);
-  expect(screen.getAllByRole('button', { name: /^\u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c$/ }).length).toBeGreaterThanOrEqual(1);
+  expect(screen.getAllByRole('button', { name: /^\u041f\u043e\u0434\u0442\u0432\u0435\u0440\u0434\u0438\u0442\u044c$/ }).length).toBeGreaterThanOrEqual(1);
   expect(screen.getByRole('button', { name: '\u0421\u0438\u0440\u0435\u043d\u0430' })).toBeInTheDocument();
   expect(screen.getByRole('button', { name: '\u0422\u0430\u0431\u043b\u043e' })).toBeInTheDocument();
   expect(screen.getByText(/\u0423\u0441\u0442\u0440\u043e\u0439\u0441\u0442\u0432 \u0421\u041e\u0423\u042d:/i)).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /^\u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c$/ })).not.toBeInTheDocument();
 });
+
+test('soue cables step shows confirm buttons for device and cable cards', async () => {
+  pipelineApi.getState.mockResolvedValueOnce({
+    ...pipelineStateResponse,
+    branches: {
+      ...pipelineStateResponse.branches,
+      common: {
+        ...pipelineStateResponse.branches.common,
+        active_step: 'soue_cables',
+        steps: {
+          ...pipelineStateResponse.branches.common.steps,
+          signal_instruments: { status: 'validated' },
+          soue_devices: { status: 'validated' },
+          soue_cables: { status: 'draft' },
+        },
+      },
+      non_addressable: {
+        ...pipelineStateResponse.branches.non_addressable,
+        active_step: 'soue_cables',
+        steps: {
+          signal_instruments: { status: 'validated' },
+          fire_alarms: { status: 'validated' },
+          devices_cables: { status: 'validated' },
+          soue_devices: { status: 'validated' },
+          soue_cables: { status: 'draft' },
+        },
+      },
+    },
+  });
+
+  render(<FloorPlanEditor />);
+
+  await waitFor(() => {
+    expect(screen.getByText('\u0038. \u0421\u041e\u0423\u042d')).toBeInTheDocument();
+  });
+
+  const soueGroup = screen.getByTestId('soue-steps-group');
+  expect(within(soueGroup).getAllByRole('button', { name: /^\u041f\u043e\u0434\u0442\u0432\u0435\u0440\u0434\u0438\u0442\u044c$/ }).length).toBeGreaterThanOrEqual(2);
+});
+
 test('escape always returns the active tool to select', async () => {
   render(<FloorPlanEditor />);
 

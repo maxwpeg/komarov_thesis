@@ -15,8 +15,8 @@ class ProjectUseCases:
         self.repository = repository
         self.uow = uow
 
-    def list_projects(self, skip: int = 0, limit: int = 100) -> list[ProjectRecord]:
-        return self.repository.list(skip=skip, limit=limit)
+    def list_projects(self, skip: int = 0, limit: int = 100, owner_user_id: int | None = None) -> list[ProjectRecord]:
+        return self.repository.list(skip=skip, limit=limit, owner_user_id=owner_user_id)
 
     def get_project(self, project_id: int) -> ProjectRecord:
         return self.repository.get(project_id)

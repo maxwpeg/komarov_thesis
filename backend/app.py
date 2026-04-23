@@ -18,6 +18,7 @@ from backend.errors import install_exception_handlers
 from backend.modules.shared.health.service import HealthService
 from backend.modules.shared.observability.middleware import RequestContextMiddleware
 from backend.routers import (
+    auth_router,
     equipment_router,
     elements_router,
     floor_plans_router,
@@ -26,6 +27,7 @@ from backend.routers import (
     projects_router,
     recognition_router,
     recognition_training_router,
+    users_router,
 )
 from backend.schemas import HealthRead
 
@@ -41,6 +43,14 @@ API_DESCRIPTION = (
     "генерировать комплект PDF-чертежей. Все описания в Swagger ориентированы на русскоязычного пользователя."
 )
 OPENAPI_TAGS = [
+    {
+        "name": "auth",
+        "description": "Аутентификация пользователей, вход в систему, завершение сессии и получение данных текущего пользователя.",
+    },
+    {
+        "name": "users",
+        "description": "Управление пользователями, ролями и паролями. Доступно только разработчикам.",
+    },
     {
         "name": "system",
         "description": "Служебные эндпоинты для проверки доступности сервиса и готовности инфраструктуры.",
@@ -81,6 +91,7 @@ OPENAPI_TAGS = [
     },
 ]
 PARAMETER_DESCRIPTIONS = {
+    "user_id": "Уникальный идентификатор пользователя.",
     "project_id": "Уникальный идентификатор проекта.",
     "floor_plan_id": "Уникальный идентификатор плана этажа.",
     "equipment_id": "Уникальный идентификатор позиции оборудования.",
@@ -483,7 +494,7 @@ def create_app() -> FastAPI:
     health_service = HealthService(engine=engine, settings=settings)
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=list(settings.cors_allowed_origins),
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -495,6 +506,7 @@ def create_app() -> FastAPI:
     app.mount("/debug_output", StaticFiles(directory=str(settings.debug_output_dir)), name="debug_output")
 
     install_exception_handlers(app)
+    app.include_router(auth_router)
     app.include_router(projects_router)
     app.include_router(equipment_router)
     app.include_router(floor_plans_router)
@@ -502,6 +514,7 @@ def create_app() -> FastAPI:
     app.include_router(pipeline_router)
     app.include_router(recognition_router)
     app.include_router(recognition_training_router)
+    app.include_router(users_router)
     app.include_router(pdf_router)
 
     app.openapi = lambda: _augment_openapi(app)

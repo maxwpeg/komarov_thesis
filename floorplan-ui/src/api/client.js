@@ -1,5 +1,14 @@
+let unauthorizedHandler = null;
+
+export function setUnauthorizedHandler(handler) {
+  unauthorizedHandler = typeof handler === 'function' ? handler : null;
+}
+
 async function apiRequest(path, options = {}) {
-  const response = await fetch(path, options);
+  const response = await fetch(path, {
+    credentials: 'include',
+    ...options,
+  });
 
   if (!response.ok) {
     let detail = `Request failed with status ${response.status}`;
@@ -17,6 +26,9 @@ async function apiRequest(path, options = {}) {
     const error = new Error(detail);
     error.status = response.status;
     error.payload = payload;
+    if (response.status === 401 && unauthorizedHandler) {
+      unauthorizedHandler(error);
+    }
     throw error;
   }
 
@@ -35,6 +47,51 @@ async function apiRequest(path, options = {}) {
 
   return response.text();
 }
+
+export const authApi = {
+  login(payload) {
+    return apiRequest('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  },
+  logout() {
+    return apiRequest('/api/auth/logout', {
+      method: 'POST',
+    });
+  },
+  me() {
+    return apiRequest('/api/auth/me');
+  },
+};
+
+export const usersApi = {
+  list() {
+    return apiRequest('/api/users');
+  },
+  create(payload) {
+    return apiRequest('/api/users', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  },
+  update(userId, payload) {
+    return apiRequest(`/api/users/${userId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  },
+  resetPassword(userId, payload) {
+    return apiRequest(`/api/users/${userId}/reset-password`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  },
+};
 
 export const projectsApi = {
   list() {

@@ -3,7 +3,16 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, File, Form, UploadFile
+from sqlalchemy.orm import Session
 
+from backend.auth import (
+    AuthenticatedUser,
+    ensure_project_access,
+    require_current_user,
+    require_floor_plan_access,
+    require_project_access,
+)
+from backend.database import get_db
 from backend.dependencies import get_floor_plan_use_cases
 from backend.mappers import floor_plan_read
 from backend.modules.floor_plans.application.use_cases import FloorPlanUseCases
@@ -21,8 +30,11 @@ async def create_floor_plan(
     scale_factor: float = Form(1.0),
     ceiling_height_mm: float = Form(3000.0),
     file: UploadFile | None = File(None),
+    db: Session = Depends(get_db),
+    current_user: AuthenticatedUser = Depends(require_current_user),
     service: FloorPlanUseCases = Depends(get_floor_plan_use_cases),
 ) -> FloorPlanRead:
+    ensure_project_access(db, current_user, project_id)
     payload = FloorPlanCreate(
         project_id=project_id,
         floor_number=floor_number,
@@ -37,6 +49,7 @@ async def create_floor_plan(
 def get_floor_plan(
     floor_plan_id: int,
     include_elements: bool = True,
+    _: AuthenticatedUser = Depends(require_floor_plan_access),
     service: FloorPlanUseCases = Depends(get_floor_plan_use_cases),
 ) -> FloorPlanRead:
     return floor_plan_read(service.get_floor_plan(floor_plan_id, include_elements=include_elements), include_elements=include_elements)
@@ -45,6 +58,7 @@ def get_floor_plan(
 @router.get("/api/projects/{project_id}/floor-plans", response_model=list[FloorPlanRead])
 def list_project_floor_plans(
     project_id: int,
+    _: AuthenticatedUser = Depends(require_project_access),
     service: FloorPlanUseCases = Depends(get_floor_plan_use_cases),
 ) -> list[FloorPlanRead]:
     return [floor_plan_read(item, include_elements=False) for item in service.list_project_floor_plans(project_id)]
@@ -54,6 +68,7 @@ def list_project_floor_plans(
 def update_floor_plan(
     floor_plan_id: int,
     payload: FloorPlanUpdate,
+    _: AuthenticatedUser = Depends(require_floor_plan_access),
     service: FloorPlanUseCases = Depends(get_floor_plan_use_cases),
 ) -> FloorPlanRead:
     return floor_plan_read(service.update_floor_plan(floor_plan_id, payload), include_elements=True)
@@ -62,6 +77,7 @@ def update_floor_plan(
 @router.delete("/api/floor-plans/{floor_plan_id}", response_model=MessageRead)
 def delete_floor_plan(
     floor_plan_id: int,
+    _: AuthenticatedUser = Depends(require_floor_plan_access),
     service: FloorPlanUseCases = Depends(get_floor_plan_use_cases),
 ) -> MessageRead:
     service.delete_floor_plan(floor_plan_id)

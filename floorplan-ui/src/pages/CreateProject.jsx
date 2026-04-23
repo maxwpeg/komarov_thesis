@@ -1,18 +1,22 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
-import { projectsApi } from '../api/client';
+import { useAuth } from '../auth/AuthContext';
+import { projectsApi, usersApi } from '../api/client';
 
 const CURRENT_YEAR = new Date().getFullYear();
 
 function CreateProject() {
   const navigate = useNavigate();
+  const { user } = useAuth();
+  const isDeveloper = user?.role === 'developer';
+
   const [formData, setFormData] = useState({
     name: '',
     project_type: 'ПС',
     year: CURRENT_YEAR,
     contractor: 'ООО "Флагман-СБ"',
-    engineer: 'Комарова Н.С.',
+    engineer: user?.full_name ?? '',
     cpe: 'Гостев В.В.',
     checker: 'Комаров С.Л.',
     facility: '',
@@ -22,12 +26,37 @@ function CreateProject() {
     project_description: 'Система пожарной сигнализации и система оповещения и управления эвакуацией людей при пожаре',
     stage: 'Р',
     number_of_floors: 1,
+    owner_user_id: '',
   });
+  const [engineers, setEngineers] = useState([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  useEffect(() => {
+    if (!isDeveloper) {
+      setEngineers([]);
+      return;
+    }
+
+    let isActive = true;
+    usersApi.list()
+      .then((items) => {
+        if (isActive) {
+          setEngineers(items.filter((item) => item.role === 'engineer' && item.is_active));
+        }
+      })
+      .catch((error) => {
+        console.error('Error loading engineers:', error);
+      });
+
+    return () => {
+      isActive = false;
+    };
+  }, [isDeveloper]);
 
   const handleChange = (event) => {
     const { name, value } = event.target;
-    const nextValue = name === 'year' || name === 'number_of_floors'
+    const numericFields = new Set(['year', 'number_of_floors', 'owner_user_id']);
+    const nextValue = numericFields.has(name)
       ? (value === '' ? '' : Number(value))
       : value;
 
@@ -53,7 +82,16 @@ function CreateProject() {
     setIsSubmitting(true);
 
     try {
-      const project = await projectsApi.create(formData);
+      const payload = {
+        ...formData,
+        owner_user_id: isDeveloper
+          ? (formData.owner_user_id === '' ? null : Number(formData.owner_user_id))
+          : undefined,
+      };
+      if (!isDeveloper) {
+        delete payload.owner_user_id;
+      }
+      const project = await projectsApi.create(payload);
       navigate(`/projects/${project.id}`);
     } catch (error) {
       console.error('Error creating project:', error);
@@ -160,6 +198,20 @@ function CreateProject() {
             onChange={handleChange}
           />
         </div>
+
+        {isDeveloper && (
+          <div className="form-group">
+            <label>Владелец проекта</label>
+            <select name="owner_user_id" value={formData.owner_user_id} onChange={handleChange}>
+              <option value="">Без владельца</option>
+              {engineers.map((engineer) => (
+                <option key={engineer.id} value={engineer.id}>
+                  {engineer.full_name} ({engineer.username})
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
 
         <div className="form-group">
           <label>Главный инженер проекта (ГИП)</label>

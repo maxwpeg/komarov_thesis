@@ -28,6 +28,8 @@ class ProjectRecord:
     project_description: str | None = None
     stage: str = "R"
     number_of_floors: int = 1
+    owner_user_id: int | None = None
+    owner_user: dict[str, object] | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -51,6 +53,12 @@ class ProjectRecord:
             project_description=project.project_description,
             stage=project.stage,
             number_of_floors=project.number_of_floors,
+            owner_user_id=getattr(project, "owner_user_id", None),
+            owner_user=(
+                project.owner_user.to_summary_dict()
+                if getattr(project, "owner_user", None) is not None
+                else None
+            ),
             created_at=project.created_at,
             updated_at=project.updated_at,
         )

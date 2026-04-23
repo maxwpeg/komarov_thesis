@@ -5,8 +5,9 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from sqlalchemy import func
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
+from backend.auth import ensure_owner_user_can_be_assigned
 from backend.errors import AppError
 from backend.modules.shared.infrastructure.persistence.models import Project as ProjectModel
 from backend.modules.shared.infrastructure.persistence.models import ProjectYearCounter
@@ -22,8 +23,11 @@ class SqlAlchemyProjectRepository(ProjectRepository):
     def __init__(self, session: Session):
         self.session = session
 
-    def list(self, skip: int = 0, limit: int = 100) -> list[ProjectRecord]:
-        projects = self.session.query(ProjectModel).offset(skip).limit(limit).all()
+    def list(self, skip: int = 0, limit: int = 100, owner_user_id: int | None = None) -> list[ProjectRecord]:
+        query = self.session.query(ProjectModel).options(selectinload(ProjectModel.owner_user))
+        if owner_user_id is not None:
+            query = query.filter(ProjectModel.owner_user_id == owner_user_id)
+        projects = query.offset(skip).limit(limit).all()
         return [ProjectRecord.from_model(project) for project in projects]
 
     def get(self, project_id: int) -> ProjectRecord:
@@ -56,16 +60,23 @@ class SqlAlchemyProjectRepository(ProjectRepository):
             project_description=payload.project_description,
             stage=payload.stage,
             number_of_floors=payload.number_of_floors,
+            owner_user_id=ensure_owner_user_can_be_assigned(self.session, payload.owner_user_id).id
+            if payload.owner_user_id is not None
+            else None,
         )
         counter.last_number = number
         self.session.add(project)
         self.session.flush()
+        self.session.refresh(project)
         return ProjectRecord.from_model(project)
 
     def update(self, project_id: int, payload: ProjectUpdate) -> ProjectRecord:
         project = self._get_model(project_id)
         previous_year = project.year
         updates = payload.model_dump(exclude_unset=True)
+        if "owner_user_id" in updates:
+            owner = ensure_owner_user_can_be_assigned(self.session, updates["owner_user_id"])
+            updates["owner_user_id"] = owner.id if owner is not None else None
         for field, value in updates.items():
             setattr(project, field, value)
 
@@ -83,6 +94,7 @@ class SqlAlchemyProjectRepository(ProjectRepository):
 
         project.updated_at = datetime.now(timezone.utc)
         self.session.flush()
+        self.session.refresh(project)
         return ProjectRecord.from_model(project)
 
     def delete(self, project_id: int) -> None:
@@ -91,7 +103,12 @@ class SqlAlchemyProjectRepository(ProjectRepository):
         self.session.flush()
 
     def _get_model(self, project_id: int) -> ProjectModel:
-        project = self.session.query(ProjectModel).filter(ProjectModel.id == project_id).first()
+        project = (
+            self.session.query(ProjectModel)
+            .options(selectinload(ProjectModel.owner_user))
+            .filter(ProjectModel.id == project_id)
+            .first()
+        )
         if project is None:
             raise AppError(404, "project_not_found", "Project not found")
         return project

@@ -15,6 +15,8 @@ coverage/
 .eslintcache
 
 # Environments and editor state
+.env
+.env.local
 .venv/
 venv/
 .idea/
@@ -33,3 +35,5 @@ floor_plans.db
 *.jpeg
 *.jpg
 *.png
+.playwright-browsers/chromium_headless_shell-1208/chrome-headless-shell-win64/chrome-headless-shell.exe
+.playwright-browsers/chromium-1208/chrome-win64/chrome.dll

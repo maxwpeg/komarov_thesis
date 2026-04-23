@@ -287,6 +287,7 @@ const DIRECT_LINK_EDITOR_STEPS = new Set([
   EQUIPMENT_SPECIFICATION_STEP_KEY,
   ADDITIONAL_INFO_STEP_KEY,
 ]);
+const STEP_CONFIRM_BUTTON_LABEL = 'Подтвердить';
 const EQUIPMENT_SPECIFICATION_ROW_FIELDS = [
   'position',
   'technical_name',
@@ -7704,11 +7705,6 @@ function FloorPlanEditor() {
     { key: 'devices_cables', title: '7. СПС: кабели', editorOnly: true },
     { key: 'soue_devices', title: '8. СОУЭ: табло и сирены', editorOnly: true },
     { key: 'soue_cables', title: '9. СОУЭ: кабели', editorOnly: true },
-    { key: GENERAL_DATA_STEP_KEY, title: '10. Общие данные', editorOnly: true },
-    { key: GENERAL_INSTRUCTIONS_STEP_KEY, title: '11. Общие указания', editorOnly: true },
-    { key: POWER_CONSUMPTION_STEP_KEY, title: '12. Расчет токопотребления', editorOnly: true },
-    { key: EQUIPMENT_SPECIFICATION_STEP_KEY, title: '13. Спецификация', editorOnly: true },
-    { key: ADDITIONAL_INFO_STEP_KEY, title: '14. Доп. сведения', editorOnly: true },
   ].map((step) => ({
     ...step,
     title: ({
@@ -8020,7 +8016,7 @@ function FloorPlanEditor() {
     ? [
       {
         key: 'save-instruments',
-        label: '\u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c',
+        label: STEP_CONFIRM_BUTTON_LABEL,
         disabled: !visibleSignalInstruments.length || signalBranchActionLoading,
         onClick: handleSaveSignalInstrumentsStep,
       },
@@ -8035,7 +8031,7 @@ function FloorPlanEditor() {
         },
         {
           key: 'save-sps-routes',
-          label: '\u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c',
+          label: STEP_CONFIRM_BUTTON_LABEL,
           disabled: !visibleSignalInstruments.length || signalBranchActionLoading,
           onClick: () => handleSaveCableRoutesStep('sps'),
         },
@@ -8050,7 +8046,7 @@ function FloorPlanEditor() {
           },
           {
             key: 'save-soue-routes',
-            label: '\u0421\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c',
+            label: STEP_CONFIRM_BUTTON_LABEL,
             disabled: !visibleSignalInstruments.length || signalBranchActionLoading,
             onClick: () => handleSaveCableRoutesStep('soue'),
           },
@@ -8258,7 +8254,7 @@ function FloorPlanEditor() {
               disabled={!canCommit || pipelineActionLoading}
               onClick={() => handleCommitStep(step.key)}
             >
-              Подтвердить и перейти
+              {STEP_CONFIRM_BUTTON_LABEL}
             </button>
           </div>
         )}
@@ -8328,7 +8324,7 @@ function FloorPlanEditor() {
               disabled={!visibleSignalInstruments.length || signalBranchActionLoading}
               onClick={handleSaveSignalInstrumentsStep}
             >
-              Сохранить
+              {STEP_CONFIRM_BUTTON_LABEL}
             </button>
           </div>
         )}
@@ -8348,7 +8344,7 @@ function FloorPlanEditor() {
               disabled={!draftStateByStep.fire_alarms || fireAlarmActionLoading}
               onClick={handleSaveFireAlarmsStep}
             >
-              Сохранить
+              {STEP_CONFIRM_BUTTON_LABEL}
             </button>
           </div>
         )}
@@ -8379,7 +8375,7 @@ function FloorPlanEditor() {
               disabled={!draftStateByStep.soue_devices || soueActionLoading}
               onClick={handleSaveSoueDevicesStep}
             >
-              Сохранить
+              {STEP_CONFIRM_BUTTON_LABEL}
             </button>
           </div>
         )}
@@ -8392,6 +8388,34 @@ function FloorPlanEditor() {
               onClick={() => refreshCableRoutes(currentSignalSystem, 'sps')}
             >
               {signalBranchActionLoading ? 'Пересчет...' : 'Пересчитать'}
+            </button>
+            <button
+              className="tool-button"
+              style={{ fontSize: '12px', padding: '4px 8px' }}
+              disabled={!visibleSignalInstruments.length || signalBranchActionLoading}
+              onClick={() => handleSaveCableRoutesStep('sps')}
+            >
+              {STEP_CONFIRM_BUTTON_LABEL}
+            </button>
+          </div>
+        )}
+        {step.key === 'soue_cables' && canOpen && (
+          <div style={{ display: 'flex', gap: '6px' }} onClick={(e) => e.stopPropagation()}>
+            <button
+              className="tool-button"
+              style={{ fontSize: '12px', padding: '4px 8px' }}
+              disabled={!visibleSignalInstruments.length || signalBranchActionLoading}
+              onClick={() => refreshCableRoutes(currentSignalSystem, 'soue')}
+            >
+              {signalBranchActionLoading ? 'Пересчет...' : 'Пересчитать'}
+            </button>
+            <button
+              className="tool-button"
+              style={{ fontSize: '12px', padding: '4px 8px' }}
+              disabled={!visibleSignalInstruments.length || signalBranchActionLoading}
+              onClick={() => handleSaveCableRoutesStep('soue')}
+            >
+              {STEP_CONFIRM_BUTTON_LABEL}
             </button>
           </div>
         )}
@@ -9127,7 +9151,7 @@ function FloorPlanEditor() {
                       disabled={!canCommit || pipelineActionLoading}
                       onClick={() => handleCommitStep(step.key)}
                     >
-                      Подтвердить и перейти
+                      {STEP_CONFIRM_BUTTON_LABEL}
                     </button>
                   </div>
                 )}
@@ -9197,7 +9221,7 @@ function FloorPlanEditor() {
                       disabled={!visibleSignalInstruments.length || signalBranchActionLoading}
                       onClick={handleSaveSignalInstrumentsStep}
                     >
-                      Сохранить
+                      {STEP_CONFIRM_BUTTON_LABEL}
                     </button>
                   </div>
                 )}
@@ -9217,7 +9241,7 @@ function FloorPlanEditor() {
                       disabled={!draftStateByStep.fire_alarms || fireAlarmActionLoading}
                       onClick={handleSaveFireAlarmsStep}
                     >
-                      Сохранить
+                      {STEP_CONFIRM_BUTTON_LABEL}
                     </button>
                   </div>
                 )}
@@ -9237,7 +9261,7 @@ function FloorPlanEditor() {
                       disabled={!draftStateByStep.soue_devices || soueActionLoading}
                       onClick={handleSaveSoueDevicesStep}
                     >
-                      Сохранить
+                      {STEP_CONFIRM_BUTTON_LABEL}
                     </button>
                   </div>
                 )}
@@ -9250,6 +9274,14 @@ function FloorPlanEditor() {
                       onClick={() => refreshCableRoutes(currentSignalSystem, 'sps')}
                     >
                       {signalBranchActionLoading ? 'Пересчет...' : 'Пересчитать'}
+                    </button>
+                    <button
+                      className="tool-button"
+                      style={{ fontSize: '12px', padding: '4px 8px' }}
+                      disabled={!visibleSignalInstruments.length || signalBranchActionLoading}
+                      onClick={() => handleSaveCableRoutesStep('sps')}
+                    >
+                      {STEP_CONFIRM_BUTTON_LABEL}
                     </button>
                   </div>
                 )}

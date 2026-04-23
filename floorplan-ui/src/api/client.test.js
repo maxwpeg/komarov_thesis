@@ -1,4 +1,5 @@
 import {
+  authApi,
   elementsApi,
   equipmentApi,
   floorPlansApi,
@@ -6,6 +7,8 @@ import {
   projectsApi,
   recognitionApi,
   recognitionTrainingApi,
+  setUnauthorizedHandler,
+  usersApi,
 } from './client';
 
 function createResponse({
@@ -32,9 +35,10 @@ describe('client API helpers', () => {
 
   afterEach(() => {
     jest.resetAllMocks();
+    setUnauthorizedHandler(null);
   });
 
-  test('calls project, equipment, floor plan, pipeline, recognition and element endpoints', async () => {
+  test('calls project, auth, user, equipment, floor plan, pipeline, recognition and element endpoints', async () => {
     global.fetch.mockImplementation(() => Promise.resolve(createResponse()));
 
     const formData = new FormData();
@@ -60,6 +64,15 @@ describe('client API helpers', () => {
     await projectsApi.removeEquipment(7, 3);
     await projectsApi.getEquipmentSelections(7);
     await projectsApi.updateEquipmentSelections(7, { selections: { common_instrument: 2 } });
+
+    await authApi.login({ username: 'dev', password: 'secret' });
+    await authApi.me();
+    await authApi.logout();
+
+    await usersApi.list();
+    await usersApi.create({ username: 'eng', full_name: 'Engineer', role: 'engineer', password: 'secret' });
+    await usersApi.update(5, { full_name: 'Updated Engineer' });
+    await usersApi.resetPassword(5, { password: 'new-secret' });
 
     await equipmentApi.list();
     await equipmentApi.get(2);
@@ -139,6 +152,12 @@ describe('client API helpers', () => {
         '/api/projects/7/general-instructions',
         '/api/projects/7/power-consumption-calculation',
         '/api/projects/7/equipment-specification',
+        '/api/auth/login',
+        '/api/auth/me',
+        '/api/auth/logout',
+        '/api/users',
+        '/api/users/5',
+        '/api/users/5/reset-password',
         '/api/equipment',
         '/api/floor-plans/11?include_elements=false',
         '/api/floor-plans/11/pipeline/walls/detect',
@@ -148,6 +167,10 @@ describe('client API helpers', () => {
         '/api/floor-plans/11/cable-routes?system_type=addressable&subsystem_type=soue',
       ]),
     );
+
+    global.fetch.mock.calls.forEach(([, options]) => {
+      expect(options?.credentials).toBe('include');
+    });
   });
 
   test('supports raw responses, 204, text payloads and error parsing', async () => {
@@ -172,5 +195,14 @@ describe('client API helpers', () => {
     await expect(projectsApi.create({ name: 'Bad' })).rejects.toMatchObject({ message: 'Некорректные данные', status: 400 });
     await expect(projectsApi.update(9, { name: 'Conflict' })).rejects.toMatchObject({ message: 'project_conflict', status: 409 });
     await expect(projectsApi.get(9)).rejects.toMatchObject({ message: 'Request failed with status 500', status: 500 });
+  });
+
+  test('notifies the unauthorized handler on 401 responses', async () => {
+    const handler = jest.fn();
+    setUnauthorizedHandler(handler);
+    global.fetch.mockResolvedValueOnce(createResponse({ ok: false, status: 401, payload: { code: 'auth_required' } }));
+
+    await expect(projectsApi.list()).rejects.toMatchObject({ status: 401, message: 'auth_required' });
+    expect(handler).toHaveBeenCalledTimes(1);
   });
 });

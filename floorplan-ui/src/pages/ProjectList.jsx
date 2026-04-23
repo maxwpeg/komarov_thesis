@@ -1,24 +1,42 @@
 import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 
+import { useAuth } from '../auth/AuthContext';
+import { projectsApi } from '../api/client';
+
 function ProjectList() {
+  const { user } = useAuth();
   const [projects, setProjects] = useState([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    let isActive = true;
+
+    const fetchProjects = async () => {
+      try {
+        const data = await projectsApi.list();
+        if (isActive) {
+          setProjects(data);
+        }
+      } catch (error) {
+        console.error('Error fetching projects:', error);
+      } finally {
+        if (isActive) {
+          setLoading(false);
+        }
+      }
+    };
+
     fetchProjects();
+
+    return () => {
+      isActive = false;
+    };
   }, []);
 
-  const fetchProjects = async () => {
-    try {
-      const response = await fetch('/api/projects');
-      const data = await response.json();
-      setProjects(data);
-      setLoading(false);
-    } catch (error) {
-      console.error('Error fetching projects:', error);
-      setLoading(false);
-    }
+  const reloadProjects = async () => {
+    const data = await projectsApi.list();
+    setProjects(data);
   };
 
   const handleDeleteProject = async (event, projectId, projectName) => {
@@ -30,16 +48,8 @@ function ProjectList() {
     }
 
     try {
-      const response = await fetch(`/api/projects/${projectId}`, {
-        method: 'DELETE',
-      });
-
-      if (response.ok) {
-        fetchProjects();
-        return;
-      }
-
-      alert('Ошибка при удалении проекта');
+      await projectsApi.remove(projectId);
+      await reloadProjects();
     } catch (error) {
       console.error('Error deleting project:', error);
       alert('Ошибка при удалении проекта');
@@ -64,6 +74,7 @@ function ProjectList() {
         <div className="project-grid">
           {projects.map((project) => {
             const displayName = project.facility || project.name;
+            const ownerLabel = project.owner_user?.full_name || 'Без владельца';
             return (
               <div key={project.id} style={{ position: 'relative' }}>
                 <Link
@@ -76,8 +87,11 @@ function ProjectList() {
                     <p><strong>Тип:</strong> {project.project_type}</p>
                     <p><strong>Этажей:</strong> {project.number_of_floors}</p>
                     <p><strong>Подрядчик:</strong> {project.contractor}</p>
+                    {user?.role === 'developer' && (
+                      <p><strong>Владелец:</strong> {ownerLabel}</p>
+                    )}
                     <p style={{ fontSize: '0.8rem', marginTop: '1rem' }}>
-                      Создан: {new Date(project.created_at).toLocaleDateString('ru-RU')}
+                      Создан: {project.created_at ? new Date(project.created_at).toLocaleDateString('ru-RU') : '—'}
                     </p>
                   </div>
                 </Link>

@@ -26,6 +26,69 @@ class ProjectYearCounter(Base):
     )
 
 
+class User(Base):
+    """Application user with a role and password hash."""
+
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String(128), unique=True, nullable=False, index=True)
+    full_name = Column(String(255), nullable=False)
+    role = Column(String(32), nullable=False, default="engineer")
+    password_hash = Column(String(512), nullable=False)
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+    owned_projects = relationship("Project", back_populates="owner_user", foreign_keys="Project.owner_user_id")
+    auth_sessions = relationship("AuthSession", back_populates="user", cascade="all, delete-orphan")
+
+    def to_summary_dict(self):
+        return {
+            "id": self.id,
+            "username": self.username,
+            "full_name": self.full_name,
+            "role": self.role,
+            "is_active": self.is_active,
+        }
+
+    def to_dict(self):
+        return {
+            **self.to_summary_dict(),
+            "is_active": self.is_active,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class AuthSession(Base):
+    """Server-side session for cookie-based authentication."""
+
+    __tablename__ = "auth_sessions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    token_hash = Column(String(128), unique=True, nullable=False, index=True)
+    expires_at = Column(DateTime, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    last_seen_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    user = relationship("User", back_populates="auth_sessions")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "user_id": self.user_id,
+            "expires_at": self.expires_at.isoformat() if self.expires_at else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "last_seen_at": self.last_seen_at.isoformat() if self.last_seen_at else None,
+        }
+
+
 class Project(Base):
     """Project model - top-level container for floor plans."""
     __tablename__ = 'projects'
@@ -53,6 +116,7 @@ class Project(Base):
     general_instructions_overrides = Column(JSON, nullable=True)
     power_consumption_overrides = Column(JSON, nullable=True)
     additional_info_text = Column(Text, nullable=True)
+    owner_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     
     number_of_floors = Column(Integer, default=1)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
@@ -66,8 +130,10 @@ class Project(Base):
     floor_plans = relationship("FloorPlan", back_populates="project", cascade="all, delete-orphan")
     equipment_selections = relationship("ProjectEquipmentSelection", back_populates="project", cascade="all, delete-orphan")
     equipment_links = relationship("ProjectEquipmentLink", back_populates="project", cascade="all, delete-orphan")
+    owner_user = relationship("User", back_populates="owned_projects", foreign_keys=[owner_user_id])
     
     def to_dict(self):
+        owner = self.owner_user.to_summary_dict() if self.owner_user is not None else None
         return {
             "id": self.id,
             "name": self.name,
@@ -90,6 +156,8 @@ class Project(Base):
             "general_instructions_overrides": self.general_instructions_overrides or {},
             "power_consumption_overrides": self.power_consumption_overrides or {},
             "number_of_floors": self.number_of_floors,
+            "owner_user_id": self.owner_user_id,
+            "owner_user": owner,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }

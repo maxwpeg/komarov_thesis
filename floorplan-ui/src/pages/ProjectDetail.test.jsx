@@ -3,18 +3,24 @@ import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 
+import { useAuth } from '../auth/AuthContext';
 import ProjectDetail from './ProjectDetail';
-import { equipmentApi, floorPlansApi, projectsApi } from '../api/client';
+import { equipmentApi, floorPlansApi, projectsApi, usersApi } from '../api/client';
 
 const mockNavigate = jest.fn();
 let createElementSpy;
 let consoleErrorSpy;
 let consoleWarnSpy;
+let originalImage;
 
 jest.mock('react-router-dom', () => ({
   ...jest.requireActual('react-router-dom'),
   useParams: () => ({ projectId: '10' }),
   useNavigate: () => mockNavigate,
+}));
+
+jest.mock('../auth/AuthContext', () => ({
+  useAuth: jest.fn(),
 }));
 
 jest.mock('../api/client', () => ({
@@ -40,6 +46,9 @@ jest.mock('../api/client', () => ({
   equipmentApi: {
     list: jest.fn(),
   },
+  usersApi: {
+    list: jest.fn(),
+  },
 }));
 
 const projectResponse = {
@@ -53,6 +62,8 @@ const projectResponse = {
   year: 2026,
   contractor: 'Подрядчик',
   engineer: 'Инженер',
+  owner_user_id: 21,
+  owner_user: { id: 21, full_name: 'Engineer One', username: 'eng1', role: 'engineer' },
   facility_address: 'Адрес',
   project_description: 'Описание',
 };
@@ -96,12 +107,44 @@ const equipmentSpecificationResponse = {
   ],
 };
 
+function mockImageLoad({ width = 400, height = 400, shouldFail = false } = {}) {
+  window.Image = class MockImage {
+    constructor() {
+      this.onload = null;
+      this.onerror = null;
+      this.naturalWidth = width;
+      this.naturalHeight = height;
+      this.width = width;
+      this.height = height;
+    }
+
+    set src(_value) {
+      setTimeout(() => {
+        if (shouldFail) {
+          this.onerror?.(new Event('error'));
+          return;
+        }
+        this.onload?.(new Event('load'));
+      }, 0);
+    }
+  };
+}
+
 beforeEach(() => {
   jest.clearAllMocks();
+  originalImage = window.Image;
+  mockImageLoad();
+  useAuth.mockReturnValue({
+    user: { id: 1, role: 'developer', full_name: 'Developer User' },
+  });
   projectsApi.get.mockResolvedValue(projectResponse);
   floorPlansApi.list.mockResolvedValue([]);
   projectsApi.getEquipmentSpecification.mockResolvedValue(equipmentSpecificationResponse);
   equipmentApi.list.mockResolvedValue(equipmentItemsResponse);
+  usersApi.list.mockResolvedValue([
+    { id: 21, full_name: 'Engineer One', username: 'eng1', role: 'engineer', is_active: true },
+    { id: 22, full_name: 'Engineer Two', username: 'eng2', role: 'engineer', is_active: true },
+  ]);
   projectsApi.listEquipment.mockResolvedValue(projectEquipmentResponse);
   projectsApi.getAdditionalInfo.mockResolvedValue({
     page_title: 'Доп. сведения',
@@ -137,6 +180,7 @@ afterEach(() => {
   createElementSpy?.mockRestore();
   consoleErrorSpy?.mockRestore();
   consoleWarnSpy?.mockRestore();
+  window.Image = originalImage;
 });
 
 function renderProjectDetail() {
@@ -164,6 +208,71 @@ test('successful PDF generation downloads without showing a success alert', asyn
   expect(window.URL.createObjectURL).toHaveBeenCalled();
   expect(window.URL.revokeObjectURL).toHaveBeenCalledWith('blob:test-pdf');
   expect(window.alert).not.toHaveBeenCalled();
+});
+
+test('project detail uploads a valid floor plan image', async () => {
+  floorPlansApi.create.mockResolvedValueOnce({ id: 88 });
+  floorPlansApi.list
+    .mockResolvedValueOnce([])
+    .mockResolvedValueOnce([
+      {
+        id: 88,
+        name: 'Этаж 1',
+        floor_number: 1,
+        image_width: 800,
+        image_height: 600,
+      },
+    ]);
+
+  renderProjectDetail();
+
+  await screen.findByRole('heading', { name: /Объект/i });
+  const fileInput = document.querySelector('input[type="file"]');
+  const file = new File(['image'], 'plan.png', { type: 'image/png' });
+
+  await userEvent.upload(fileInput, file);
+
+  await waitFor(() => {
+    expect(floorPlansApi.create).toHaveBeenCalledTimes(1);
+  });
+
+  expect(mockNavigate).toHaveBeenCalledWith('/floor-plans/88');
+});
+
+test('project detail blocks uploading a non-image floor plan file', async () => {
+  renderProjectDetail();
+
+  await screen.findByRole('heading', { name: /Объект/i });
+  const fileInput = document.querySelector('input[type="file"]');
+  const file = new File(['pdf'], 'plan.pdf', { type: 'application/pdf' });
+
+  await userEvent.upload(fileInput, file);
+
+  await waitFor(() => {
+    expect(window.alert).toHaveBeenCalledWith(expect.stringContaining('200x200'));
+  });
+
+  expect(floorPlansApi.create).not.toHaveBeenCalled();
+  expect(mockNavigate).not.toHaveBeenCalled();
+});
+
+test('project detail blocks uploading a floor plan image smaller than 200x200', async () => {
+  mockImageLoad({ width: 199, height: 250 });
+
+  renderProjectDetail();
+
+  await screen.findByRole('heading', { name: /Объект/i });
+  const fileInput = document.querySelector('input[type="file"]');
+  const file = new File(['image'], 'small-plan.png', { type: 'image/png' });
+
+  await userEvent.upload(fileInput, file);
+
+  await waitFor(() => {
+    expect(window.alert).toHaveBeenCalledWith(expect.stringContaining('200x200'));
+  });
+
+  expect(floorPlansApi.create).not.toHaveBeenCalled();
+  expect(mockNavigate).not.toHaveBeenCalled();
 });
 
 test('project details save updated facility field', async () => {

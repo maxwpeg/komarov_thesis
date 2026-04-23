@@ -48,6 +48,48 @@ ProjectEquipmentRole = Literal[
     "common_keyboard",
     "common_other",
 ]
+UserRole = Literal["developer", "engineer"]
+
+
+class UserSummaryRead(APIModel):
+    id: int
+    username: str
+    full_name: str
+    role: UserRole
+    is_active: bool = True
+
+
+class CurrentUserRead(UserSummaryRead):
+    pass
+
+
+class LoginRequest(APIModel):
+    username: str
+    password: str
+
+
+class UserCreate(APIModel):
+    username: str
+    full_name: str
+    role: UserRole
+    password: str
+    is_active: bool = True
+
+
+class UserUpdate(APIModel):
+    username: str | None = None
+    full_name: str | None = None
+    role: UserRole | None = None
+    is_active: bool | None = None
+
+
+class UserResetPasswordRequest(APIModel):
+    password: str
+
+
+class UserRead(UserSummaryRead):
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
 
 
 class ProjectCreate(APIModel):
@@ -87,6 +129,7 @@ class ProjectCreate(APIModel):
     project_description: str | None = Field(default=None, description="Краткое описание проекта.")
     stage: str = Field(default="R", description="Стадия проектирования.")
     number_of_floors: int = Field(default=1, description="Количество этажей в проекте.")
+    owner_user_id: int | None = Field(default=None, description="Идентификатор инженера-владельца проекта.")
 
 
 class ProjectUpdate(APIModel):
@@ -104,6 +147,7 @@ class ProjectUpdate(APIModel):
     project_description: str | None = None
     stage: str | None = None
     number_of_floors: int | None = None
+    owner_user_id: int | None = None
 
 
 class ProjectRead(APIModel):
@@ -149,6 +193,8 @@ class ProjectRead(APIModel):
     project_description: str | None = None
     stage: str
     number_of_floors: int
+    owner_user_id: int | None = None
+    owner_user: UserSummaryRead | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

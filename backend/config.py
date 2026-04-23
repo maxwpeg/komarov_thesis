@@ -6,8 +6,28 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+load_dotenv(PROJECT_ROOT / ".env")
+load_dotenv(PROJECT_ROOT / ".env.local", override=True)
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_csv(name: str, default: list[str]) -> list[str]:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    values = [item.strip() for item in raw.split(",")]
+    return [item for item in values if item]
 
 
 @dataclass(frozen=True)
@@ -21,6 +41,18 @@ class AppConfig:
     regular_font_path: Path = PROJECT_ROOT / "GOST_A.TTF"
     bold_font_path: Path = PROJECT_ROOT / "GOST_A_Bold.ttf"
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
+    auth_cookie_name: str = os.getenv("AUTH_COOKIE_NAME", "auth_session")
+    auth_session_ttl_hours: int = int(os.getenv("AUTH_SESSION_TTL_HOURS", "12"))
+    auth_cookie_secure: bool = _env_flag("AUTH_COOKIE_SECURE", False)
+    cors_allowed_origins: tuple[str, ...] = tuple(
+        _env_csv(
+            "CORS_ALLOWED_ORIGINS",
+            ["http://127.0.0.1:3000", "http://localhost:3000"],
+        )
+    )
+    bootstrap_developer_username: str | None = os.getenv("BOOTSTRAP_DEVELOPER_USERNAME")
+    bootstrap_developer_full_name: str | None = os.getenv("BOOTSTRAP_DEVELOPER_FULL_NAME")
+    bootstrap_developer_password: str | None = os.getenv("BOOTSTRAP_DEVELOPER_PASSWORD")
 
     @property
     def database_url(self) -> str:
@@ -28,4 +60,3 @@ class AppConfig:
 
 
 settings = AppConfig()
-

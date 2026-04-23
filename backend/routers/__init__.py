@@ -1,5 +1,6 @@
 """FastAPI routers."""
 
+from backend.routers.auth import router as auth_router
 from backend.routers.equipment import router as equipment_router
 from backend.routers.elements import router as elements_router
 from backend.routers.floor_plans import router as floor_plans_router
@@ -8,8 +9,10 @@ from backend.routers.pipeline import router as pipeline_router
 from backend.routers.projects import router as projects_router
 from backend.routers.recognition import router as recognition_router
 from backend.routers.recognition_training import router as recognition_training_router
+from backend.routers.users import router as users_router
 
 __all__ = [
+    "auth_router",
     "equipment_router",
     "elements_router",
     "floor_plans_router",
@@ -18,4 +21,5 @@ __all__ = [
     "projects_router",
     "recognition_router",
     "recognition_training_router",
+    "users_router",
 ]

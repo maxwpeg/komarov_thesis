@@ -6,6 +6,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from backend.auth import require_floor_plan_access
 from backend.dependencies import get_pipeline_use_cases
 from backend.mappers import floor_plan_read
 from backend.modules.pipeline.application.errors import WallValidationError
@@ -23,7 +24,7 @@ from backend.schemas import (
 )
 
 
-router = APIRouter(tags=["pipeline"])
+router = APIRouter(tags=["pipeline"], dependencies=[Depends(require_floor_plan_access)])
 
 
 def _submit_step_feedback(

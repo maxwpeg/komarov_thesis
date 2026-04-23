@@ -39,6 +39,13 @@ def init_db() -> None:
     Base.metadata.create_all(bind=engine)
     _ensure_backward_compatible_columns()
     _ensure_performance_indexes()
+    from backend.auth import bootstrap_first_developer
+
+    session = SessionLocal()
+    try:
+        bootstrap_first_developer(session)
+    finally:
+        session.close()
 
 
 def get_db() -> Generator[Session, None, None]:
@@ -71,6 +78,8 @@ def _ensure_backward_compatible_columns() -> None:
                 connection.exec_driver_sql("ALTER TABLE projects ADD COLUMN facility_genitive VARCHAR(255)")
             if "facility_instrumental" not in project_columns:
                 connection.exec_driver_sql("ALTER TABLE projects ADD COLUMN facility_instrumental VARCHAR(255)")
+            if "owner_user_id" not in project_columns:
+                connection.exec_driver_sql("ALTER TABLE projects ADD COLUMN owner_user_id INTEGER")
             if "equipment_specification_overrides" not in project_columns:
                 connection.exec_driver_sql("ALTER TABLE projects ADD COLUMN equipment_specification_overrides JSON")
             if "general_data_overrides" not in project_columns:
@@ -431,6 +440,7 @@ def _ensure_performance_indexes() -> None:
     """Create frequently used indexes in a compatibility-safe way."""
     statements = (
         "CREATE INDEX IF NOT EXISTS ix_floor_plans_project_id ON floor_plans (project_id)",
+        "CREATE INDEX IF NOT EXISTS ix_projects_owner_user_id ON projects (owner_user_id)",
         "CREATE INDEX IF NOT EXISTS ix_walls_floor_plan_id ON walls (floor_plan_id)",
         "CREATE INDEX IF NOT EXISTS ix_doors_floor_plan_id ON doors (floor_plan_id)",
         "CREATE INDEX IF NOT EXISTS ix_windows_floor_plan_id ON windows (floor_plan_id)",
@@ -467,6 +477,11 @@ def _ensure_performance_indexes() -> None:
         "CREATE INDEX IF NOT EXISTS ix_equipment_compatibility_links_compatible_id ON equipment_compatibility_links (compatible_equipment_id)",
         "CREATE INDEX IF NOT EXISTS ix_fire_alarms_equipment_id ON fire_alarms (equipment_id)",
         "CREATE INDEX IF NOT EXISTS ix_soue_devices_equipment_id ON soue_devices (equipment_id)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS ix_users_username ON users (username)",
+        "CREATE INDEX IF NOT EXISTS ix_users_role_active ON users (role, is_active)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS ix_auth_sessions_token_hash ON auth_sessions (token_hash)",
+        "CREATE INDEX IF NOT EXISTS ix_auth_sessions_user_id ON auth_sessions (user_id)",
+        "CREATE INDEX IF NOT EXISTS ix_auth_sessions_expires_at ON auth_sessions (expires_at)",
     )
     with engine.begin() as connection:
         for statement in statements:

@@ -6,6 +6,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Query
 
+from backend.auth import require_developer
 from backend.dependencies import get_recognition_training_management_service
 from backend.schemas import (
     RecognitionActiveModelRead,
@@ -19,7 +20,7 @@ from backend.schemas import (
     RecognitionTrainingRunLogRead,
     RecognitionTrainingRunRead,
 )
-router = APIRouter(tags=["recognition-training"])
+router = APIRouter(tags=["recognition-training"], dependencies=[Depends(require_developer)])
 
 
 @router.get("/api/recognition-training/overview", response_model=RecognitionTrainingOverviewRead)

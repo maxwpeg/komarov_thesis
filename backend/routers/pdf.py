@@ -7,6 +7,7 @@ import os
 from fastapi import APIRouter, Depends
 from fastapi.responses import FileResponse
 
+from backend.auth import AuthenticatedUser, require_project_access
 from backend.dependencies import get_documents_use_cases
 from backend.mappers import (
     additional_info_read,
@@ -36,6 +37,7 @@ router = APIRouter(tags=["pdf"])
 @router.post("/api/projects/{project_id}/generate-pdf")
 def generate_pdf(
     project_id: int,
+    _: AuthenticatedUser = Depends(require_project_access),
     service: DocumentsUseCases = Depends(get_documents_use_cases),
 ) -> FileResponse:
     pdf_path = service.generate_project_pdf(project_id)
@@ -49,6 +51,7 @@ def generate_pdf(
 @router.get("/api/projects/{project_id}/equipment-specification", response_model=EquipmentSpecificationRead)
 def get_project_equipment_specification(
     project_id: int,
+    _: AuthenticatedUser = Depends(require_project_access),
     service: DocumentsUseCases = Depends(get_documents_use_cases),
 ) -> EquipmentSpecificationRead:
     return equipment_specification_read(service.get_project_equipment_specification(project_id))
@@ -57,6 +60,7 @@ def get_project_equipment_specification(
 @router.get("/api/projects/{project_id}/general-data", response_model=GeneralDataRead)
 def get_project_general_data(
     project_id: int,
+    _: AuthenticatedUser = Depends(require_project_access),
     service: DocumentsUseCases = Depends(get_documents_use_cases),
 ) -> GeneralDataRead:
     return general_data_read(service.get_project_general_data(project_id))
@@ -66,6 +70,7 @@ def get_project_general_data(
 def update_project_general_data(
     project_id: int,
     payload: GeneralDataUpdate,
+    _: AuthenticatedUser = Depends(require_project_access),
     service: DocumentsUseCases = Depends(get_documents_use_cases),
 ) -> GeneralDataRead:
     return general_data_read(service.update_project_general_data(project_id, payload))
@@ -74,6 +79,7 @@ def update_project_general_data(
 @router.get("/api/projects/{project_id}/general-instructions", response_model=GeneralInstructionsRead)
 def get_project_general_instructions(
     project_id: int,
+    _: AuthenticatedUser = Depends(require_project_access),
     service: DocumentsUseCases = Depends(get_documents_use_cases),
 ) -> GeneralInstructionsRead:
     return general_instructions_read(service.get_project_general_instructions(project_id))
@@ -83,6 +89,7 @@ def get_project_general_instructions(
 def update_project_general_instructions(
     project_id: int,
     payload: GeneralInstructionsUpdate,
+    _: AuthenticatedUser = Depends(require_project_access),
     service: DocumentsUseCases = Depends(get_documents_use_cases),
 ) -> GeneralInstructionsRead:
     return general_instructions_read(service.update_project_general_instructions(project_id, payload))
@@ -92,6 +99,7 @@ def update_project_general_instructions(
 def update_project_equipment_specification(
     project_id: int,
     payload: EquipmentSpecificationUpdate,
+    _: AuthenticatedUser = Depends(require_project_access),
     service: DocumentsUseCases = Depends(get_documents_use_cases),
 ) -> EquipmentSpecificationRead:
     return equipment_specification_read(service.update_project_equipment_specification(project_id, payload))
@@ -100,6 +108,7 @@ def update_project_equipment_specification(
 @router.get("/api/projects/{project_id}/power-consumption-calculation", response_model=PowerConsumptionCalculationRead)
 def get_project_power_consumption_calculation(
     project_id: int,
+    _: AuthenticatedUser = Depends(require_project_access),
     service: DocumentsUseCases = Depends(get_documents_use_cases),
 ) -> PowerConsumptionCalculationRead:
     return power_consumption_calculation_read(service.get_project_power_consumption_calculation(project_id))
@@ -109,6 +118,7 @@ def get_project_power_consumption_calculation(
 def update_project_power_consumption_calculation(
     project_id: int,
     payload: PowerConsumptionCalculationUpdate,
+    _: AuthenticatedUser = Depends(require_project_access),
     service: DocumentsUseCases = Depends(get_documents_use_cases),
 ) -> PowerConsumptionCalculationRead:
     return power_consumption_calculation_read(
@@ -119,6 +129,7 @@ def update_project_power_consumption_calculation(
 @router.get("/api/projects/{project_id}/additional-info", response_model=AdditionalInfoRead)
 def get_project_additional_info(
     project_id: int,
+    _: AuthenticatedUser = Depends(require_project_access),
     service: DocumentsUseCases = Depends(get_documents_use_cases),
 ) -> AdditionalInfoRead:
     return additional_info_read(service.get_project_additional_info(project_id))
@@ -128,6 +139,7 @@ def get_project_additional_info(
 def update_project_additional_info(
     project_id: int,
     payload: AdditionalInfoUpdate,
+    _: AuthenticatedUser = Depends(require_project_access),
     service: DocumentsUseCases = Depends(get_documents_use_cases),
 ) -> AdditionalInfoRead:
     return additional_info_read(service.update_project_additional_info(project_id, payload))
