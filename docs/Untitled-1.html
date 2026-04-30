@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <title></title>
+            <style>
+/* From extension vscode.github */
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+.vscode-dark img[src$=\#gh-light-mode-only],
+.vscode-light img[src$=\#gh-dark-mode-only],
+.vscode-high-contrast:not(.vscode-high-contrast-light) img[src$=\#gh-light-mode-only],
+.vscode-high-contrast-light img[src$=\#gh-dark-mode-only] {
+	display: none;
+}
+
+</style>
+            
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/Microsoft/vscode/extensions/markdown-language-features/media/markdown.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/Microsoft/vscode/extensions/markdown-language-features/media/highlight.css">
+<style>
+            body {
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe WPC', 'Segoe UI', system-ui, 'Ubuntu', 'Droid Sans', sans-serif;
+                font-size: 14px;
+                line-height: 1.6;
+            }
+        </style>
+        <style>
+.task-list-item {
+    list-style-type: none;
+}
+
+.task-list-item-checkbox {
+    margin-left: -20px;
+    vertical-align: middle;
+    pointer-events: none;
+}
+</style>
+<style>
+:root {
+  --color-note: #0969da;
+  --color-tip: #1a7f37;
+  --color-warning: #9a6700;
+  --color-severe: #bc4c00;
+  --color-caution: #d1242f;
+  --color-important: #8250df;
+}
+
+</style>
+<style>
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-note: #2f81f7;
+    --color-tip: #3fb950;
+    --color-warning: #d29922;
+    --color-severe: #db6d28;
+    --color-caution: #f85149;
+    --color-important: #a371f7;
+  }
+}
+
+</style>
+<style>
+.markdown-alert {
+  padding: 0.5rem 1rem;
+  margin-bottom: 16px;
+  color: inherit;
+  border-left: .25em solid #888;
+}
+
+.markdown-alert>:first-child {
+  margin-top: 0
+}
+
+.markdown-alert>:last-child {
+  margin-bottom: 0
+}
+
+.markdown-alert .markdown-alert-title {
+  display: flex;
+  font-weight: 500;
+  align-items: center;
+  line-height: 1
+}
+
+.markdown-alert .markdown-alert-title .octicon {
+  margin-right: 0.5rem;
+  display: inline-block;
+  overflow: visible !important;
+  vertical-align: text-bottom;
+  fill: currentColor;
+}
+
+.markdown-alert.markdown-alert-note {
+  border-left-color: var(--color-note);
+}
+
+.markdown-alert.markdown-alert-note .markdown-alert-title {
+  color: var(--color-note);
+}
+
+.markdown-alert.markdown-alert-important {
+  border-left-color: var(--color-important);
+}
+
+.markdown-alert.markdown-alert-important .markdown-alert-title {
+  color: var(--color-important);
+}
+
+.markdown-alert.markdown-alert-warning {
+  border-left-color: var(--color-warning);
+}
+
+.markdown-alert.markdown-alert-warning .markdown-alert-title {
+  color: var(--color-warning);
+}
+
+.markdown-alert.markdown-alert-tip {
+  border-left-color: var(--color-tip);
+}
+
+.markdown-alert.markdown-alert-tip .markdown-alert-title {
+  color: var(--color-tip);
+}
+
+.markdown-alert.markdown-alert-caution {
+  border-left-color: var(--color-caution);
+}
+
+.markdown-alert.markdown-alert-caution .markdown-alert-title {
+  color: var(--color-caution);
+}
+
+</style>
+        
+        </head>
+        <body class="vscode-body vscode-light">
+            <p><strong>Фронтенд</strong></p>
+<ul>
+<li>
+<p><strong>Пользователь (<code>Инженер</code>, <code>Разработчик</code>)</strong>.<br>
+Это внешний актор системы. Инженер работает с проектами и планами, разработчик дополнительно видит дообучение, очередь задач и пользователей. Плюс такого разделения в том, что сложные и опасные функции не доступны всем подряд. Минус: нужно поддерживать роли и проверки доступа. Связь: пользователь работает только через <code>React SPA</code>.</p>
+</li>
+<li>
+<p><strong>React SPA</strong>.<br>
+Это единое клиентское приложение на React, которое работает без полной перезагрузки страницы. Технологии: <code>React</code>, <code>react-router-dom</code>, <code>fetch</code>, контекстное состояние. Плюсы: быстрый UX, единый стиль, переиспользуемые компоненты. Минусы: часть логики состояния переносится на клиент, нужно аккуратно управлять синхронизацией с сервером. Связь: это главный контейнер, внутри которого живут маршрутизация, авторизация, редактор, обучение, preview PDF и API-клиент.</p>
+</li>
+<li>
+<p><strong>AuthContext / сессия</strong>.<br>
+Отвечает за восстановление и хранение текущей пользовательской сессии. При старте вызывает <code>/api/auth/me</code>, при <code>401</code> сбрасывает состояние. Технологии: <code>React Context</code>, cookie-based session, глобальный unauthorized handler. Плюсы: авторизация централизована, не размазана по страницам. Минусы: фронтенд зависит от корректной работы cookie-сессии и обработчика <code>401</code>. Связь: влияет на показ страниц, ролей и навигации.</p>
+</li>
+<li>
+<p><strong>Маршрутизация и страницы</strong>.<br>
+Это слой, который решает, какой экран показывать: проекты, карточка проекта, редактор этажа, каталог оборудования, дообучение, очередь задач, пользователи. Технологии: <code>React Router</code>. Плюсы: чистое разделение экранов и URL. Минусы: при росте проекта растет число состояний и переходов. Связь: маршруты вызывают API-клиент и используют контексты.</p>
+</li>
+<li>
+<p><strong>REST API клиент</strong>.<br>
+Это тонкий слой над <code>fetch</code>, который делает <code>GET/POST/PATCH/DELETE</code>, отправляет cookie и统一но обрабатывает ошибки. Плюсы: нет дублирования HTTP-логики по всему интерфейсу. Минусы: это не полноценный data layer уровня React Query, поэтому кеширование и ретраи реализованы вручную. Связь: все страницы ходят в бэкенд именно через него.</p>
+</li>
+<li>
+<p><strong>Окна и уведомления</strong>.<br>
+Это внутренний слой <code>DialogProvider</code>: toast, confirm, prompt. Он заменяет браузерные <code>alert/confirm/prompt</code> на UI в стиле приложения. Плюсы: единый визуальный стиль, контроль UX, предсказуемость. Минусы: нужно отдельно обслуживать доступность и поведение модалок. Связь: используется страницами проектов, обучения, редактора и каталога.</p>
+</li>
+<li>
+<p><strong>Опрос фоновых задач</strong>.<br>
+Это клиентский polling: фронтенд раз в небольшой интервал спрашивает статус задачи у <code>/api/background-tasks/{id}</code> и обновляет экран. Технология: периодический <code>GET</code>, без WebSocket. Плюсы: простота, надежность, легко отлаживать, для 3-5 пользователей этого достаточно. Минусы: есть лишние запросы и небольшая задержка обновления. Связь: используется для PDF, распознавания, pipeline-этапов, дообучения.</p>
+</li>
+<li>
+<p><strong>Редактор плана</strong>.<br>
+Это специализированный экран для работы с этажом: стены, проемы, помещения, ЗКСПС, извещатели, СОУЭ, маршруты. По сути это главный рабочий инструмент инженера. Методы: визуальное редактирование, ручная коррекция, подтверждение этапов pipeline. Плюсы: human-in-the-loop, то есть пользователь не зависит от “черного ящика” и может исправить результат. Минусы: редактор - самый сложный UI по состояниям и геометрии. Связь: получает данные этажа, вызывает detection/commit-операции и читает pipeline state.</p>
+</li>
+<li>
+<p><strong>Дообучение</strong>.<br>
+Это developer-only экран для управления примерами обратной связи, пакетами обучения, запусками и активацией моделей. Технологии: REST + polling. Алгоритмы: подготовка датасета, разбиение <code>train/val/test</code>, запуск обучения Ultralytics YOLO, чтение логов и метрик. Плюсы: система становится самоулучшаемой. Минусы: требует инфраструктуры данных и аккуратной валидации качества. Связь: использует recognition feedback, background tasks, storage и active models.</p>
+</li>
+<li>
+<p><strong>Проекты и PDF preview</strong>.<br>
+Это слой проектных карточек и просмотра PDF. Важно: preview открывает не “другой документ”, а нужную страницу уже сгенерированного проектного PDF. Плюсы: единый итоговый источник истины для печати и просмотра. Минусы: генерация тяжелая, поэтому выполняется через очередь. Связь: работает с проектами, PDF API, asset endpoints и background tasks.</p>
+</li>
+</ul>
+<p><strong>Бэкенд</strong></p>
+<ul>
+<li>
+<p><strong>FastAPI</strong>.<br>
+Это главный HTTP-вход в систему. Он маршрутизирует запросы, проверяет доступ, вызывает use cases и отдает JSON или файлы. Технологии: <code>FastAPI</code>, <code>SQLAlchemy</code>, dependency injection. Плюсы: быстрый запуск, ясная структура REST API, удобная валидация схемами. Минусы: при росте проекта нужно строго держать архитектурные границы, иначе все превратится в “толстый <a href="http://app.py">app.py</a>”. Связь: это точка входа для фронтенда.</p>
+</li>
+<li>
+<p><strong>Роутеры API</strong>.<br>
+Они разделяют домены по смыслу:<br>
+<code>auth/users</code> - вход, текущий пользователь, управление учетными записями;<br>
+<code>projects</code> - карточки проектов;<br>
+<code>floor-plans</code> - этажи и их загрузка;<br>
+<code>elements</code> - геометрические объекты на плане;<br>
+<code>equipment</code> - каталог оборудования и файлы;<br>
+<code>pipeline</code> - пошаговое распознавание и подтверждение этапов;<br>
+<code>recognition</code> - полное распознавание и сбор feedback;<br>
+<code>training</code> - примеры, batch, run, active model;<br>
+<code>pdf</code> - проектные документы и preview;<br>
+<code>assets</code> - защищенная выдача файлов;<br>
+<code>background-tasks</code> - статусы очереди.<br>
+Плюс такого разбиения - хороший модульный контур. Минус - нужно следить, чтобы логика не дублировалась между роутером и сервисом.</p>
+</li>
+<li>
+<p><strong>Project Service</strong>.<br>
+Управляет CRUD проекта, владельцем, проектными документами и связанными сущностями. Это доменный сервис, а не просто SQL-обертка. Плюс: проект становится центром предметной модели. Минус: на нем завязано много функциональности. Связь: с проектами, этажами, оборудованием, PDF.</p>
+</li>
+<li>
+<p><strong>Floor Plan Service</strong>.<br>
+Управляет загрузкой и параметрами этажей: изображение, размеры, масштаб, высота, связь с проектом. Плюс: отдельная зона ответственности для этажей. Минус: масштаб и геометрия чувствительны к качеству исходного изображения. Связь: с storage, project service, pipeline и editor.</p>
+</li>
+<li>
+<p><strong>Pipeline Service</strong>.<br>
+Это оркестратор пошаговой обработки плана: стены -&gt; проемы -&gt; помещения -&gt; ЗКСПС. Он отделяет “обнаружить” от “подтвердить”. Методы и алгоритмы: препроцессинг изображения, морфология, OCR размеров, детекция стен, поиск разрывов вдоль стен, классификация проемов, contour-based detection помещений, state machine этапов. Плюсы: объяснимость, поэтапная валидация, возможность ручной коррекции. Минусы: сложнее, чем один black-box inference; нужен UX для каждого шага. Связь: с floor plan, editor, feedback и recognition/training.</p>
+</li>
+<li>
+<p><strong>Recognition Service</strong>.<br>
+Это сценарий полного автоматического распознавания плана за один запуск. Он использует интегратор распознавания, преобразует результат в сущности БД и сохраняет артефакты. Технологии и алгоритмы: <code>OpenCV</code>, OCR, геометрические преобразования, интеграция с <code>floorplan</code> module; при наличии активной модели часть шагов может идти через дообученный детектор. Плюсы: быстрый старт и автоматизация. Минусы: чувствителен к шуму, качеству скана и разнообразию планов. Связь: с queue/worker, floor plans, storage, feedback examples.</p>
+</li>
+<li>
+<p><strong>Training Service</strong>.<br>
+Это сервис управления жизненным циклом дообучения. Алгоритмы: отбор примеров, экспорт batch, генерация датасета в формате YOLO, автоматическое разбиение <code>train/val/test</code>, запуск <code>Ultralytics YOLO</code>, сбор метрик, активация лучшего чекпоинта. Технологии: <code>Ultralytics</code>, <code>PyTorch</code>, файловые артефакты, метрики, логи. Плюсы: модель улучшается на реальных исправлениях пользователей. Минусы: нужно контролировать качество размеченных данных и reproducibility. Связь: с feedback, background tasks, storage, active models.</p>
+</li>
+<li>
+<p><strong>PDF Service</strong>.<br>
+Генерирует итоговый комплект проектных документов и умеет вычислять, на какой странице находится конкретный этап для preview. Важный принцип: preview не создает новый PDF на каждый клик, а использует последний сгенерированный документ и только ищет нужную страницу. Плюсы: единый итоговый артефакт, меньше рассинхронизации. Минусы: если PDF устарел, его надо сначала пересобрать. Связь: с projects, documents, storage, assets, worker.</p>
+</li>
+<li>
+<p><strong>Storage Service</strong>.<br>
+Это абстракция хранения файлов: изображения этажей, изображения оборудования, PDF, логи, артефакты обучения. Сейчас логика уже отделена от UI и выдает <code>asset_url</code>, а не локальный путь. Это очень правильно архитектурно. Плюсы: фронтенд не знает о файловой системе сервера, легче миграция на объектное хранилище. Минусы: нужно поддерживать жизненный цикл файлов и чистку артефактов. Связь: практически со всеми доменами.</p>
+</li>
+<li>
+<p><strong>Очередь задач / Worker</strong>.<br>
+Это ключевой оптимизационный элемент. HTTP-запрос не ждет тяжелую операцию, а ставит задачу в таблицу <code>background_tasks</code>; worker забирает ее, выполняет и пишет результат. Методы: FIFO по времени создания, статусы <code>queued/running/succeeded/failed/canceled</code>, <code>dedupe_key</code> для недопущения дубликатов. Плюсы: UI не зависает, сервер устойчивее под нагрузкой, операции наблюдаемы. Минусы: нужен polling, мониторинг и аккуратная обработка ошибок. Связь: между API, доменными сервисами, БД и storage.</p>
+</li>
+<li>
+<p><strong>Распознавание / Дообучение модели / Генерация PDF</strong>.<br>
+Это типовые тяжелые фоновые задачи. Они вынесены отдельно, потому что затратны по CPU/GPU/IO. Плюсы: одинаковая модель управления для разных типов нагрузки. Минусы: сложнее трассировка, чем у синхронного вызова. Связь: запускаются через API, исполняются worker'ом, результаты сохраняют в БД и storage.</p>
+</li>
+<li>
+<p><strong>PostgreSQL / БД</strong>.<br>
+На схеме это обозначение основной реляционной БД приложения. По смыслу она хранит проекты, этажи, элементы, состояния pipeline, run'ы обучения, активные модели, очередь задач и связи между ними. Плюсы: транзакционность, согласованность данных, связи, фильтрация и аудит. Минусы: схема сложнее, чем у file-based хранения. Важная честная оговорка: в коде есть <code>SQLAlchemy</code> и fallback на SQLite, но для production-логики такого типа правильная целевая БД - PostgreSQL.</p>
+</li>
+<li>
+<p><strong>S3-совместимое хранилище</strong>.<br>
+На схеме это объектное хранилище для файлов и артефактов. Архитектурно смысл правильный: файлы отделяются от вычисляющей машины. В текущем коде уже есть объектная модель путей и asset proxy, но фактическая реализация пока ближе к локальному object-storage каталогу, чем к настоящему S3/MinIO. Плюсы: масштабируемость, независимость от локального диска контейнера/сервера. Минусы: требует отдельного жизненного цикла, прав доступа и очистки объектов. Связь: с PDF, training, equipment, floor plans, asset endpoints.</p>
+</li>
+<li>
+<p><strong>Assets / PDF endpoints</strong>.<br>
+Это защищенные URL вида <code>/api/assets/...</code>, через которые фронтенд получает файлы по backend-issued URL, а не по прямому пути на диск. Плюсы: безопасность, единый контракт, возможность скрыть реальное хранилище. Минусы: backend становится прокси для файловой раздачи. Связь: с storage и frontend preview.</p>
+</li>
+</ul>
+<p><strong>Какие алгоритмы здесь реально дают “интеллект”</strong></p>
+<ul>
+<li>Для обработки плана используются классические CV-методы: <code>preprocess</code>, <code>Canny</code>, <code>HoughLinesP</code>, морфологические операции, contour detection, OCR размеров через <code>Tesseract</code>, геометрическая привязка размеров к стенам.</li>
+<li>Для дообучения используются модели <code>Ultralytics YOLO</code>; сервис сам собирает датасет, пишет <code>dataset.yaml</code>, готовит <code>train/val/test</code>, запускает обучение и сохраняет <code>best.pt</code>, <code>last.pt</code>, <code>metrics.json</code>.</li>
+<li>Для ЗКСПС используется геометрическое объединение полигонов помещений через <code>Shapely unary_union</code>, поэтому внутренние границы скрываются, а отображается внешний контур зоны.</li>
+<li>Для автопроектирования сигнализации и СОУЭ применяются эвристики и геометрические политики, а не просто ручная расстановка.</li>
+</ul>
+<p><strong>Почему эта архитектура вообще ценна</strong></p>
+<ul>
+<li>Она <strong>объяснимая</strong>: можно показать, где именно принимается каждое решение.</li>
+<li>Она <strong>расширяемая</strong>: это модульный монолит, а не хаотичный монолит.</li>
+<li>Она <strong>устойчива к нагрузке</strong>: тяжелые действия вынесены в очередь.</li>
+<li>Она <strong>поддерживает цикл улучшения качества</strong>: пользователь исправил результат -&gt; это стало training data -&gt; модель можно улучшить.</li>
+<li>Она <strong>отделяет данные от вычислений</strong>: БД хранит структуру, storage хранит бинарные артефакты.</li>
+</ul>
+<p><strong>Что честно сказать про ограничения на защите</strong></p>
+<ul>
+<li>Polling проще WebSocket и для 3-5 пользователей оправдан, но для большого числа активных пользователей WebSocket был бы эффективнее.</li>
+<li>Очередь уже есть, но для truly production multi-worker режима лучше усиливать claim-механику блокировками уровня PostgreSQL.</li>
+<li>Абстракция object storage уже правильная, но фактическую реализацию стоит довести до полноценного MinIO/S3.</li>
+<li>OCR и CV чувствительны к качеству входных планов; это не магия, а инженерный компромисс.</li>
+<li>Модульный монолит выбран осознанно: для этого масштаба он выгоднее микросервисов по сложности эксплуатации.</li>
+</ul>
+<p><strong>Одной фразой для защиты</strong></p>
+<p>Можешь формулировать так:<br>
+<code>Я построил модульную систему проектирования, где интерактивный React-фронтенд управляет проектом, а тяжелые вычисления — распознавание, дообучение и генерация PDF — вынесены в асинхронную очередь, результаты хранятся транзакционно в реляционной БД, а файлы и артефакты отделены через объектное хранилище и выдаются через backend-controlled asset endpoints.</code></p>
+<p>Если хочешь, следующим сообщением я могу сделать тебе еще и <strong>готовый текст на 3-5 минут для защиты</strong>, плюс <strong>список типовых вопросов комиссии с сильными ответами</strong>.</p>
+
+            
+            
+        </body>
+        </html>
