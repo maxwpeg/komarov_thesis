@@ -58,6 +58,9 @@ test('create project submits facility case fields and selected owner for develop
   expect(instrumentalInput).not.toBeNull();
   expect(ownerSelect).not.toBeNull();
   expect(submitButton).not.toBeNull();
+  await waitFor(() => {
+    expect(ownerSelect.querySelector('option[value="11"]')).not.toBeNull();
+  });
 
   await userEvent.type(nameInput, 'Проект 01');
   await userEvent.type(facilityInput, 'Административное здание');
@@ -78,6 +81,7 @@ test('create project submits facility case fields and selected owner for develop
       facility: 'Административное здание',
       facility_genitive: 'Административного здания',
       facility_instrumental: 'Административным зданием',
+      engineer: 'Engineer One',
       owner_user_id: 11,
     }));
   });

@@ -14,6 +14,7 @@ from backend.modules.shared.infrastructure.persistence.models import (
 from backend.modules.floor_plans.domain.entities import FloorPlanRecord
 from backend.modules.floor_plans.ports.repositories import FloorPlanRepository
 from backend.modules.shared.application.ports import FileStoragePort
+from backend.storage_metadata import record_managed_file, remove_managed_file
 from backend.schemas import FloorPlanCreate, FloorPlanUpdate
 
 
@@ -37,6 +38,7 @@ class SqlAlchemyFloorPlanRepository(FloorPlanRepository):
             ceiling_height_mm=payload.ceiling_height_mm,
             active_signal_system_type=payload.active_signal_system_type,
         )
+        saved = None
         if upload_file is not None:
             saved = self.storage.save_upload(upload_file, payload.project_id, payload.floor_number)
             floor_plan.original_image_path = saved.relative_path
@@ -45,6 +47,13 @@ class SqlAlchemyFloorPlanRepository(FloorPlanRepository):
 
         self.session.add(floor_plan)
         self.session.flush()
+        if saved is not None:
+            record_managed_file(
+                self.session,
+                saved,
+                project_id=payload.project_id,
+                floor_plan_id=floor_plan.id,
+            )
         return FloorPlanRecord.from_model(floor_plan, include_elements=True)
 
     def get(self, floor_plan_id: int, include_elements: bool = True) -> FloorPlanRecord:
@@ -74,7 +83,10 @@ class SqlAlchemyFloorPlanRepository(FloorPlanRepository):
 
     def delete(self, floor_plan_id: int) -> None:
         floor_plan = self._get_model(floor_plan_id, include_elements=False)
+        remove_managed_file(self.session, floor_plan.original_image_path)
+        remove_managed_file(self.session, floor_plan.processed_image_path)
         self.storage.delete_relative_path(floor_plan.original_image_path)
+        self.storage.delete_relative_path(floor_plan.processed_image_path)
         self.session.delete(floor_plan)
         self.session.flush()
 

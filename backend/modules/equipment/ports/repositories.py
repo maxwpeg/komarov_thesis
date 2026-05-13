@@ -31,6 +31,9 @@ class EquipmentRepository(Protocol):
     def set_item_image(self, equipment_id: int, upload_file: UploadFile) -> EquipmentItemRecord:
         """Persist and attach an uploaded image to an equipment item."""
 
+    def set_item_connection_diagram(self, equipment_id: int, upload_file: UploadFile) -> EquipmentItemRecord:
+        """Persist and attach an uploaded connection diagram image to an equipment item."""
+
     def set_item_label_pdf(self, equipment_id: int, upload_file: UploadFile) -> EquipmentItemRecord:
         """Persist and attach an uploaded label PDF to an equipment item."""
 

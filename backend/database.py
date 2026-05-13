@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Generator
 
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, event, inspect
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -18,7 +18,20 @@ def create_db_engine(database_url: str | None = None) -> Engine:
     """Create a SQLAlchemy engine for the configured database."""
     url = database_url or settings.database_url
     if url.startswith("sqlite"):
-        return create_engine(url, connect_args={"check_same_thread": False})
+        sqlite_engine = create_engine(url, connect_args={"check_same_thread": False})
+
+        @event.listens_for(sqlite_engine, "connect")
+        def _configure_sqlite_connection(dbapi_connection, _connection_record) -> None:
+            cursor = dbapi_connection.cursor()
+            try:
+                cursor.execute("PRAGMA foreign_keys=ON")
+                cursor.execute(f"PRAGMA busy_timeout={settings.sqlite_busy_timeout_ms}")
+                cursor.execute("PRAGMA journal_mode=WAL")
+                cursor.execute("PRAGMA synchronous=NORMAL")
+            finally:
+                cursor.close()
+
+        return sqlite_engine
     return create_engine(url, pool_pre_ping=True)
 
 
@@ -252,6 +265,8 @@ def _ensure_backward_compatible_columns() -> None:
                 connection.exec_driver_sql("ALTER TABLE equipment_items ADD COLUMN notes TEXT")
             if "specs" not in equipment_columns:
                 connection.exec_driver_sql("ALTER TABLE equipment_items ADD COLUMN specs JSON")
+            if "connection_diagram_path" not in equipment_columns:
+                connection.exec_driver_sql("ALTER TABLE equipment_items ADD COLUMN connection_diagram_path VARCHAR(500)")
             if "label_pdf_path" not in equipment_columns:
                 connection.exec_driver_sql("ALTER TABLE equipment_items ADD COLUMN label_pdf_path VARCHAR(500)")
             if "manual_pdf_path" not in equipment_columns:
@@ -284,6 +299,11 @@ def _ensure_backward_compatible_columns() -> None:
                 )
 
         if "projects" in table_names:
+            project_columns = {column["name"] for column in inspector.get_columns("projects")}
+            if "deleted_at" not in project_columns:
+                connection.exec_driver_sql("ALTER TABLE projects ADD COLUMN deleted_at DATETIME")
+            if "deleted_by_user_id" not in project_columns:
+                connection.exec_driver_sql("ALTER TABLE projects ADD COLUMN deleted_by_user_id INTEGER")
             connection.exec_driver_sql(
                 """
                 UPDATE projects
@@ -491,6 +511,13 @@ def _ensure_performance_indexes() -> None:
         "CREATE INDEX IF NOT EXISTS ix_background_tasks_project_status ON background_tasks (project_id, status)",
         "CREATE INDEX IF NOT EXISTS ix_background_tasks_floor_plan_status ON background_tasks (floor_plan_id, status)",
         "CREATE INDEX IF NOT EXISTS ix_background_tasks_requested_by_status ON background_tasks (requested_by_user_id, status)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS ix_managed_files_path ON managed_files (path)",
+        "CREATE INDEX IF NOT EXISTS ix_managed_files_project_id ON managed_files (project_id)",
+        "CREATE INDEX IF NOT EXISTS ix_managed_files_floor_plan_id ON managed_files (floor_plan_id)",
+        "CREATE INDEX IF NOT EXISTS ix_managed_files_equipment_id ON managed_files (equipment_id)",
+        "CREATE INDEX IF NOT EXISTS ix_managed_files_created_by_user_id ON managed_files (created_by_user_id)",
+        "CREATE INDEX IF NOT EXISTS ix_managed_files_sha256 ON managed_files (sha256)",
+        "CREATE INDEX IF NOT EXISTS ix_managed_files_last_seen_at ON managed_files (last_seen_at)",
         "CREATE INDEX IF NOT EXISTS ix_audit_events_created_at ON audit_events (created_at)",
         "CREATE INDEX IF NOT EXISTS ix_audit_events_floor_plan_step ON audit_events (floor_plan_id, pipeline_step)",
         "CREATE INDEX IF NOT EXISTS ix_audit_events_project_use_case ON audit_events (project_id, use_case)",
@@ -499,6 +526,9 @@ def _ensure_performance_indexes() -> None:
         "CREATE INDEX IF NOT EXISTS ix_project_equipment_selections_equipment_id ON project_equipment_selections (equipment_id)",
         "CREATE UNIQUE INDEX IF NOT EXISTS ix_project_equipment_links_project_equipment ON project_equipment_links (project_id, equipment_id)",
         "CREATE INDEX IF NOT EXISTS ix_project_equipment_links_equipment_id ON project_equipment_links (equipment_id)",
+        "CREATE INDEX IF NOT EXISTS ix_projects_deleted_at ON projects (deleted_at)",
+        "CREATE INDEX IF NOT EXISTS ix_projects_owner_deleted ON projects (owner_user_id, deleted_at)",
+        "CREATE INDEX IF NOT EXISTS ix_projects_deleted_by_user ON projects (deleted_by_user_id)",
         "CREATE INDEX IF NOT EXISTS ix_equipment_compatibility_links_equipment_id ON equipment_compatibility_links (equipment_id)",
         "CREATE INDEX IF NOT EXISTS ix_equipment_compatibility_links_compatible_id ON equipment_compatibility_links (compatible_equipment_id)",
         "CREATE INDEX IF NOT EXISTS ix_fire_alarms_equipment_id ON fire_alarms (equipment_id)",

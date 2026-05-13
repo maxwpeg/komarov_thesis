@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
-from backend.auth import AuthenticatedUser, require_current_user
+from backend.auth import AuthenticatedUser, require_current_user, require_developer
 from backend.database import get_db
 from backend.errors import AppError
 from backend.mappers import background_task_read
@@ -60,4 +60,15 @@ def get_background_task(
     service = BackgroundTaskService(db)
     task = service.get_task(task_id)
     _ensure_task_access(task, current_user)
+    return background_task_read(task)
+
+
+@router.post("/api/background-tasks/{task_id}/cancel", response_model=BackgroundTaskRead)
+def cancel_background_task(
+    task_id: int,
+    db: Session = Depends(get_db),
+    _: AuthenticatedUser = Depends(require_developer),
+) -> BackgroundTaskRead:
+    service = BackgroundTaskService(db)
+    task = service.cancel(task_id, message="Task canceled by administrator")
     return background_task_read(task)

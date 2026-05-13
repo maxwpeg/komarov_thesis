@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Cookie, Depends, Response
+from fastapi import APIRouter, Cookie, Depends, Request, Response
 from sqlalchemy.orm import Session
 
+from backend.audit import record_audit_event
 from backend.auth import (
     AuthenticatedUser,
     authenticate_credentials,
@@ -16,7 +17,9 @@ from backend.auth import (
 )
 from backend.config import settings
 from backend.database import get_db
+from backend.errors import AppError
 from backend.schemas import CurrentUserRead, LoginRequest, MessageRead
+from backend.security import enforce_rate_limit
 
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -38,12 +41,38 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 )
 def login(
     payload: LoginRequest,
+    request: Request,
     response: Response,
     db: Session = Depends(get_db),
 ) -> CurrentUserRead:
-    user = authenticate_credentials(db, payload.username, payload.password)
+    enforce_rate_limit(
+        request,
+        "auth_login",
+        discriminator=payload.username,
+        limit=settings.login_rate_limit_count,
+        window_seconds=settings.login_rate_limit_window_seconds,
+    )
+    try:
+        user = authenticate_credentials(db, payload.username, payload.password)
+    except AppError:
+        record_audit_event(
+            db,
+            "auth_login_failed",
+            use_case="Login",
+            payload={"username": payload.username, "client": request.client.host if request.client else None},
+        )
+        db.commit()
+        raise
     token = create_auth_session(db, user)
     set_auth_cookie(response, token)
+    record_audit_event(
+        db,
+        "auth_login_succeeded",
+        use_case="Login",
+        user_id=int(user.id),
+        payload={"username": user.username, "client": request.client.host if request.client else None},
+    )
+    db.commit()
     return CurrentUserRead.model_validate(user.to_dict())
 
 
@@ -70,6 +99,8 @@ def logout(
 ) -> MessageRead:
     invalidate_session_by_token(db, raw_token)
     clear_auth_cookie(response)
+    record_audit_event(db, "auth_logout", use_case="Logout", payload={"had_cookie": bool(raw_token)})
+    db.commit()
     return MessageRead(message="Logged out")
 
 

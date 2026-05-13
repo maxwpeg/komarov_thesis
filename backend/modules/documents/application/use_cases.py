@@ -44,6 +44,8 @@ class DocumentsUseCases:
         specification = self.repository.get_project_equipment_specification(project_id)
         power_consumption_calculation = self.repository.get_project_power_consumption_calculation(project_id)
         additional_info = self.repository.get_project_additional_info(project_id)
+        structural_scheme = self.repository.get_project_structural_scheme(project_id)
+        connection_diagrams = self.repository.get_project_connection_diagrams(project_id)
         pdf_path = self.pdf_port.generate(
             project_data=project.to_dict(),
             floor_plans_data=[floor_plan.to_dict(include_elements=True) for floor_plan in floor_plans],
@@ -53,6 +55,8 @@ class DocumentsUseCases:
             equipment_specification=specification,
             power_consumption_calculation=power_consumption_calculation,
             additional_info=additional_info,
+            structural_scheme=structural_scheme,
+            connection_diagrams=connection_diagrams,
             output_dir=str(settings.outputs_dir),
         )
         self.events.publish(

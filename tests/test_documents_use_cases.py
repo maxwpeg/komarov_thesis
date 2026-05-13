@@ -80,6 +80,15 @@ class _FakeRepository:
             "decode_lines": [],
         }
 
+    def get_project_structural_scheme(self, project_id: int):
+        return {
+            "project_id": project_id,
+            "page_title": "Структурная схема СПС и СОУЭ",
+            "floors": [],
+            "instruments": [],
+            "equipment_totals": [],
+        }
+
     def get_project_power_consumption_calculation(self, project_id: int):
         return {
             "project_id": project_id,
@@ -99,6 +108,15 @@ class _FakeRepository:
             "is_empty": True,
             "blocks": [],
         }
+
+    def get_project_connection_diagrams(self, project_id: int):
+        return [
+            {
+                "equipment_id": 101,
+                "name": "Smoke A",
+                "connection_diagram_path": "equipment/101/connection_diagram.png",
+            }
+        ]
 
     def update_project_equipment_specification(self, project_id: int, payload):
         _ = payload
@@ -154,6 +172,8 @@ class _FakePdfPort:
         equipment_specification: dict | None,
         power_consumption_calculation: dict | None,
         additional_info: dict | None,
+        structural_scheme: dict | None,
+        connection_diagrams: list[dict] | None,
         output_dir: str,
     ) -> str:
         self.calls.append(
@@ -166,6 +186,8 @@ class _FakePdfPort:
                 "equipment_specification": equipment_specification,
                 "power_consumption_calculation": power_consumption_calculation,
                 "additional_info": additional_info,
+                "structural_scheme": structural_scheme,
+                "connection_diagrams": connection_diagrams,
                 "output_dir": output_dir,
             }
         )
@@ -191,6 +213,8 @@ def test_generate_project_pdf_uses_read_repository_and_pdf_port():
     assert pdf_port.calls[0]["equipment_specification"]["project_id"] == 7
     assert pdf_port.calls[0]["power_consumption_calculation"]["page_title"] == "Power"
     assert pdf_port.calls[0]["additional_info"]["page_title"] == "Доп. сведения"
+    assert pdf_port.calls[0]["structural_scheme"]["page_title"] == "Структурная схема СПС и СОУЭ"
+    assert pdf_port.calls[0]["connection_diagrams"][0]["equipment_id"] == 101
 
 
 def test_generate_project_pdf_requires_at_least_one_floor_plan():

@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 
 import { backgroundTasksApi } from '../api/client';
+import { useDialogs } from '../ui/DialogProvider';
 
 const TASK_TYPE_LABELS = {
   recognition_process: 'Распознавание плана',
@@ -48,10 +49,12 @@ function getTaskStatusLabel(status) {
 }
 
 export default function WorkerTasksPage() {
+  const { confirm, toast } = useDialogs();
   const [tasks, setTasks] = useState([]);
   const [filters, setFilters] = useState(INITIAL_FILTERS);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [cancelingTaskId, setCancelingTaskId] = useState(null);
   const [error, setError] = useState('');
 
   const loadTasks = useCallback(async ({ silent = false } = {}) => {
@@ -90,6 +93,28 @@ export default function WorkerTasksPage() {
   const availableTaskTypes = useMemo(() => (
     Array.from(new Set(tasks.map((task) => task.task_type).filter(Boolean))).sort()
   ), [tasks]);
+
+  const handleCancelTask = async (taskId) => {
+    const isConfirmed = await confirm(`Отменить задачу #${taskId}?`, {
+      confirmLabel: 'Отменить задачу',
+      cancelLabel: 'Назад',
+    });
+    if (!isConfirmed) {
+      return;
+    }
+    setCancelingTaskId(taskId);
+    setError('');
+    try {
+      await backgroundTasksApi.cancel(taskId);
+      await loadTasks({ silent: true });
+      toast(`Задача #${taskId} отменена.`, { tone: 'info' });
+    } catch (cancelError) {
+      console.error('Error canceling worker task:', cancelError);
+      setError(cancelError.message);
+    } finally {
+      setCancelingTaskId(null);
+    }
+  };
 
   return (
     <div className="project-list-container">
@@ -192,6 +217,7 @@ export default function WorkerTasksPage() {
                 <th>Старт</th>
                 <th>Финиш</th>
                 <th>Ошибка / результат</th>
+                <th>Действия</th>
               </tr>
             </thead>
             <tbody>
@@ -213,6 +239,18 @@ export default function WorkerTasksPage() {
                   <td>{formatDateTime(task.finished_at)}</td>
                   <td className="worker-tasks-table__message">
                     {task.error_message || task.resource_path || '—'}
+                  </td>
+                  <td>
+                    {task.status === 'queued' ? (
+                      <button
+                        type="button"
+                        className="btn btn-danger"
+                        onClick={() => handleCancelTask(task.id)}
+                        disabled={cancelingTaskId === task.id}
+                      >
+                        {cancelingTaskId === task.id ? 'Отмена...' : 'Отменить'}
+                      </button>
+                    ) : '—'}
                   </td>
                 </tr>
               ))}

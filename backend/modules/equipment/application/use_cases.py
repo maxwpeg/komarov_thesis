@@ -35,6 +35,9 @@ class EquipmentUseCases:
     def set_item_image(self, equipment_id: int, upload_file: UploadFile) -> EquipmentItemRecord:
         return self._write(lambda: self.repository.set_item_image(equipment_id, upload_file))
 
+    def set_item_connection_diagram(self, equipment_id: int, upload_file: UploadFile) -> EquipmentItemRecord:
+        return self._write(lambda: self.repository.set_item_connection_diagram(equipment_id, upload_file))
+
     def set_item_label_pdf(self, equipment_id: int, upload_file: UploadFile) -> EquipmentItemRecord:
         return self._write(lambda: self.repository.set_item_label_pdf(equipment_id, upload_file))
 

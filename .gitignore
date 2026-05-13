@@ -28,7 +28,10 @@ Thumbs.db
 uploads/
 outputs/
 debug_output/
+storage_objects/
 floor_plans.db
+project_counter.json
+user_feedback.json
 
 # Binary documents and images
 *.pdf

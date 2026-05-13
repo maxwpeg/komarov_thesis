@@ -16,7 +16,7 @@ function CreateProject() {
     project_type: 'ПС',
     year: CURRENT_YEAR,
     contractor: 'ООО "Флагман-СБ"',
-    engineer: user?.full_name ?? '',
+    engineer: isDeveloper ? '' : (user?.full_name ?? ''),
     cpe: 'Гостев В.В.',
     checker: 'Комаров С.Л.',
     facility: '',
@@ -73,6 +73,12 @@ function CreateProject() {
           nextState.facility_instrumental = value;
         }
       }
+      if (name === 'owner_user_id') {
+        const selectedEngineer = engineers.find((engineer) => engineer.id === Number(value));
+        if (selectedEngineer) {
+          nextState.engineer = selectedEngineer.full_name;
+        }
+      }
       return nextState;
     });
   };
@@ -88,6 +94,12 @@ function CreateProject() {
           ? (formData.owner_user_id === '' ? null : Number(formData.owner_user_id))
           : undefined,
       };
+      if (isDeveloper && payload.owner_user_id !== null) {
+        const selectedEngineer = engineers.find((engineer) => engineer.id === payload.owner_user_id);
+        if (selectedEngineer) {
+          payload.engineer = selectedEngineer.full_name;
+        }
+      }
       if (!isDeveloper) {
         delete payload.owner_user_id;
       }

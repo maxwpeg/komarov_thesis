@@ -21,10 +21,20 @@ class ProjectService:
         self.db = db
 
     def list_projects(self, skip: int = 0, limit: int = 100) -> list[ProjectModel]:
-        return self.db.query(ProjectModel).offset(skip).limit(limit).all()
+        return (
+            self.db.query(ProjectModel)
+            .filter(ProjectModel.deleted_at.is_(None))
+            .offset(skip)
+            .limit(limit)
+            .all()
+        )
 
     def get_project(self, project_id: int) -> ProjectModel:
-        project = self.db.query(ProjectModel).filter(ProjectModel.id == project_id).first()
+        project = (
+            self.db.query(ProjectModel)
+            .filter(ProjectModel.id == project_id, ProjectModel.deleted_at.is_(None))
+            .first()
+        )
         if project is None:
             raise AppError(404, "project_not_found", "Project not found")
         normalized_code = normalize_project_code(project.code)
@@ -89,6 +99,15 @@ class ProjectService:
 
     def delete_project(self, project_id: int) -> None:
         project = self.get_project(project_id)
+        now = datetime.now(timezone.utc)
+        project.deleted_at = now
+        project.updated_at = now
+        self.db.commit()
+
+    def permanently_delete_project(self, project_id: int) -> None:
+        project = self.db.query(ProjectModel).filter(ProjectModel.id == project_id).first()
+        if project is None:
+            raise AppError(404, "project_not_found", "Project not found")
         self.db.delete(project)
         self.db.commit()
 

@@ -5,6 +5,10 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfgen import canvas
 
 from Page import Page
+from backend.modules.documents.specification import (
+    DEFAULT_EQUIPMENT_SPECIFICATION_COLUMN_HEADERS,
+    DEFAULT_EQUIPMENT_SPECIFICATION_PAGE_TITLE,
+)
 from consts import (
     CENTER,
     DEFAULT_BORDER_COLOR,
@@ -42,13 +46,18 @@ class SpecificationPage(Page):
         creds: dict[str, str] | None = None,
         page_number: int = 1,
     ):
+        resolved_specification = specification or {}
+        page_creds = dict(creds or {})
+        page_creds["Title of the Drawing"] = str(
+            resolved_specification.get("page_title") or DEFAULT_EQUIPMENT_SPECIFICATION_PAGE_TITLE
+        )
         super().__init__(
             page_format=page_format,
             main_title_box_type=main_title_box_type,
-            creds=creds or {},
+            creds=page_creds,
             page_number=page_number,
         )
-        self.specification = specification or {}
+        self.specification = resolved_specification
         self._cell_padding_x = 1.6 * mm
         self._cell_padding_y = 1.2 * mm
         self._line_height = DEFAULT_FONT_SIZE * 1.15
@@ -95,10 +104,13 @@ class SpecificationPage(Page):
         return longest + self._cell_padding_x * 2
 
     def _build_rows(self) -> list[dict]:
+        headers = list(self.specification.get("column_headers") or DEFAULT_EQUIPMENT_SPECIFICATION_COLUMN_HEADERS)
+        if len(headers) < len(_ROW_FIELDS):
+            headers.extend([""] * (len(_ROW_FIELDS) - len(headers)))
         rows: list[dict] = [
             {
                 "kind": "header",
-                "values": list(self.specification.get("column_headers") or []),
+                "values": headers[: len(_ROW_FIELDS)],
             }
         ]
         for section in self.specification.get("sections") or []:
@@ -114,7 +126,7 @@ class SpecificationPage(Page):
         return rows
 
     def _compute_column_widths(self, rows: list[dict], total_width: float) -> list[float]:
-        headers = list(self.specification.get("column_headers") or [])
+        headers = list(self.specification.get("column_headers") or DEFAULT_EQUIPMENT_SPECIFICATION_COLUMN_HEADERS)
         natural_widths = [
             max(self._min_column_widths[index], self._measure_natural_width(headers[index] if index < len(headers) else "", font_name=DEFAULT_FONT_NAME))
             for index in range(len(_ROW_FIELDS))

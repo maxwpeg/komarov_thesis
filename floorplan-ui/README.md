@@ -1,70 +1,86 @@
-# Getting Started with Create React App
+# Фронтенд проекта
 
-This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
+## 1. Назначение
 
-## Available Scripts
+Данный репозиторий содержит клиентскую часть приложения для работы с проектами пожарной сигнализации и СОУЭ. Фронтенд предоставляет интерфейс для авторизации, управления проектами, редактирования планов этажей, выбора оборудования, просмотра PDF и работы с задачами.
 
-In the project directory, you can run:
+## 2. Состав репозитория
 
-### `npm start`
+В frontend-репозитории должны находиться:
 
-Runs the app in the development mode.\
-Open [http://localhost:3000](http://localhost:3000) to view it in your browser.
+- `src/` - исходный код React-приложения.
+- `public/` - публичные статические файлы.
+- `scripts/` - служебные скрипты запуска тестов.
+- `package.json` и `package-lock.json` - зависимости и команды проекта.
+- `.gitignore` - исключения для Git.
+- `README.md` - описание проекта и инструкция запуска.
 
-The page will reload when you make changes.\
-You may also see any lint errors in the console.
+Папки `backend/`, `alembic/`, `floorplan/`, `tests/`, `tools/` и корневые Python-файлы относятся к backend-репозиторию и во frontend-репозиторий не переносятся.
 
-### `npm test`
+## 3. Требования
 
-Launches the test runner in the interactive watch mode.\
-See the section about [running tests](https://facebook.github.io/create-react-app/docs/running-tests) for more information.
+- Node.js 20 LTS или совместимая версия.
+- npm.
+- Запущенный backend API.
 
-### `npm run build`
+## 4. Переменные окружения
 
-Builds the app for production to the `build` folder.\
-It correctly bundles React in production mode and optimizes the build for the best performance.
+Если frontend запускается через `npm start`, можно использовать proxy из `package.json`:
 
-The build is minified and the filenames include the hashes.\
-Your app is ready to be deployed!
+```json
+"proxy": "http://127.0.0.1:8000"
+```
 
-See the section about [deployment](https://facebook.github.io/create-react-app/docs/deployment) for more information.
+Если frontend и backend находятся на разных адресах без proxy, нужно создать файл `.env`:
 
-### `npm run eject`
+```env
+REACT_APP_API_BASE_URL=http://127.0.0.1:8000
+```
 
-**Note: this is a one-way operation. Once you `eject`, you can't go back!**
+После изменения `.env` нужно перезапустить frontend.
 
-If you aren't satisfied with the build tool and configuration choices, you can `eject` at any time. This command will remove the single build dependency from your project.
+## 5. Локальный запуск
 
-Instead, it will copy all the configuration files and the transitive dependencies (webpack, Babel, ESLint, etc) right into your project so you have full control over them. All of the commands except `eject` will still work, but they will point to the copied scripts so you can tweak them. At this point you're on your own.
+```powershell
+npm install
+npm start
+```
 
-You don't have to ever use `eject`. The curated feature set is suitable for small and middle deployments, and you shouldn't feel obligated to use this feature. However we understand that this tool wouldn't be useful if you couldn't customize it when you are ready for it.
+Приложение откроется на адресе:
 
-## Learn More
+```text
+http://127.0.0.1:3000
+```
 
-You can learn more in the [Create React App documentation](https://facebook.github.io/create-react-app/docs/getting-started).
+## 6. Проверка
 
-To learn React, check out the [React documentation](https://reactjs.org/).
+```powershell
+npm test -- --watch=false
+```
 
-### Code Splitting
+Сборка production-версии:
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/code-splitting](https://facebook.github.io/create-react-app/docs/code-splitting)
+```powershell
+npm run build
+```
 
-### Analyzing the Bundle Size
+## 7. Инструкция по переносу в отдельный репозиторий
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size](https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size)
+1. Создать пустой репозиторий `fire-alarm-frontend`.
+2. Скопировать в него содержимое папки `floorplan-ui/`.
+3. Проверить, что `package.json` находится в корне нового репозитория.
+4. Не переносить папки:
+   - `node_modules/`;
+   - `build/`;
+   - `coverage/`;
+   - временные логи.
+5. Установить зависимости командой `npm install`.
+6. Настроить `.env`, если backend находится не на `http://127.0.0.1:8000`.
+7. Запустить приложение командой `npm start`.
+8. Проверить вход в систему, список проектов, открытие проекта, просмотр PDF и скачивание PDF.
 
-### Making a Progressive Web App
+## 8. Связь с backend
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app](https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app)
+Фронтенд обращается к API по путям вида `/api/...`. При локальной разработке эти запросы перенаправляются через proxy. При раздельном размещении используется переменная `REACT_APP_API_BASE_URL`.
 
-### Advanced Configuration
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/advanced-configuration](https://facebook.github.io/create-react-app/docs/advanced-configuration)
-
-### Deployment
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/deployment](https://facebook.github.io/create-react-app/docs/deployment)
-
-### `npm run build` fails to minify
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify](https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify)
+Backend должен разрешать адрес frontend-приложения в переменной `CORS_ALLOWED_ORIGINS`.

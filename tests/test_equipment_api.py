@@ -240,7 +240,17 @@ def test_equipment_crud_and_image_upload(api_server: str):
     )
     upload_response.raise_for_status()
     uploaded = upload_response.json()
-    assert uploaded["image_path"].startswith("uploads/equipment_")
+    assert uploaded["image_path"].startswith((f"equipment/{created['id']}/image_", "uploads/equipment_"))
+
+    diagram_response = requests.post(
+        f"{api_server}/api/equipment/{created['id']}/connection-diagram",
+        files={"image": ("connection.png", _png_bytes(), "image/png")},
+        timeout=10,
+    )
+    diagram_response.raise_for_status()
+    with_diagram = diagram_response.json()
+    assert with_diagram["connection_diagram_path"].startswith(f"equipment/{created['id']}/connection_diagram_")
+    assert with_diagram["connection_diagram_url"]
 
     list_response = requests.get(f"{api_server}/api/equipment", timeout=10)
     list_response.raise_for_status()

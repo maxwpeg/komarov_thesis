@@ -4,9 +4,13 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 
 import RecognitionTrainingPage from './RecognitionTrainingPage';
-import { recognitionTrainingApi } from '../api/client';
+import { backgroundTasksApi, recognitionTrainingApi } from '../api/client';
+import { useDialogs } from '../ui/DialogProvider';
 
 jest.mock('../api/client', () => ({
+  backgroundTasksApi: {
+    get: jest.fn(),
+  },
   recognitionTrainingApi: {
     getOverview: jest.fn(),
     listExamples: jest.fn(),
@@ -17,6 +21,10 @@ jest.mock('../api/client', () => ({
     getRunLog: jest.fn(),
     createRun: jest.fn(),
   },
+}));
+
+jest.mock('../ui/DialogProvider', () => ({
+  useDialogs: jest.fn(),
 }));
 
 const overviewResponse = {
@@ -83,7 +91,10 @@ const detailResponse = {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  window.confirm = jest.fn(() => true);
+  useDialogs.mockReturnValue({
+    confirm: jest.fn().mockResolvedValue(true),
+    toast: jest.fn(),
+  });
   recognitionTrainingApi.getOverview.mockResolvedValue(overviewResponse);
   recognitionTrainingApi.listExamples.mockResolvedValue(examplesResponse);
   recognitionTrainingApi.getExample.mockResolvedValue(detailResponse);
@@ -91,12 +102,11 @@ beforeEach(() => {
   recognitionTrainingApi.bulkCurate.mockResolvedValue({ updated_count: 1, curation_status: 'excluded' });
   recognitionTrainingApi.listRuns.mockResolvedValue([]);
   recognitionTrainingApi.getRunLog.mockResolvedValue({ run_id: 'run-1', log_path: 'stdout.log', content: 'line 1' });
+  backgroundTasksApi.get.mockResolvedValue({ id: 1001, status: 'succeeded' });
   recognitionTrainingApi.createRun.mockResolvedValue({
-    run_id: 'run-1',
-    step: 'walls',
+    id: 1001,
     status: 'queued',
-    requested_at: '2026-04-16T12:00:00Z',
-    batch: { summary: { sample_count: 4 } },
+    task_type: 'recognition_training_run',
   });
 });
 
@@ -148,5 +158,19 @@ test('bulk exclude and create run call the expected APIs', async () => {
       force: true,
     });
   });
-  expect(window.confirm).toHaveBeenCalled();
+  expect(useDialogs().confirm).toHaveBeenCalled();
+});
+
+test('shows readable missing image message in the example preview', async () => {
+  recognitionTrainingApi.getExample.mockResolvedValue({
+    ...detailResponse,
+    original_image_path: '',
+    original_image_url: '',
+    source_snapshot: { image: { width: 400, height: 300 }, walls: [] },
+    corrected_snapshot: { image: { width: 400, height: 300 }, walls: [] },
+  });
+
+  renderPage();
+
+  expect(await screen.findByText('Исходное изображение плана недоступно.')).toBeInTheDocument();
 });

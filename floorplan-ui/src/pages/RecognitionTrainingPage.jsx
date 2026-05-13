@@ -157,7 +157,7 @@ function ExamplePreview({ detail, overlayMode }) {
         </div>
       ) : (
         <div style={{ padding: '1rem', borderRadius: '16px', background: '#f3efe8', color: '#645f57' }}>
-          РСЃС…РѕРґРЅРѕРµ РёР·РѕР±СЂР°Р¶РµРЅРёРµ РїР»Р°РЅР° РЅРµРґРѕСЃС‚СѓРїРЅРѕ.
+          Исходное изображение плана недоступно.
         </div>
       )}
     </div>
@@ -850,7 +850,7 @@ function RecognitionTrainingPage() {
                 <th>Changed</th>
                 <th>Hardness</th>
                 <th>Курация</th>
-                <th>РСЃРїРѕР»СЊР·РѕРІР°РЅРёР№</th>
+                <th>Использований</th>
                 <th>Дата</th>
               </tr>
             </thead>
@@ -906,7 +906,7 @@ function RecognitionTrainingPage() {
                   </div>
                   <div className="training-history-grid">
                     <div>
-                      <h4 style={{ marginBottom: '0.5rem' }}>РСЃС‚РѕСЂРёСЏ batch</h4>
+                      <h4 style={{ marginBottom: '0.5rem' }}>История batch</h4>
                       {(selectedExample.batches || []).length ? (
                         <ul className="training-history-list">
                           {selectedExample.batches.map((batchItem) => (
@@ -919,7 +919,7 @@ function RecognitionTrainingPage() {
                       ) : <div style={{ color: '#645f57' }}>Еще не входил в export batch.</div>}
                     </div>
                     <div>
-                      <h4 style={{ marginBottom: '0.5rem' }}>РСЃС‚РѕСЂРёСЏ run</h4>
+                      <h4 style={{ marginBottom: '0.5rem' }}>История run</h4>
                       {(selectedExample.runs || []).length ? (
                         <ul className="training-history-list">
                           {selectedExample.runs.map((runItem) => (

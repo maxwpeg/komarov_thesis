@@ -4,6 +4,7 @@ import re
 from reportlab.pdfgen import canvas
 
 from AdditionalInfoPage import AdditionalInfoPage
+from ConnectionDiagramPage import ConnectionDiagramPage
 from ConventionalSymbolsPage import ConventionalSymbolsPage
 from DrawingPage import DrawingPage
 from GeneralDataPage import (
@@ -15,6 +16,7 @@ from GeneralInstructionsPage import GeneralInstructionsPage
 from Page import Page
 from PowerConsumptionCalculationPage import PowerConsumptionCalculationPage
 from SpecificationPage import SpecificationPage
+from StructuralSchemePage import StructuralSchemePage
 from TitlePage import TitlePage
 from backend.bootstrap import register_pdf_fonts
 from backend.project_codes import build_project_code
@@ -56,6 +58,8 @@ class Project:
         equipment_specification: dict | None = None,
         power_consumption_calculation: dict | None = None,
         additional_info: dict | None = None,
+        structural_scheme: dict | None = None,
+        connection_diagrams: list[dict] | None = None,
     ):
         if number is None:
             number = DEFAULT_PROJECT_NUMBER
@@ -72,6 +76,8 @@ class Project:
         self.equipment_specification = equipment_specification or None
         self.power_consumption_calculation = power_consumption_calculation or None
         self.additional_info = additional_info or None
+        self.structural_scheme = structural_scheme or None
+        self.connection_diagrams = list(connection_diagrams or [])
 
         self.code = build_project_code(number=number, year=year, project_type=project_type)
         self.creds["Project Code"] = self.code
@@ -172,6 +178,60 @@ class Project:
             creds=self.creds,
         )
 
+    def _build_power_consumption_segments(self) -> list[dict[str, object]]:
+        if not self.power_consumption_calculation:
+            return []
+        return PowerConsumptionCalculationPage.paginate(
+            self.power_consumption_calculation,
+            page_format=PAGESIZE_A4,
+            main_title_box_type="1",
+            creds=self.creds,
+        )
+
+    def _calculate_total_sheets(
+        self,
+        *,
+        general_instructions_segments: list[dict[str, object]] | None = None,
+        conventional_symbols_segments: list[dict[str, object]] | None = None,
+        additional_info_segments: list[dict[str, object]] | None = None,
+        power_consumption_segments: list[dict[str, object]] | None = None,
+    ) -> int:
+        instructions_count = len(
+            general_instructions_segments
+            if general_instructions_segments is not None
+            else self._build_general_instructions_segments()
+        ) or 2
+        symbols_count = len(
+            conventional_symbols_segments
+            if conventional_symbols_segments is not None
+            else self._build_conventional_symbols_segments()
+        ) or 1
+        additional_count = len(
+            additional_info_segments
+            if additional_info_segments is not None
+            else self._build_additional_info_segments()
+        )
+        power_count = (
+            len(
+                power_consumption_segments
+                if power_consumption_segments is not None
+                else self._build_power_consumption_segments()
+            )
+            if self.power_consumption_calculation
+            else 1
+        )
+        return (
+            1  # General data
+            + instructions_count
+            + symbols_count
+            + 1  # Structural scheme
+            + len(self.floor_plans_data) * 3
+            + max(1, len(self.connection_diagrams))
+            + 1  # Equipment specification, rendered as a blank sheet if empty
+            + power_count
+            + additional_count
+        )
+
     def _build_general_data_payload(
         self,
         general_instructions_sheet_count: int | None = None,
@@ -208,7 +268,7 @@ class Project:
                 "sheet_count": conventional_symbols_sheet_count,
                 "note": f"на {conventional_symbols_sheet_count}-х листах" if conventional_symbols_sheet_count > 1 else "",
             },
-            {"name": "Структурная схема пожарной сигнализации", "sheet_count": 1, "note": ""},
+            {"name": "Структурная схема СПС и СОУЭ", "sheet_count": 1, "note": ""},
             {
                 "name": "План зон контроля сетей пожарной сигнализации",
                 "sheet_count": floor_count,
@@ -224,8 +284,16 @@ class Project:
                 "sheet_count": floor_count,
                 "note": f"на {floor_count}-х листах" if floor_count > 1 else "",
             },
-            {"name": "Электрические схемы соединений", "sheet_count": 1, "note": ""},
         ]
+
+        connection_diagrams_count = max(1, len(self.connection_diagrams))
+        manifest_rows.append(
+            {
+                "name": "Схемы подключения оборудования",
+                "sheet_count": connection_diagrams_count,
+                "note": f"на {connection_diagrams_count}-х листах" if connection_diagrams_count > 1 else "",
+            }
+        )
 
         if self.equipment_specification:
             manifest_rows.append(
@@ -381,6 +449,21 @@ class Project:
             page.draw(self._c)
             self.number_of_pages += 1
 
+    def add_structural_scheme_page(
+        self,
+        structural_scheme: dict | None = None,
+        pagesize: tuple[float, float] = PAGESIZE_A3_LANDSCAPE,
+    ):
+        page = StructuralSchemePage(
+            structural_scheme=structural_scheme or self.structural_scheme or {},
+            page_format=pagesize,
+            page_number=self.number_of_pages + 1,
+            creds=self.creds,
+            main_title_box_type="1",
+        )
+        page.draw(self._c)
+        self.number_of_pages += 1
+
     def add_additional_info_pages(
         self,
         additional_info: dict | None = None,
@@ -414,10 +497,39 @@ class Project:
             page.draw(self._c)
             self.number_of_pages += 1
 
+    def add_connection_diagram_pages(
+        self,
+        diagrams: list[dict] | None = None,
+        pagesize: tuple[float, float] = PAGESIZE_A3_LANDSCAPE,
+    ):
+        resolved_diagrams = list(diagrams if diagrams is not None else self.connection_diagrams)
+        if not resolved_diagrams:
+            self.add_page(pagesize, mtbox_type="1")
+            return
+        for diagram in resolved_diagrams:
+            page = ConnectionDiagramPage(
+                diagram=diagram,
+                page_format=pagesize,
+                page_number=self.number_of_pages + 1,
+                creds=self.creds,
+                main_title_box_type="1",
+            )
+            page.draw(self._c)
+            self.number_of_pages += 1
+
     def launch(self):
         general_instructions_segments = self._build_general_instructions_segments()
         conventional_symbols_segments = self._build_conventional_symbols_segments()
         additional_info_segments = self._build_additional_info_segments()
+        power_consumption_segments = self._build_power_consumption_segments()
+        self.creds["Total Sheets"] = str(
+            self._calculate_total_sheets(
+                general_instructions_segments=general_instructions_segments,
+                conventional_symbols_segments=conventional_symbols_segments,
+                additional_info_segments=additional_info_segments,
+                power_consumption_segments=power_consumption_segments,
+            )
+        )
         self.add_title_page(signed=False)
         self.add_title_page(signed=True)
         self.add_general_data_page(
@@ -445,7 +557,7 @@ class Project:
             )
         else:
             self.add_page(PAGESIZE_A4, mtbox_type="1")
-        self.add_page(PAGESIZE_A4, mtbox_type="1")
+        self.add_structural_scheme_page(self.structural_scheme, PAGESIZE_A3_LANDSCAPE)
 
         for floor_plan in self.floor_plans_data:
             floor_name = floor_plan.get("name", "План этажа")
@@ -468,11 +580,11 @@ class Project:
                 sheet_kind="soue",
             )
 
-        self.add_page(PAGESIZE_A3_LANDSCAPE, mtbox_type="1")
+        self.add_connection_diagram_pages(self.connection_diagrams, PAGESIZE_A3_LANDSCAPE)
         if self.equipment_specification:
             self.add_equipment_specification_page(self.equipment_specification, PAGESIZE_A3_LANDSCAPE)
         else:
-            self.add_page(PAGESIZE_A3_LANDSCAPE, mtbox_type="1")
+            self.add_equipment_specification_page({}, PAGESIZE_A3_LANDSCAPE)
         if self.power_consumption_calculation:
             self.add_power_consumption_calculation_pages(self.power_consumption_calculation, PAGESIZE_A4)
         else:

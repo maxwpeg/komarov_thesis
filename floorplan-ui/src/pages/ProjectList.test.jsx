@@ -4,6 +4,7 @@ import { MemoryRouter } from 'react-router-dom';
 
 import { useAuth } from '../auth/AuthContext';
 import { projectsApi } from '../api/client';
+import { useDialogs } from '../ui/DialogProvider';
 import ProjectList from './ProjectList';
 
 jest.mock('../auth/AuthContext', () => ({
@@ -13,16 +14,24 @@ jest.mock('../auth/AuthContext', () => ({
 jest.mock('../api/client', () => ({
   projectsApi: {
     list: jest.fn(),
+    listTrash: jest.fn(),
     remove: jest.fn(),
+    permanentlyRemove: jest.fn(),
   },
+}));
+
+jest.mock('../ui/DialogProvider', () => ({
+  useDialogs: jest.fn(),
 }));
 
 describe('ProjectList', () => {
   beforeEach(() => {
-    window.confirm = jest.fn(() => true);
-    window.alert = jest.fn();
     useAuth.mockReturnValue({
       user: { role: 'developer', full_name: 'Dev User' },
+    });
+    useDialogs.mockReturnValue({
+      confirm: jest.fn().mockResolvedValue(true),
+      toast: jest.fn(),
     });
   });
 
@@ -30,7 +39,7 @@ describe('ProjectList', () => {
     jest.resetAllMocks();
   });
 
-  test('loads and renders projects with owner, then deletes a project after confirmation', async () => {
+  test('loads and renders projects with owner, then moves a project to trash after confirmation', async () => {
     projectsApi.list
       .mockResolvedValueOnce([
         {
@@ -46,6 +55,23 @@ describe('ProjectList', () => {
         },
       ])
       .mockResolvedValueOnce([]);
+    projectsApi.listTrash
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          id: 1,
+          name: 'Project 1',
+          facility: 'Объект 1',
+          code: 'PRJ-001',
+          project_type: 'PS',
+          number_of_floors: 2,
+          contractor: 'ООО Подрядчик',
+          owner_user: { full_name: 'Engineer One' },
+          deleted_by_user: { full_name: 'Dev User' },
+          deleted_at: '2026-04-23T10:00:00Z',
+          created_at: '2026-04-22T10:00:00Z',
+        },
+      ]);
     projectsApi.remove.mockResolvedValue({});
 
     render(
@@ -59,16 +85,18 @@ describe('ProjectList', () => {
     expect(screen.getByText(/PRJ-001/i)).toBeInTheDocument();
     expect(screen.getByText(/Engineer One/i)).toBeInTheDocument();
 
-    fireEvent.click(screen.getByTitle(/Удалить проект/i));
+    fireEvent.click(screen.getByTitle(/Переместить проект/i));
 
     await waitFor(() => {
-      expect(window.confirm).toHaveBeenCalled();
+      expect(useDialogs().confirm).toHaveBeenCalled();
       expect(projectsApi.remove).toHaveBeenCalledWith(1);
     });
     expect(await screen.findByText(/Пока нет проектов/i)).toBeInTheDocument();
+    expect(await screen.findByText(/Корзина проектов/i)).toBeInTheDocument();
+    expect(screen.getByText(/Dev User/i)).toBeInTheDocument();
   });
 
-  test('shows alert when deleting a project fails', async () => {
+  test('shows toast when deleting a project fails', async () => {
     projectsApi.list.mockResolvedValue([
       {
         id: 2,
@@ -81,7 +109,13 @@ describe('ProjectList', () => {
         created_at: '2026-04-22T10:00:00Z',
       },
     ]);
+    projectsApi.listTrash.mockResolvedValue([]);
     projectsApi.remove.mockRejectedValue(new Error('boom'));
+    const dialogs = {
+      confirm: jest.fn().mockResolvedValue(true),
+      toast: jest.fn(),
+    };
+    useDialogs.mockReturnValue(dialogs);
 
     render(
       <MemoryRouter>
@@ -90,10 +124,42 @@ describe('ProjectList', () => {
     );
 
     expect(await screen.findByText('Объект 2')).toBeInTheDocument();
-    fireEvent.click(screen.getByTitle(/Удалить проект/i));
+    fireEvent.click(screen.getByTitle(/Переместить проект/i));
 
     await waitFor(() => {
-      expect(window.alert).toHaveBeenCalled();
+      expect(dialogs.toast).toHaveBeenCalledWith('Ошибка при удалении проекта.', { tone: 'error' });
+    });
+  });
+
+  test('developer can permanently delete a project from trash', async () => {
+    projectsApi.list.mockResolvedValue([]);
+    projectsApi.listTrash
+      .mockResolvedValueOnce([
+        {
+          id: 5,
+          name: 'Trash',
+          facility: 'Проект в корзине',
+          code: 'TR-005',
+          project_type: 'PS',
+          number_of_floors: 1,
+          contractor: 'ООО Подрядчик',
+          deleted_at: '2026-04-22T10:00:00Z',
+        },
+      ])
+      .mockResolvedValueOnce([]);
+    projectsApi.permanentlyRemove.mockResolvedValue({});
+
+    render(
+      <MemoryRouter>
+        <ProjectList />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('Проект в корзине')).toBeInTheDocument();
+    fireEvent.click(screen.getByTitle(/Удалить проект окончательно/i));
+
+    await waitFor(() => {
+      expect(projectsApi.permanentlyRemove).toHaveBeenCalledWith(5);
     });
   });
 });

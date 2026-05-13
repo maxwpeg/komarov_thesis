@@ -65,6 +65,7 @@ export default function FileDropField({
       <input
         ref={inputRef}
         type="file"
+        aria-label={title || buttonLabel || 'Файл'}
         accept={accept}
         disabled={disabled}
         style={{ display: 'none' }}

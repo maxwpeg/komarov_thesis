@@ -31,11 +31,11 @@ GENERAL_DATA_MANIFEST_DEFINITIONS = (
     ("general_data", "Общие данные"),
     ("general_instructions", "Общие указания"),
     ("conventional_symbols", "Условные графические обозначения"),
-    ("structural_scheme", "Структурная схема пожарной сигнализации"),
+    ("structural_scheme", "Структурная схема СПС и СОУЭ"),
     ("zkspc_plan", "План зон контроля сетей пожарной сигнализации"),
     ("sps_plan", "План сетей системы пожарной сигнализации"),
     ("soue_plan", "План сетей системы оповещения и управления эвакуацией людей при пожаре"),
-    ("connection_schemes", "Электрические схемы соединений"),
+    ("connection_schemes", "Схемы подключения оборудования"),
     ("equipment_specification", "Спецификация оборудования и материалов"),
     ("power_consumption", "Расчет токопотребления системы"),
     ("additional_info", "Доп. сведения"),
@@ -67,6 +67,7 @@ def build_project_general_data(
     equipment_specification_included: bool = True,
     power_consumption_sheet_count: int = 1,
     additional_info_sheet_count: int = 0,
+    connection_diagrams_sheet_count: int = 1,
 ) -> dict[str, Any]:
     floor_count = _floor_count(project, floor_plans)
     project_code = _normalize_text(getattr(project, "code", None))
@@ -80,10 +81,10 @@ def build_project_general_data(
         "zkspc_plan": floor_count,
         "sps_plan": floor_count,
         "soue_plan": floor_count,
-        "connection_schemes": 1,
         "equipment_specification": 1,
         "power_consumption": max(1, int(power_consumption_sheet_count or 1)),
         "additional_info": max(0, int(additional_info_sheet_count or 0)),
+        "connection_schemes": max(1, int(connection_diagrams_sheet_count or 1)),
     }
 
     manifest_rows: list[dict[str, Any]] = []

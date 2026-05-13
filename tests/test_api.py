@@ -240,6 +240,20 @@ def test_project_numbers_are_counted_separately_per_year_and_reuse_smallest_free
 
     delete_response = requests.delete(f"{api_server}/api/projects/{project_2025_a['id']}", timeout=10)
     assert delete_response.status_code == 200
+    assert delete_response.json()["message"] == "Project moved to trash"
+
+    hidden_response = requests.get(f"{api_server}/api/projects/{project_2025_a['id']}", timeout=10)
+    assert hidden_response.status_code == 404
+
+    trash_response = requests.get(f"{api_server}/api/projects/trash", timeout=10)
+    assert trash_response.status_code == 200
+    assert project_2025_a["id"] in [item["id"] for item in trash_response.json()]
+
+    permanent_delete_response = requests.delete(
+        f"{api_server}/api/projects/{project_2025_a['id']}/permanent",
+        timeout=10,
+    )
+    assert permanent_delete_response.status_code == 200
 
     move_response = requests.patch(
         f"{api_server}/api/projects/{project_2024_b['id']}",

@@ -44,6 +44,8 @@ def _inject_asset_urls(payload: dict[str, Any]) -> dict[str, Any]:
         data["latest_pdf_url"] = build_asset_url(data.get("latest_pdf_path"))
     if "image_path" in data:
         data["image_url"] = build_asset_url(data.get("image_path"))
+    if "connection_diagram_path" in data:
+        data["connection_diagram_url"] = build_asset_url(data.get("connection_diagram_path"))
     if "label_pdf_path" in data:
         data["label_pdf_url"] = build_asset_url(data.get("label_pdf_path"))
     if "manual_pdf_path" in data:

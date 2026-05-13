@@ -30,6 +30,9 @@ class ProjectRecord:
     number_of_floors: int = 1
     owner_user_id: int | None = None
     owner_user: dict[str, object] | None = None
+    deleted_at: datetime | None = None
+    deleted_by_user_id: int | None = None
+    deleted_by_user: dict[str, object] | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -57,6 +60,13 @@ class ProjectRecord:
             owner_user=(
                 project.owner_user.to_summary_dict()
                 if getattr(project, "owner_user", None) is not None
+                else None
+            ),
+            deleted_at=getattr(project, "deleted_at", None),
+            deleted_by_user_id=getattr(project, "deleted_by_user_id", None),
+            deleted_by_user=(
+                project.deleted_by_user.to_summary_dict()
+                if getattr(project, "deleted_by_user", None) is not None
                 else None
             ),
             created_at=project.created_at,

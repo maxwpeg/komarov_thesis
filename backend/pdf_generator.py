@@ -31,6 +31,15 @@ from consts import (
 )
 
 
+def _resolve_project_engineer(project_data: dict) -> str:
+    owner_user = project_data.get("owner_user") or {}
+    if isinstance(owner_user, dict):
+        owner_name = str(owner_user.get("full_name") or "").strip()
+        if owner_name:
+            return owner_name
+    return project_data.get("engineer", DEFAULT_ENGINEER_NAME)
+
+
 class FloorPlanPDFGenerator:
     """Generate fire alarm PDFs from floor plan data."""
     
@@ -44,6 +53,8 @@ class FloorPlanPDFGenerator:
         equipment_specification: dict | None = None,
         power_consumption_calculation: dict | None = None,
         additional_info: dict | None = None,
+        structural_scheme: dict | None = None,
+        connection_diagrams: list[dict] | None = None,
     ):
         """
         Initialize PDF generator.
@@ -60,6 +71,8 @@ class FloorPlanPDFGenerator:
         self.equipment_specification = equipment_specification
         self.power_consumption_calculation = power_consumption_calculation
         self.additional_info = additional_info
+        self.structural_scheme = structural_scheme
+        self.connection_diagrams = connection_diagrams or []
     
     def create_pdf(self, output_path: str = None) -> str:
         """
@@ -76,7 +89,7 @@ class FloorPlanPDFGenerator:
         # Prepare credentials dictionary
         creds = {
             "Contractor": self.project_data.get("contractor", DEFAULT_CONTRACTOR_NAME),
-            "Engineer": self.project_data.get("engineer", DEFAULT_ENGINEER_NAME),
+            "Engineer": _resolve_project_engineer(self.project_data),
             "CPE": self.project_data.get("cpe", DEFAULT_CPE_NAME),
             "Checker": self.project_data.get("checker", DEFAULT_CHECKER_NAME),
             "Facility": self.project_data.get("facility", DEFAULT_FACILITY_NAME),
@@ -99,15 +112,23 @@ class FloorPlanPDFGenerator:
             equipment_specification=self.equipment_specification,
             power_consumption_calculation=self.power_consumption_calculation,
             additional_info=self.additional_info,
+            structural_scheme=self.structural_scheme,
+            connection_diagrams=self.connection_diagrams,
         )
         
         # Add title pages
         project.add_title_page(signed=False)
         project.add_title_page(signed=True)
+
+        if self.structural_scheme:
+            project.add_structural_scheme_page(self.structural_scheme)
         
         # Add floor plan pages
         for floor_plan_data in self.floor_plans_data:
             self._add_floor_plan_page(project, floor_plan_data, creds)
+
+        if self.connection_diagrams:
+            project.add_connection_diagram_pages(self.connection_diagrams)
         
         # Save PDF
         project.save()
@@ -288,6 +309,8 @@ def generate_project_pdf(
     equipment_specification: dict | None = None,
     power_consumption_calculation: dict | None = None,
     additional_info: dict | None = None,
+    structural_scheme: dict | None = None,
+    connection_diagrams: list[dict] | None = None,
     output_dir: str = "outputs",
 ) -> str:
     """
@@ -307,7 +330,7 @@ def generate_project_pdf(
     # Prepare credentials dictionary
     creds = {
         "Contractor": project_data.get("contractor", DEFAULT_CONTRACTOR_NAME),
-        "Engineer": project_data.get("engineer", DEFAULT_ENGINEER_NAME),
+        "Engineer": _resolve_project_engineer(project_data),
         "CPE": project_data.get("cpe", DEFAULT_CPE_NAME),
         "Checker": project_data.get("checker", DEFAULT_CHECKER_NAME),
         "Facility": project_data.get("facility", DEFAULT_FACILITY_NAME),
@@ -330,6 +353,8 @@ def generate_project_pdf(
         equipment_specification=equipment_specification,
         power_consumption_calculation=power_consumption_calculation,
         additional_info=additional_info,
+        structural_scheme=structural_scheme,
+        connection_diagrams=connection_diagrams,
     )
     
     # Generate all pages using the new launch method

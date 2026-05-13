@@ -33,6 +33,7 @@ from backend.modules.shared.infrastructure.persistence.models import (
     SoueDevice,
 )
 from backend.modules.shared.infrastructure.storage import StorageService
+from backend.storage_metadata import record_managed_file, remove_managed_file
 from backend.schemas import EquipmentItemCreate, EquipmentItemUpdate, ProjectEquipmentAttach, ProjectEquipmentSelectionsUpdate
 
 
@@ -95,6 +96,8 @@ class SqlAlchemyEquipmentRepository(EquipmentRepository):
             item.standby_current_ma = self._normalize_number(data.get("standby_current_ma"))
         if "alarm_current_ma" in data:
             item.alarm_current_ma = self._normalize_number(data.get("alarm_current_ma"))
+        if "connection_diagram_path" in data:
+            item.connection_diagram_path = self._normalize_text(data.get("connection_diagram_path"))
         if "label_pdf_path" in data:
             item.label_pdf_path = self._normalize_text(data.get("label_pdf_path"))
         if "manual_pdf_path" in data:
@@ -197,11 +200,17 @@ class SqlAlchemyEquipmentRepository(EquipmentRepository):
             raise AppError(409, "equipment_item_has_compatibility_links", "Remove compatibility links before deleting equipment")
 
         image_path = item.image_path
+        connection_diagram_path = item.connection_diagram_path
         label_pdf_path = item.label_pdf_path
         manual_pdf_path = item.manual_pdf_path
+        remove_managed_file(self.session, image_path)
+        remove_managed_file(self.session, connection_diagram_path)
+        remove_managed_file(self.session, label_pdf_path)
+        remove_managed_file(self.session, manual_pdf_path)
         self.session.delete(item)
         self.session.flush()
         self.storage.delete_relative_path(image_path)
+        self.storage.delete_relative_path(connection_diagram_path)
         self.storage.delete_relative_path(label_pdf_path)
         self.storage.delete_relative_path(manual_pdf_path)
 
@@ -212,8 +221,23 @@ class SqlAlchemyEquipmentRepository(EquipmentRepository):
         item.image_path = saved_upload.relative_path
         item.updated_at = self._now()
         self.session.flush()
+        record_managed_file(self.session, saved_upload, equipment_id=equipment_id)
         if previous_image_path and previous_image_path != saved_upload.relative_path:
+            remove_managed_file(self.session, previous_image_path)
             self.storage.delete_relative_path(previous_image_path)
+        return self.get_item(equipment_id)
+
+    def set_item_connection_diagram(self, equipment_id: int, upload_file: UploadFile) -> EquipmentItemRecord:
+        item = self._get_item_model(equipment_id)
+        saved_upload = self.storage.save_equipment_connection_diagram_upload(upload_file, equipment_id)
+        previous_path = item.connection_diagram_path
+        item.connection_diagram_path = saved_upload.relative_path
+        item.updated_at = self._now()
+        self.session.flush()
+        record_managed_file(self.session, saved_upload, equipment_id=equipment_id)
+        if previous_path and previous_path != saved_upload.relative_path:
+            remove_managed_file(self.session, previous_path)
+            self.storage.delete_relative_path(previous_path)
         return self.get_item(equipment_id)
 
     def set_item_label_pdf(self, equipment_id: int, upload_file: UploadFile) -> EquipmentItemRecord:
@@ -223,7 +247,15 @@ class SqlAlchemyEquipmentRepository(EquipmentRepository):
         item.label_pdf_path = saved_path
         item.updated_at = self._now()
         self.session.flush()
+        record_managed_file(
+            self.session,
+            saved_path,
+            storage=self.storage,
+            equipment_id=equipment_id,
+            content_type=upload_file.content_type,
+        )
         if previous_path and previous_path != saved_path:
+            remove_managed_file(self.session, previous_path)
             self.storage.delete_relative_path(previous_path)
         return self.get_item(equipment_id)
 
@@ -234,7 +266,15 @@ class SqlAlchemyEquipmentRepository(EquipmentRepository):
         item.manual_pdf_path = saved_path
         item.updated_at = self._now()
         self.session.flush()
+        record_managed_file(
+            self.session,
+            saved_path,
+            storage=self.storage,
+            equipment_id=equipment_id,
+            content_type=upload_file.content_type,
+        )
         if previous_path and previous_path != saved_path:
+            remove_managed_file(self.session, previous_path)
             self.storage.delete_relative_path(previous_path)
         return self.get_item(equipment_id)
 
@@ -366,6 +406,7 @@ class SqlAlchemyEquipmentRepository(EquipmentRepository):
             standby_current_ma=self._normalize_number(data.get("standby_current_ma")),
             alarm_current_ma=self._normalize_number(data.get("alarm_current_ma")),
             smoke_addressing=specs.get("addressing_mode") if category == "smoke" else None,
+            connection_diagram_path=self._normalize_text(data.get("connection_diagram_path")),
             label_pdf_path=self._normalize_text(data.get("label_pdf_path")),
             manual_pdf_path=self._normalize_text(data.get("manual_pdf_path")),
         )

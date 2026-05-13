@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy.orm import Session
 
 from AdditionalInfoPage import AdditionalInfoPage
@@ -12,6 +12,7 @@ from ConventionalSymbolsPage import ConventionalSymbolsPage
 from GeneralInstructionsPage import GeneralInstructionsPage
 from PowerConsumptionCalculationPage import PowerConsumptionCalculationPage
 from backend.assets import build_asset_url
+from backend.audit import record_audit_event
 from backend.auth import AuthenticatedUser, require_project_access
 from backend.background_jobs import TASK_PROJECT_PDF_GENERATE, dedupe_key_for_task
 from backend.database import get_db
@@ -42,6 +43,8 @@ from backend.schemas import (
     PowerConsumptionCalculationUpdate,
 )
 from backend.services.background_task_service import BackgroundTaskService
+from backend.config import settings
+from backend.security import enforce_rate_limit
 
 
 router = APIRouter(tags=["pdf"])
@@ -52,6 +55,7 @@ GENERAL_INSTRUCTIONS_STAGE_KEY = "general_instructions"
 POWER_CONSUMPTION_STAGE_KEY = "power_consumption_calculation"
 EQUIPMENT_SPECIFICATION_STAGE_KEY = "equipment_specification"
 ADDITIONAL_INFO_STAGE_KEY = "additional_info"
+CONNECTION_SCHEMES_STAGE_KEY = "connection_schemes"
 ZKSPC_STAGE_KEY = "zkspc"
 SPS_STAGE_KEY = "sps"
 SOUE_STAGE_KEY = "soue"
@@ -100,6 +104,7 @@ def _resolve_preview_location(
     additional_info_segments = _paginate_additional_info(
         service.get_project_additional_info(project_id)
     )
+    connection_diagrams_count = max(1, len(service.repository.get_project_connection_diagrams(project_id)))
 
     general_instructions_count = len(general_instructions_segments) if general_instructions_segments else 2
     conventional_symbols_count = len(conventional_symbols_segments) if conventional_symbols_segments else 1
@@ -111,8 +116,8 @@ def _resolve_preview_location(
     conventional_symbols_page = general_instructions_page + general_instructions_count
     structural_scheme_page = conventional_symbols_page + conventional_symbols_count
     floor_sections_page = structural_scheme_page + 1
-    electrical_schemes_page = floor_sections_page + (len(floor_plans) * 3)
-    equipment_specification_page = electrical_schemes_page + 1
+    connection_schemes_page = floor_sections_page + (len(floor_plans) * 3)
+    equipment_specification_page = connection_schemes_page + connection_diagrams_count
     power_consumption_page = equipment_specification_page + 1
     additional_info_page = (
         power_consumption_page + power_consumption_count
@@ -128,6 +133,10 @@ def _resolve_preview_location(
         ADDITIONAL_INFO_STAGE_KEY: (
             additional_info_page,
             "Дополнительные сведения",
+        ),
+        CONNECTION_SCHEMES_STAGE_KEY: (
+            connection_schemes_page,
+            "Схемы подключения оборудования" if connection_diagrams_count > 1 else "Схема подключения оборудования",
         ),
     }
 
@@ -167,9 +176,17 @@ def _resolve_preview_location(
 )
 def generate_pdf(
     project_id: int,
+    request: Request,
     current_user: AuthenticatedUser = Depends(require_project_access),
     db: Session = Depends(get_db),
 ) -> BackgroundTaskRead:
+    enforce_rate_limit(
+        request,
+        "project_pdf_generate",
+        discriminator=str(current_user.id),
+        limit=settings.heavy_task_rate_limit_count,
+        window_seconds=settings.heavy_task_rate_limit_window_seconds,
+    )
     task = BackgroundTaskService(db).enqueue(
         task_type=TASK_PROJECT_PDF_GENERATE,
         requested_by_user_id=current_user.id,
@@ -178,6 +195,16 @@ def generate_pdf(
         dedupe_key=dedupe_key_for_task(TASK_PROJECT_PDF_GENERATE, project_id=project_id),
         resource_path=f"/projects/{project_id}/preview",
     )
+    record_audit_event(
+        db,
+        "project_pdf_generation_requested",
+        category="documents",
+        use_case="GenerateProjectPdf",
+        user_id=current_user.id,
+        project_id=project_id,
+        payload={"background_task_id": task.id},
+    )
+    db.commit()
     return background_task_read(task)
 
 

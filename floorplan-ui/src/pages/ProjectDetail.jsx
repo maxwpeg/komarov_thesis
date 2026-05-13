@@ -68,7 +68,7 @@ function buildProjectForm(project) {
     project_type: project.project_type ?? '',
     year: project.year ?? new Date().getFullYear(),
     contractor: project.contractor ?? '',
-    engineer: project.engineer ?? '',
+    engineer: project.owner_user?.full_name ?? project.engineer ?? '',
     facility_address: project.facility_address ?? '',
     project_description: project.project_description ?? '',
     owner_user_id: project.owner_user_id ?? '',
@@ -172,6 +172,21 @@ function getSpecificationEquipmentId(sourceKey) {
   return Number.isFinite(numericId) ? numericId : null;
 }
 
+function sanitizeDownloadFilename(value) {
+  const normalized = String(value || '')
+    .replace(/[<>:"/\\|?*]+/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\.+$/g, '');
+  return normalized || 'project';
+}
+
+function buildProjectPdfFilename(project) {
+  const facility = sanitizeDownloadFilename(project?.facility || project?.name || 'project');
+  const code = sanitizeDownloadFilename(project?.code || '');
+  return `${[facility, code].filter(Boolean).join(' ')}.pdf`;
+}
+
 function ProjectDetail() {
   const { projectId } = useParams();
   const navigate = useNavigate();
@@ -194,6 +209,7 @@ function ProjectDetail() {
   const [equipmentLoading, setEquipmentLoading] = useState(true);
   const [uploadingFloor, setUploadingFloor] = useState(false);
   const [generatingPDF, setGeneratingPDF] = useState(false);
+  const [downloadingPDF, setDownloadingPDF] = useState(false);
   const [savingProject, setSavingProject] = useState(false);
   const [equipmentSaving, setEquipmentSaving] = useState(false);
 
@@ -411,6 +427,12 @@ function ProjectDetail() {
           nextState.facility_instrumental = value;
         }
       }
+      if (name === 'owner_user_id') {
+        const selectedOwner = ownerUsers.find((owner) => owner.id === Number(value));
+        if (selectedOwner) {
+          nextState.engineer = selectedOwner.full_name;
+        }
+      }
       return nextState;
     });
     setSaveMessage('');
@@ -430,6 +452,12 @@ function ProjectDetail() {
           ? (projectForm.owner_user_id === '' ? null : Number(projectForm.owner_user_id))
           : undefined,
       };
+      if (isDeveloper && payload.owner_user_id !== null) {
+        const selectedOwner = ownerUsers.find((owner) => owner.id === payload.owner_user_id);
+        if (selectedOwner) {
+          payload.engineer = selectedOwner.full_name;
+        }
+      }
       if (!isDeveloper) {
         delete payload.owner_user_id;
       }
@@ -686,6 +714,40 @@ const handleDeleteFloorPlan = async (event, floorPlanId, floorPlanName) => {
     }
   };
 
+  const requestDownloadPdf = async () => {
+    setDownloadingPDF(true);
+    try {
+      let previewData = pdfPreview;
+      if (!previewData?.pdf_url) {
+        previewData = await projectsApi.getPdfPreview(projectId);
+        setPdfPreview(previewData);
+      }
+      if (!previewData?.pdf_url) {
+        toast('Сначала сгенерируйте PDF проекта.', { tone: 'error' });
+        return;
+      }
+
+      const response = await fetch(previewData.pdf_url, { credentials: 'include' });
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      const blob = await response.blob();
+      const objectUrl = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = objectUrl;
+      link.download = buildProjectPdfFilename(project);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(objectUrl);
+    } catch (error) {
+      console.error('Error downloading PDF:', error);
+      toast(`Ошибка при скачивании PDF: ${error.message}`, { tone: 'error' });
+    } finally {
+      setDownloadingPDF(false);
+    }
+  };
+
   const requestDeleteProject = async () => {
     const displayProjectName = project?.facility || project?.name || `#${projectId}`;
     const isConfirmed = await confirm(
@@ -736,6 +798,9 @@ const handleDeleteFloorPlan = async (event, floorPlanId, floorPlanName) => {
   }
 
   const displayName = project.facility || project.name;
+  const isPdfPreparing = Boolean(pdfPreview?.current_task?.status && ['queued', 'running'].includes(pdfPreview.current_task.status));
+  const canDownloadPdf = Boolean(pdfPreview?.pdf_url || project.latest_pdf_generated_at) && !isPdfPreparing;
+  const pdfPreviewHref = buildProjectStagePreviewHref(projectId, {});
   const dialogGroup = PROJECT_EQUIPMENT_GROUPS.find((group) => group.key === equipmentDialog.groupKey) || null;
   const dialogOptions = dialogGroup ? (availableEquipmentByGroup[dialogGroup.key] || []) : [];
   const sharedStageFloorPlanId = floorPlans[0]?.id ?? null;
@@ -878,9 +943,24 @@ const handleDeleteFloorPlan = async (event, floorPlanId, floorPlanName) => {
               </strong>
             </div>
           </div>
-          <div style={{ display: 'flex', gap: '10px' }}>
+          <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
             <button className="btn btn-success" onClick={requestGeneratePdf} disabled={generatingPDF}>
               {generatingPDF ? 'Генерация PDF...' : 'Сгенерировать PDF'}
+            </button>
+            <Link
+              className="btn btn-secondary"
+              to={pdfPreviewHref}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Просмотр PDF
+            </Link>
+            <button
+              className="btn btn-secondary"
+              onClick={requestDownloadPdf}
+              disabled={!canDownloadPdf || downloadingPDF}
+            >
+              {downloadingPDF ? 'Скачивание...' : 'Скачать PDF'}
             </button>
             <button className="btn btn-danger" onClick={requestDeleteProject} style={{ background: '#dc3545' }}>
               Удалить проект
@@ -888,9 +968,9 @@ const handleDeleteFloorPlan = async (event, floorPlanId, floorPlanName) => {
           </div>
         </div>
 
-        {(pdfPreview?.current_task?.status && ['queued', 'running'].includes(pdfPreview.current_task.status)) || project.latest_pdf_generated_at ? (
+        {isPdfPreparing || project.latest_pdf_generated_at ? (
           <div className="project-detail-toolbar">
-            {pdfPreview?.current_task?.status && ['queued', 'running'].includes(pdfPreview.current_task.status) ? (
+            {isPdfPreparing ? (
               <div className="project-detail-toolbar__status">
                 PDF поставлен в очередь и готовится в фоне.
               </div>

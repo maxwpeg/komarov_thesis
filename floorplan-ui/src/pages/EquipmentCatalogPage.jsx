@@ -32,9 +32,11 @@ function createEmptyEquipmentDraft(category = 'linear') {
     specs: createDefaultSpecs(category),
     compatible_equipment_ids: [],
     image_path: null,
+    connection_diagram_path: null,
     label_pdf_path: null,
     manual_pdf_path: null,
     image_url: null,
+    connection_diagram_url: null,
     label_pdf_url: null,
     manual_pdf_url: null,
   };
@@ -56,9 +58,11 @@ function draftFromItem(item) {
     specs: normalizeSpecsDraft(category, item.specs || {}),
     compatible_equipment_ids: (item.compatible_equipment_ids || []).map((value) => String(value)),
     image_path: item.image_path ?? null,
+    connection_diagram_path: item.connection_diagram_path ?? null,
     label_pdf_path: item.label_pdf_path ?? null,
     manual_pdf_path: item.manual_pdf_path ?? null,
     image_url: item.image_url ?? null,
+    connection_diagram_url: item.connection_diagram_url ?? null,
     label_pdf_url: item.label_pdf_url ?? null,
     manual_pdf_url: item.manual_pdf_url ?? null,
   };
@@ -90,6 +94,22 @@ function getAssetName(assetPath) {
 }
 
 const DOCUMENT_ACCEPT = 'application/pdf,.pdf,image/jpeg,.jpg,.jpeg';
+const CONNECTION_DIAGRAM_ACCEPT = 'image/*';
+const CONNECTION_DIAGRAM_CATEGORIES = new Set([
+  'linear',
+  'smoke',
+  'heat',
+  'manual',
+  'siren',
+  'exit_sign',
+  'speech',
+  'instrument',
+  'keyboard',
+]);
+
+function supportsConnectionDiagram(category) {
+  return CONNECTION_DIAGRAM_CATEGORIES.has(category);
+}
 
 function getCompatibleEquipmentNames(item, equipmentItems) {
   return (item?.compatible_equipment_ids || []).map((id) => (
@@ -436,6 +456,7 @@ export default function EquipmentCatalogPage() {
   const [modalState, setModalState] = useState({ isOpen: false, mode: 'view', itemId: null });
   const [equipmentDraft, setEquipmentDraft] = useState(createEmptyEquipmentDraft());
   const [pendingImageFile, setPendingImageFile] = useState(null);
+  const [pendingConnectionDiagramFile, setPendingConnectionDiagramFile] = useState(null);
   const [pendingLabelFile, setPendingLabelFile] = useState(null);
   const [pendingManualFile, setPendingManualFile] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -478,6 +499,7 @@ export default function EquipmentCatalogPage() {
 
   const resetUploads = () => {
     setPendingImageFile(null);
+    setPendingConnectionDiagramFile(null);
     setPendingLabelFile(null);
     setPendingManualFile(null);
   };
@@ -572,6 +594,9 @@ export default function EquipmentCatalogPage() {
       if (pendingImageFile) {
         savedItem = await equipmentApi.uploadImage(savedItem.id, pendingImageFile);
       }
+      if (pendingConnectionDiagramFile && supportsConnectionDiagram(savedItem.category)) {
+        savedItem = await equipmentApi.uploadConnectionDiagram(savedItem.id, pendingConnectionDiagramFile);
+      }
       if (pendingLabelFile) {
         savedItem = await equipmentApi.uploadLabelPdf(savedItem.id, pendingLabelFile);
       }
@@ -633,6 +658,8 @@ export default function EquipmentCatalogPage() {
     modalItem?.specs || (isEditing ? buildSpecsPayload(equipmentDraft.category, equipmentDraft.specs) : {}),
   ).filter((entry) => entry.hasValue);
   const compatibleNames = getCompatibleEquipmentNames(modalItem, equipmentItems);
+  const showConnectionDiagramField = supportsConnectionDiagram(equipmentDraft.category);
+  const showConnectionDiagramAsset = supportsConnectionDiagram(modalItem?.category);
 
   return (
     <div className="project-list-container equipment-page">
@@ -747,6 +774,17 @@ export default function EquipmentCatalogPage() {
                       savedUrl={equipmentDraft.image_url}
                       onChange={setPendingImageFile}
                     />
+                    {showConnectionDiagramField && (
+                      <EquipmentAssetField
+                        label="Схема подключения"
+                        className="equipment-upload-field--connection-diagram"
+                        accept={CONNECTION_DIAGRAM_ACCEPT}
+                        pendingFile={pendingConnectionDiagramFile}
+                        savedPath={equipmentDraft.connection_diagram_path}
+                        savedUrl={equipmentDraft.connection_diagram_url}
+                        onChange={setPendingConnectionDiagramFile}
+                      />
+                    )}
                     <EquipmentAssetField
                       label="Этикетка"
                       className="equipment-upload-field--label"
@@ -826,6 +864,14 @@ export default function EquipmentCatalogPage() {
                     <div className="equipment-modal__image equipment-modal__image--large equipment-modal__image--placeholder">Пока без изображения</div>
                   )}
                   <div className="equipment-document-grid">
+                    {showConnectionDiagramAsset && (
+                      <EquipmentAssetLinkCard
+                        label="Схема подключения"
+                        assetPath={modalItem?.connection_diagram_path}
+                        assetUrl={modalItem?.connection_diagram_url}
+                        emptyText="Схема подключения пока не загружена"
+                      />
+                    )}
                     <EquipmentAssetLinkCard label="Этикетка" assetPath={modalItem?.label_pdf_path} assetUrl={modalItem?.label_pdf_url} />
                     <EquipmentAssetLinkCard label="Руководство" assetPath={modalItem?.manual_pdf_path} assetUrl={modalItem?.manual_pdf_url} />
                   </div>

@@ -6,12 +6,14 @@ import { MemoryRouter } from 'react-router-dom';
 import { useAuth } from '../auth/AuthContext';
 import ProjectDetail from './ProjectDetail';
 import { equipmentApi, floorPlansApi, projectsApi, usersApi } from '../api/client';
+import { useDialogs } from '../ui/DialogProvider';
 
 const mockNavigate = jest.fn();
 let createElementSpy;
 let consoleErrorSpy;
 let consoleWarnSpy;
 let originalImage;
+let originalFetch;
 
 jest.mock('react-router-dom', () => ({
   ...jest.requireActual('react-router-dom'),
@@ -21,6 +23,10 @@ jest.mock('react-router-dom', () => ({
 
 jest.mock('../auth/AuthContext', () => ({
   useAuth: jest.fn(),
+}));
+
+jest.mock('../ui/DialogProvider', () => ({
+  useDialogs: jest.fn(),
 }));
 
 jest.mock('../api/client', () => ({
@@ -34,6 +40,7 @@ jest.mock('../api/client', () => ({
     update: jest.fn(),
     remove: jest.fn(),
     generatePdf: jest.fn(),
+    getPdfPreview: jest.fn(),
     getEquipmentSpecification: jest.fn(),
     getAdditionalInfo: jest.fn(),
     listEquipment: jest.fn(),
@@ -133,9 +140,14 @@ function mockImageLoad({ width = 400, height = 400, shouldFail = false } = {}) {
 beforeEach(() => {
   jest.clearAllMocks();
   originalImage = window.Image;
+  originalFetch = global.fetch;
   mockImageLoad();
   useAuth.mockReturnValue({
     user: { id: 1, role: 'developer', full_name: 'Developer User' },
+  });
+  useDialogs.mockReturnValue({
+    confirm: jest.fn().mockResolvedValue(true),
+    toast: jest.fn(),
   });
   projectsApi.get.mockResolvedValue(projectResponse);
   floorPlansApi.list.mockResolvedValue([]);
@@ -154,10 +166,20 @@ beforeEach(() => {
   projectsApi.getEquipmentSelections.mockResolvedValue(projectEquipmentSelectionsResponse);
   projectsApi.updateEquipmentSelections.mockResolvedValue(projectEquipmentSelectionsResponse);
   projectsApi.generatePdf.mockResolvedValue({
+    id: 99,
+    status: 'queued',
+    task_type: 'project_pdf_generate',
+  });
+  projectsApi.getPdfPreview.mockResolvedValue({
+    project_id: 10,
+    pdf_path: null,
+    pdf_url: null,
+    generated_at: null,
+    current_task: null,
+  });
+  global.fetch = jest.fn().mockResolvedValue({
+    ok: true,
     blob: jest.fn().mockResolvedValue(new Blob(['pdf'], { type: 'application/pdf' })),
-    headers: {
-      get: jest.fn(() => 'attachment; filename="generated.pdf"'),
-    },
   });
   window.alert = jest.fn();
   window.confirm = jest.fn(() => true);
@@ -181,6 +203,7 @@ afterEach(() => {
   consoleErrorSpy?.mockRestore();
   consoleWarnSpy?.mockRestore();
   window.Image = originalImage;
+  global.fetch = originalFetch;
 });
 
 function renderProjectDetail() {
@@ -195,18 +218,36 @@ function getEquipmentGroup(name) {
   return screen.getByRole('heading', { name }).closest('.project-equipment-group');
 }
 
-test('successful PDF generation downloads without showing a success alert', async () => {
+test('queues PDF generation and downloads the latest ready PDF', async () => {
+  projectsApi.getPdfPreview.mockResolvedValue({
+    project_id: 10,
+    pdf_path: 'outputs/project-10.pdf',
+    pdf_url: '/api/assets/outputs/project-10.pdf',
+    generated_at: '2026-05-12T10:00:00Z',
+    current_task: null,
+  });
+
   renderProjectDetail();
 
   await screen.findByRole('heading', { name: 'Объект' });
+  const previewLink = screen.getByRole('link', { name: 'Просмотр PDF' });
+  expect(previewLink).toHaveAttribute('href', '/projects/10/preview');
+  expect(previewLink).toHaveAttribute('target', '_blank');
+
+  await userEvent.click(screen.getByRole('button', { name: 'Скачать PDF' }));
+
+  await waitFor(() => {
+    expect(global.fetch).toHaveBeenCalledWith('/api/assets/outputs/project-10.pdf', { credentials: 'include' });
+  });
+  expect(window.URL.createObjectURL).toHaveBeenCalled();
+  expect(window.URL.revokeObjectURL).toHaveBeenCalledWith('blob:test-pdf');
+
   await userEvent.click(screen.getByRole('button', { name: /Сгенерировать PDF/i }));
 
   await waitFor(() => {
     expect(projectsApi.generatePdf).toHaveBeenCalledWith('10');
   });
 
-  expect(window.URL.createObjectURL).toHaveBeenCalled();
-  expect(window.URL.revokeObjectURL).toHaveBeenCalledWith('blob:test-pdf');
   expect(window.alert).not.toHaveBeenCalled();
 });
 
@@ -249,7 +290,7 @@ test('project detail blocks uploading a non-image floor plan file', async () => 
   await userEvent.upload(fileInput, file);
 
   await waitFor(() => {
-    expect(window.alert).toHaveBeenCalledWith(expect.stringContaining('200x200'));
+    expect(useDialogs().toast).toHaveBeenCalledWith(expect.stringContaining('200x200'), { tone: 'error' });
   });
 
   expect(floorPlansApi.create).not.toHaveBeenCalled();
@@ -268,7 +309,7 @@ test('project detail blocks uploading a floor plan image smaller than 200x200', 
   await userEvent.upload(fileInput, file);
 
   await waitFor(() => {
-    expect(window.alert).toHaveBeenCalledWith(expect.stringContaining('200x200'));
+    expect(useDialogs().toast).toHaveBeenCalledWith(expect.stringContaining('200x200'), { tone: 'error' });
   });
 
   expect(floorPlansApi.create).not.toHaveBeenCalled();
@@ -303,6 +344,36 @@ test('project details save updated facility field', async () => {
       facility: 'Новый объект',
       facility_genitive: 'Нового объекта',
       facility_instrumental: 'Новым объектом',
+    }));
+  });
+});
+
+test('project owner selection syncs engineer before saving', async () => {
+  projectsApi.update.mockResolvedValueOnce({
+    ...projectResponse,
+    engineer: 'Engineer Two',
+    owner_user_id: 22,
+    owner_user: { id: 22, full_name: 'Engineer Two', username: 'eng2', role: 'engineer' },
+  });
+
+  renderProjectDetail();
+
+  await waitFor(() => {
+    const ownerOption = document.querySelector('select[name="owner_user_id"] option[value="22"]');
+    expect(ownerOption).not.toBeNull();
+  });
+  const ownerSelect = document.querySelector('select[name="owner_user_id"]');
+  await userEvent.selectOptions(ownerSelect, '22');
+
+  expect(document.querySelector('input[name="engineer"]')).toHaveValue('Engineer Two');
+
+  const saveButton = document.querySelector('.project-detail-card__header button.btn-primary');
+  await userEvent.click(saveButton);
+
+  await waitFor(() => {
+    expect(projectsApi.update).toHaveBeenCalledWith('10', expect.objectContaining({
+      engineer: 'Engineer Two',
+      owner_user_id: 22,
     }));
   });
 });

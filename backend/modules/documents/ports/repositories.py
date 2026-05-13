@@ -29,8 +29,14 @@ class DocumentReadRepository(Protocol):
     def get_project_conventional_symbols(self, project_id: int) -> dict:
         """Return the rendered conventional symbols payload for the project."""
 
+    def get_project_structural_scheme(self, project_id: int) -> dict:
+        """Return the rendered SPS/SOUE structural scheme payload for the project."""
+
     def get_project_additional_info(self, project_id: int) -> dict:
         """Return the rendered additional info payload for the project."""
+
+    def get_project_connection_diagrams(self, project_id: int) -> list[dict]:
+        """Return connection diagram page payloads for used equipment."""
 
     def update_project_power_consumption_calculation(self, project_id: int, payload) -> dict:
         """Persist editable power consumption calculation overrides for the project."""
@@ -59,6 +65,8 @@ class PdfPort(Protocol):
         equipment_specification: dict | None,
         power_consumption_calculation: dict | None,
         additional_info: dict | None,
+        structural_scheme: dict | None,
+        connection_diagrams: list[dict] | None,
         output_dir: str,
     ) -> str:
         """Generate a PDF and return the file path."""

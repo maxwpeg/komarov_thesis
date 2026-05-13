@@ -196,6 +196,9 @@ class ProjectRead(APIModel):
     number_of_floors: int
     owner_user_id: int | None = None
     owner_user: UserSummaryRead | None = None
+    deleted_at: datetime | None = None
+    deleted_by_user_id: int | None = None
+    deleted_by_user: UserSummaryRead | None = None
     latest_pdf_path: str | None = None
     latest_pdf_url: str | None = None
     latest_pdf_generated_at: datetime | None = None
@@ -238,6 +241,7 @@ class EquipmentItemCreate(APIModel):
     standby_current_ma: float | None = Field(default=None, description="Ток потребления в дежурном режиме, мА.")
     alarm_current_ma: float | None = Field(default=None, description="Ток потребления в режиме тревоги, мА.")
     smoke_addressing: SmokeAddressing | None = Field(default=None, description="Тип адресности дымового извещателя.")
+    connection_diagram_path: str | None = Field(default=None, description="Путь к изображению схемы подключения оборудования.")
     label_pdf_path: str | None = Field(default=None, description="Путь к PDF-карточке или ярлыку оборудования.")
     manual_pdf_path: str | None = Field(default=None, description="Путь к PDF-руководству пользователя.")
     compatible_equipment_ids: list[int] = Field(default_factory=list, description="Список совместимых позиций оборудования.")
@@ -256,6 +260,7 @@ class EquipmentItemUpdate(APIModel):
     standby_current_ma: float | None = None
     alarm_current_ma: float | None = None
     smoke_addressing: SmokeAddressing | None = None
+    connection_diagram_path: str | None = None
     label_pdf_path: str | None = None
     manual_pdf_path: str | None = None
     compatible_equipment_ids: list[int] | None = None
@@ -296,6 +301,8 @@ class EquipmentItemRead(APIModel):
     smoke_addressing: SmokeAddressing | None = None
     image_path: str | None = None
     image_url: str | None = None
+    connection_diagram_path: str | None = None
+    connection_diagram_url: str | None = None
     label_pdf_path: str | None = None
     label_pdf_url: str | None = None
     manual_pdf_path: str | None = None

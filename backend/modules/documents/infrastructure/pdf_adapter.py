@@ -19,6 +19,8 @@ class PdfGeneratorAdapter:
         equipment_specification: dict | None,
         power_consumption_calculation: dict | None,
         additional_info: dict | None,
+        structural_scheme: dict | None,
+        connection_diagrams: list[dict] | None,
         output_dir: str,
     ) -> str:
         return generate_project_pdf(
@@ -30,5 +32,7 @@ class PdfGeneratorAdapter:
             equipment_specification=equipment_specification,
             power_consumption_calculation=power_consumption_calculation,
             additional_info=additional_info,
+            structural_scheme=structural_scheme,
+            connection_diagrams=connection_diagrams,
             output_dir=output_dir,
         )

@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event';
 
 import EquipmentCatalogPage from './EquipmentCatalogPage';
 import { equipmentApi } from '../api/client';
+import { DialogProvider } from '../ui/DialogProvider';
 
 jest.mock('../api/client', () => ({
   equipmentApi: {
@@ -12,6 +13,7 @@ jest.mock('../api/client', () => ({
     update: jest.fn(),
     remove: jest.fn(),
     uploadImage: jest.fn(),
+    uploadConnectionDiagram: jest.fn(),
     uploadLabelPdf: jest.fn(),
     uploadManualPdf: jest.fn(),
   },
@@ -34,6 +36,7 @@ const smokeItem = {
   },
   smoke_addressing: 'addressable',
   image_path: null,
+  connection_diagram_path: 'uploads/diagram_101.png',
   label_pdf_path: 'uploads/label_101.pdf',
   manual_pdf_path: 'uploads/manual_101.pdf',
   compatible_equipment_ids: [],
@@ -57,6 +60,7 @@ const cableItem = {
   },
   smoke_addressing: null,
   image_path: null,
+  connection_diagram_path: null,
   label_pdf_path: null,
   manual_pdf_path: null,
   compatible_equipment_ids: [],
@@ -82,6 +86,7 @@ const instrumentItem = {
   },
   smoke_addressing: null,
   image_path: null,
+  connection_diagram_path: null,
   label_pdf_path: null,
   manual_pdf_path: null,
   compatible_equipment_ids: [],
@@ -102,10 +107,19 @@ const mountingItem = {
   },
   smoke_addressing: null,
   image_path: null,
+  connection_diagram_path: null,
   label_pdf_path: null,
   manual_pdf_path: null,
   compatible_equipment_ids: [],
 };
+
+function renderEquipmentCatalogPage() {
+  return render(
+    <DialogProvider>
+      <EquipmentCatalogPage />
+    </DialogProvider>,
+  );
+}
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -128,6 +142,7 @@ beforeEach(() => {
     },
     smoke_addressing: 'addressable',
     image_path: null,
+    connection_diagram_path: null,
     label_pdf_path: null,
     manual_pdf_path: null,
     compatible_equipment_ids: [201],
@@ -149,6 +164,29 @@ beforeEach(() => {
     },
     smoke_addressing: 'addressable',
     image_path: 'uploads/equipment_301.png',
+    connection_diagram_path: null,
+    label_pdf_path: null,
+    manual_pdf_path: null,
+    compatible_equipment_ids: [201],
+  });
+  equipmentApi.uploadConnectionDiagram.mockResolvedValue({
+    id: 301,
+    name: 'Smoke B',
+    category: 'smoke',
+    description: 'Backup smoke detector',
+    price: 500.12,
+    manufacturer: 'Bolid',
+    service_life_years: 12,
+    notes: 'Created in test',
+    specs: {
+      addressing_mode: 'addressable',
+      loop_voltage_v: { min: 12, max: 24 },
+      standby_current_a: 0.0008,
+      alarm_current_a: 0.0008,
+    },
+    smoke_addressing: 'addressable',
+    image_path: 'uploads/equipment_301.png',
+    connection_diagram_path: 'uploads/diagram_301.png',
     label_pdf_path: null,
     manual_pdf_path: null,
     compatible_equipment_ids: [201],
@@ -170,6 +208,7 @@ beforeEach(() => {
     },
     smoke_addressing: 'addressable',
     image_path: 'uploads/equipment_301.png',
+    connection_diagram_path: 'uploads/diagram_301.png',
     label_pdf_path: 'uploads/label_301.pdf',
     manual_pdf_path: null,
     compatible_equipment_ids: [201],
@@ -198,7 +237,7 @@ beforeEach(() => {
 });
 
 test('shows compact cards, detector addressing in filtered view, and keeps documents as open-only assets', async () => {
-  render(<EquipmentCatalogPage />);
+  renderEquipmentCatalogPage();
 
   await screen.findByRole('heading', { name: 'Оборудование' });
   const smokeCard = await screen.findByRole('button', { name: /Smoke A/i });
@@ -227,7 +266,7 @@ test('shows compact cards, detector addressing in filtered view, and keeps docum
   expect(screen.getByText('manual_101.pdf')).toBeInTheDocument();
 });
 
-test('creates a smoke card with voltage range, compatibility picker and uploads image plus two pdf files', async () => {
+test('creates a smoke card with voltage range, compatibility picker and uploads image, diagram and documents', async () => {
   const createdItem = {
     id: 301,
     name: 'Smoke B',
@@ -245,6 +284,7 @@ test('creates a smoke card with voltage range, compatibility picker and uploads 
     },
     smoke_addressing: 'addressable',
     image_path: 'uploads/equipment_301.png',
+    connection_diagram_path: 'uploads/diagram_301.png',
     label_pdf_path: 'uploads/label_301.pdf',
     manual_pdf_path: 'uploads/manual_301.pdf',
     compatible_equipment_ids: [201],
@@ -253,7 +293,7 @@ test('creates a smoke card with voltage range, compatibility picker and uploads 
     .mockResolvedValueOnce([cableItem])
     .mockResolvedValueOnce([createdItem, cableItem]);
 
-  render(<EquipmentCatalogPage />);
+  renderEquipmentCatalogPage();
 
   await screen.findByRole('heading', { name: 'Оборудование' });
   await userEvent.click(screen.getByRole('button', { name: 'Добавить оборудование' }));
@@ -280,6 +320,10 @@ test('creates a smoke card with voltage range, compatibility picker and uploads 
   await userEvent.upload(
     screen.getByLabelText('Изображение'),
     new File(['image'], 'smoke.png', { type: 'image/png' }),
+  );
+  await userEvent.upload(
+    screen.getByLabelText('Схема подключения'),
+    new File(['diagram'], 'diagram.png', { type: 'image/png' }),
   );
   await userEvent.upload(
     screen.getByLabelText('Этикетка'),
@@ -309,6 +353,7 @@ test('creates a smoke card with voltage range, compatibility picker and uploads 
   });
   await waitFor(() => {
     expect(equipmentApi.uploadImage).toHaveBeenCalledWith(301, expect.any(File));
+    expect(equipmentApi.uploadConnectionDiagram).toHaveBeenCalledWith(301, expect.any(File));
     expect(equipmentApi.uploadLabelPdf).toHaveBeenCalledWith(301, expect.any(File));
     expect(equipmentApi.uploadManualPdf).toHaveBeenCalledWith(301, expect.any(File));
   });
@@ -333,7 +378,7 @@ test('instrument form switches subtype-specific fields and submits console specs
     },
   });
 
-  render(<EquipmentCatalogPage />);
+  renderEquipmentCatalogPage();
 
   await screen.findByRole('heading', { name: 'Оборудование' });
   await userEvent.click(screen.getByRole('button', { name: 'Добавить оборудование' }));
@@ -401,7 +446,7 @@ test('instrument form switches subtype-specific fields and submits console specs
 test('shows instrument subtype-specific values in preview modal', async () => {
   equipmentApi.list.mockResolvedValueOnce([instrumentItem, smokeItem, cableItem]);
 
-  render(<EquipmentCatalogPage />);
+  renderEquipmentCatalogPage();
 
   await screen.findByRole('heading', { name: 'Оборудование' });
   await userEvent.click(await screen.findByRole('button', { name: /Console A/i }));
@@ -422,7 +467,7 @@ test.skip('mounting form shows fastening fields and submits mounting specs', asy
     },
   });
 
-  render(<EquipmentCatalogPage />);
+  renderEquipmentCatalogPage();
 
   await screen.findByRole('heading', { name: 'РћР±РѕСЂСѓРґРѕРІР°РЅРёРµ' });
   await userEvent.click(screen.getByRole('button', { name: 'Р”РѕР±Р°РІРёС‚СЊ РѕР±РѕСЂСѓРґРѕРІР°РЅРёРµ' }));
@@ -455,7 +500,7 @@ test('mounting form shows fastening fields and submits mounting specs with reada
     },
   });
 
-  render(<EquipmentCatalogPage />);
+  renderEquipmentCatalogPage();
 
   await screen.findByRole('heading', { name: 'Оборудование' });
   await userEvent.click(screen.getByRole('button', { name: 'Добавить оборудование' }));

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 
+from backend.audit import record_audit_event
 from backend.auth import (
     AuthenticatedUser,
     count_active_developers,
@@ -18,6 +19,8 @@ from backend.database import get_db
 from backend.errors import AppError
 from backend.models import User
 from backend.schemas import MessageRead, UserCreate, UserRead, UserResetPasswordRequest, UserUpdate
+from backend.security import enforce_rate_limit
+from backend.config import settings
 
 
 router = APIRouter(prefix="/api/users", tags=["users"])
@@ -96,7 +99,7 @@ def list_users(
 )
 def create_user(
     payload: UserCreate,
-    _: AuthenticatedUser = Depends(require_developer),
+    current_user: AuthenticatedUser = Depends(require_developer),
     db: Session = Depends(get_db),
 ) -> UserRead:
     username = normalize_username(payload.username)
@@ -111,6 +114,14 @@ def create_user(
     db.add(user)
     db.commit()
     db.refresh(user)
+    record_audit_event(
+        db,
+        "user_created",
+        use_case="CreateUser",
+        user_id=current_user.id,
+        payload={"target_user_id": user.id, "username": user.username, "role": user.role},
+    )
+    db.commit()
     return _user_read(user)
 
 
@@ -133,7 +144,7 @@ def create_user(
 def update_user(
     user_id: int,
     payload: UserUpdate,
-    _: AuthenticatedUser = Depends(require_developer),
+    current_user: AuthenticatedUser = Depends(require_developer),
     db: Session = Depends(get_db),
 ) -> UserRead:
     user = _get_user(db, user_id)
@@ -155,6 +166,14 @@ def update_user(
 
     db.commit()
     db.refresh(user)
+    record_audit_event(
+        db,
+        "user_updated",
+        use_case="UpdateUser",
+        user_id=current_user.id,
+        payload={"target_user_id": user.id, "fields": sorted(updates.keys())},
+    )
+    db.commit()
     return _user_read(user)
 
 
@@ -175,10 +194,26 @@ def update_user(
 def reset_user_password(
     user_id: int,
     payload: UserResetPasswordRequest,
-    _: AuthenticatedUser = Depends(require_developer),
+    request: Request,
+    current_user: AuthenticatedUser = Depends(require_developer),
     db: Session = Depends(get_db),
 ) -> MessageRead:
+    enforce_rate_limit(
+        request,
+        "user_password_reset",
+        discriminator=str(user_id),
+        limit=settings.login_rate_limit_count,
+        window_seconds=settings.login_rate_limit_window_seconds,
+    )
     user = _get_user(db, user_id)
     user.password_hash = hash_password(payload.password)
+    db.commit()
+    record_audit_event(
+        db,
+        "user_password_reset",
+        use_case="ResetUserPassword",
+        user_id=current_user.id,
+        payload={"target_user_id": user.id, "username": user.username},
+    )
     db.commit()
     return MessageRead(message=f"Password reset for {user.username}")

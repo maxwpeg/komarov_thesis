@@ -292,6 +292,8 @@ def ensure_project_access(db: Session, current_user: AuthenticatedUser, project_
     project = db.query(Project).filter(Project.id == project_id).first()
     if project is None:
         raise AppError(404, "project_not_found", "Project not found")
+    if getattr(project, "deleted_at", None) is not None:
+        raise AppError(404, "project_not_found", "Project not found")
     if current_user.is_developer:
         return project
     if project.owner_user_id != current_user.id:

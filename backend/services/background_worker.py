@@ -34,6 +34,7 @@ from backend.models import FloorPlan, Project
 from backend.modules.shared.infrastructure.storage import StorageService
 from backend.services.background_task_service import BackgroundTaskService
 from backend.services.recognition_training_management_service import RecognitionTrainingManagementService
+from backend.storage_metadata import record_managed_file
 
 
 logger = logging.getLogger(__name__)
@@ -154,7 +155,14 @@ class BackgroundTaskExecutor:
         if project is not None:
             project.latest_pdf_path = stored_pdf_path
             project.latest_pdf_generated_at = generated_at
-            self.db.commit()
+        record_managed_file(
+            self.db,
+            stored_pdf_path,
+            storage=self.storage,
+            project_id=project_id,
+            content_type="application/pdf",
+        )
+        self.db.commit()
         self.storage.delete_absolute_path(generated_pdf_path)
         return {
             "project_id": project_id,

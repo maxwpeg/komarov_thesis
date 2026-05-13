@@ -16,6 +16,7 @@ from backend.database import engine, init_db
 from backend.errors import install_exception_handlers
 from backend.modules.shared.health.service import HealthService
 from backend.modules.shared.observability.middleware import RequestContextMiddleware
+from backend.security import OriginProtectionMiddleware, SecurityHeadersMiddleware
 from backend.routers import (
     assets_router,
     auth_router,
@@ -170,6 +171,8 @@ FIELD_DESCRIPTIONS = {
     "notes": "Произвольные примечания пользователя.",
     "specs": "Нормализованные технические характеристики оборудования.",
     "coverage_summary": "Краткая сводка по покрытию или характеристикам применения.",
+    "connection_diagram_path": "Путь к изображению схемы подключения оборудования.",
+    "connection_diagram_url": "Публичная ссылка на изображение схемы подключения оборудования.",
     "compatible_equipment_ids": "Идентификаторы совместимых позиций оборудования.",
     "selections": "Привязка ролей проекта к конкретным позициям оборудования.",
     "items": "Коллекция элементов в ответе.",
@@ -505,6 +508,8 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    app.add_middleware(OriginProtectionMiddleware)
+    app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(RequestContextMiddleware, logger=logger)
 
     install_exception_handlers(app)

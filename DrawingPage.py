@@ -651,6 +651,13 @@ def _find_room_badge_rect(
     }
 
 
+def _oriented_fire_alarm_point(point: Point, device_type: str | None) -> Point:
+    point_x, point_y = point
+    if device_type == "manual_call_point":
+        return point_x, -point_y
+    return -point_x, point_y
+
+
 def draw_fire_alarm_symbol(c, x: float, y: float, device_type: str | None, size: float = 4.5 * mm) -> None:
     half = size / 2.0
     scale = size / EDITOR_SYMBOL_REFERENCE_SIZE
@@ -664,22 +671,26 @@ def draw_fire_alarm_symbol(c, x: float, y: float, device_type: str | None, size:
 
     if device_type == "manual_call_point":
         manual_path = c.beginPath()
-        first_point = FIRE_ALARM_MANUAL_POINTS[0]
+        first_point = _oriented_fire_alarm_point(FIRE_ALARM_MANUAL_POINTS[0], device_type)
         manual_path.moveTo(x + (first_point[0] * scale), y + (first_point[1] * scale))
         for point_x, point_y in FIRE_ALARM_MANUAL_POINTS[1:]:
+            point_x, point_y = _oriented_fire_alarm_point((point_x, point_y), device_type)
             manual_path.lineTo(x + (point_x * scale), y + (point_y * scale))
+        stem_start = _oriented_fire_alarm_point(FIRE_ALARM_MANUAL_STEM[0], device_type)
+        stem_end = _oriented_fire_alarm_point(FIRE_ALARM_MANUAL_STEM[1], device_type)
         c.drawPath(manual_path, stroke=1, fill=0)
         c.line(
-            x + (FIRE_ALARM_MANUAL_STEM[0][0] * scale),
-            y + (FIRE_ALARM_MANUAL_STEM[0][1] * scale),
-            x + (FIRE_ALARM_MANUAL_STEM[1][0] * scale),
-            y + (FIRE_ALARM_MANUAL_STEM[1][1] * scale),
+            x + (stem_start[0] * scale),
+            y + (stem_start[1] * scale),
+            x + (stem_end[0] * scale),
+            y + (stem_end[1] * scale),
         )
     else:
         auto_path = c.beginPath()
-        first_point = FIRE_ALARM_AUTO_POINTS[0]
+        first_point = _oriented_fire_alarm_point(FIRE_ALARM_AUTO_POINTS[0], device_type)
         auto_path.moveTo(x + (first_point[0] * scale), y + (first_point[1] * scale))
         for point_x, point_y in FIRE_ALARM_AUTO_POINTS[1:]:
+            point_x, point_y = _oriented_fire_alarm_point((point_x, point_y), device_type)
             auto_path.lineTo(x + (point_x * scale), y + (point_y * scale))
         c.drawPath(auto_path, stroke=1, fill=0)
 

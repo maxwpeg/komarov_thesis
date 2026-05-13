@@ -127,7 +127,7 @@ def test_engineer_only_sees_owned_projects_and_auto_owns_new_ones(api_server: st
             "name": "Engineer-owned",
             "project_type": "PS",
             "contractor": "Contractor",
-            "engineer": "Engineer One",
+            "engineer": "Wrong Engineer",
             "cpe": "CPE",
             "checker": "Checker",
             "facility": "Engineer Facility",
@@ -140,6 +140,21 @@ def test_engineer_only_sees_owned_projects_and_auto_owns_new_ones(api_server: st
     )
     assert own_project_response.status_code == 200
     assert own_project_response.json()["owner_user_id"] == engineer["id"]
+    assert own_project_response.json()["engineer"] == "Engineer One"
+
+    delete_response = engineer_session.delete(
+        f"{api_server}/api/projects/{own_project_response.json()['id']}",
+        timeout=10,
+    )
+    assert delete_response.status_code == 200
+
+    hidden_list_response = engineer_session.get(f"{api_server}/api/projects", timeout=10)
+    assert hidden_list_response.status_code == 200
+    assert own_project_response.json()["id"] not in [item["id"] for item in hidden_list_response.json()]
+
+    developer_trash_response = requests.get(f"{api_server}/api/projects/trash", timeout=10)
+    assert developer_trash_response.status_code == 200
+    assert own_project_response.json()["id"] in [item["id"] for item in developer_trash_response.json()]
 
 
 def test_last_active_developer_cannot_be_demoted_or_deactivated(api_server: str):

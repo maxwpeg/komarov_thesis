@@ -23,10 +23,25 @@ class SqlAlchemyProjectRepository(ProjectRepository):
     def __init__(self, session: Session):
         self.session = session
 
-    def list(self, skip: int = 0, limit: int = 100, owner_user_id: int | None = None) -> list[ProjectRecord]:
-        query = self.session.query(ProjectModel).options(selectinload(ProjectModel.owner_user))
+    def list(
+        self,
+        skip: int = 0,
+        limit: int = 100,
+        owner_user_id: int | None = None,
+        include_deleted: bool = False,
+        deleted_only: bool = False,
+    ) -> list[ProjectRecord]:
+        query = self.session.query(ProjectModel).options(
+            selectinload(ProjectModel.owner_user),
+            selectinload(ProjectModel.deleted_by_user),
+        )
         if owner_user_id is not None:
             query = query.filter(ProjectModel.owner_user_id == owner_user_id)
+        if deleted_only:
+            query = query.filter(ProjectModel.deleted_at.is_not(None))
+        elif not include_deleted:
+            query = query.filter(ProjectModel.deleted_at.is_(None))
+        query = query.order_by(ProjectModel.created_at.desc(), ProjectModel.id.desc())
         projects = query.offset(skip).limit(limit).all()
         return [ProjectRecord.from_model(project) for project in projects]
 
@@ -43,6 +58,11 @@ class SqlAlchemyProjectRepository(ProjectRepository):
         year = payload.year
         counter = self._get_or_create_year_counter(year)
         number = counter.last_number + 1
+        owner = (
+            ensure_owner_user_can_be_assigned(self.session, payload.owner_user_id)
+            if payload.owner_user_id is not None
+            else None
+        )
         project = ProjectModel(
             name=payload.name,
             project_type=payload.project_type,
@@ -50,7 +70,7 @@ class SqlAlchemyProjectRepository(ProjectRepository):
             year=year,
             code=build_project_code(number=number, year=year, project_type=payload.project_type),
             contractor=payload.contractor,
-            engineer=payload.engineer,
+            engineer=owner.full_name if owner is not None else payload.engineer,
             cpe=payload.cpe,
             checker=payload.checker,
             facility=payload.facility,
@@ -60,9 +80,7 @@ class SqlAlchemyProjectRepository(ProjectRepository):
             project_description=payload.project_description,
             stage=payload.stage,
             number_of_floors=payload.number_of_floors,
-            owner_user_id=ensure_owner_user_can_be_assigned(self.session, payload.owner_user_id).id
-            if payload.owner_user_id is not None
-            else None,
+            owner_user_id=owner.id if owner is not None else None,
         )
         counter.last_number = number
         self.session.add(project)
@@ -74,9 +92,14 @@ class SqlAlchemyProjectRepository(ProjectRepository):
         project = self._get_model(project_id)
         previous_year = project.year
         updates = payload.model_dump(exclude_unset=True)
+        owner = None
         if "owner_user_id" in updates:
             owner = ensure_owner_user_can_be_assigned(self.session, updates["owner_user_id"])
             updates["owner_user_id"] = owner.id if owner is not None else None
+            if owner is not None:
+                updates["engineer"] = owner.full_name
+        elif "engineer" in updates and project.owner_user is not None:
+            updates["engineer"] = project.owner_user.full_name
         for field, value in updates.items():
             setattr(project, field, value)
 
@@ -97,19 +120,27 @@ class SqlAlchemyProjectRepository(ProjectRepository):
         self.session.refresh(project)
         return ProjectRecord.from_model(project)
 
-    def delete(self, project_id: int) -> None:
+    def soft_delete(self, project_id: int, deleted_by_user_id: int | None = None) -> None:
         project = self._get_model(project_id)
+        now = datetime.now(timezone.utc)
+        project.deleted_at = now
+        project.deleted_by_user_id = deleted_by_user_id
+        project.updated_at = now
+        self.session.flush()
+
+    def permanently_delete(self, project_id: int) -> None:
+        project = self._get_model(project_id, include_deleted=True)
         self.session.delete(project)
         self.session.flush()
 
-    def _get_model(self, project_id: int) -> ProjectModel:
+    def _get_model(self, project_id: int, *, include_deleted: bool = False) -> ProjectModel:
         project = (
             self.session.query(ProjectModel)
-            .options(selectinload(ProjectModel.owner_user))
+            .options(selectinload(ProjectModel.owner_user), selectinload(ProjectModel.deleted_by_user))
             .filter(ProjectModel.id == project_id)
             .first()
         )
-        if project is None:
+        if project is None or (project.deleted_at is not None and not include_deleted):
             raise AppError(404, "project_not_found", "Project not found")
         return project
 

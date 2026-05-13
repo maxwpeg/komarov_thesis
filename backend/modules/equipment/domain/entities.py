@@ -26,6 +26,7 @@ class EquipmentItemRecord:
     alarm_current_ma: float | None = None
     smoke_addressing: str | None = None
     image_path: str | None = None
+    connection_diagram_path: str | None = None
     label_pdf_path: str | None = None
     manual_pdf_path: str | None = None
     compatible_equipment_ids: list[int] = field(default_factory=list)
@@ -60,6 +61,7 @@ class EquipmentItemRecord:
             alarm_current_ma=equipment_item.alarm_current_ma,
             smoke_addressing=equipment_item.smoke_addressing,
             image_path=equipment_item.image_path,
+            connection_diagram_path=getattr(equipment_item, "connection_diagram_path", None),
             label_pdf_path=equipment_item.label_pdf_path,
             manual_pdf_path=equipment_item.manual_pdf_path,
             compatible_equipment_ids=sorted(set(compatible_equipment_ids or [])),

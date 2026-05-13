@@ -1,11 +1,19 @@
 let unauthorizedHandler = null;
+const API_BASE_URL = (process.env.REACT_APP_API_BASE_URL || '').replace(/\/+$/, '');
 
 export function setUnauthorizedHandler(handler) {
   unauthorizedHandler = typeof handler === 'function' ? handler : null;
 }
 
+function buildApiUrl(path) {
+  if (!API_BASE_URL || /^https?:\/\//i.test(path)) {
+    return path;
+  }
+  return `${API_BASE_URL}${path.startsWith('/') ? path : `/${path}`}`;
+}
+
 async function apiRequest(path, options = {}) {
-  const response = await fetch(path, {
+  const response = await fetch(buildApiUrl(path), {
     credentials: 'include',
     ...options,
   });
@@ -109,6 +117,9 @@ export const projectsApi = {
   list() {
     return apiRequest('/api/projects');
   },
+  listTrash() {
+    return apiRequest('/api/projects/trash');
+  },
   get(projectId) {
     return apiRequest(`/api/projects/${projectId}`);
   },
@@ -128,6 +139,9 @@ export const projectsApi = {
   },
   remove(projectId) {
     return apiRequest(`/api/projects/${projectId}`, { method: 'DELETE' });
+  },
+  permanentlyRemove(projectId) {
+    return apiRequest(`/api/projects/${projectId}/permanent`, { method: 'DELETE' });
   },
   generatePdf(projectId) {
     return apiRequest(`/api/projects/${projectId}/generate-pdf`, {
@@ -236,6 +250,11 @@ export const backgroundTasksApi = {
   get(taskId) {
     return apiRequest(`/api/background-tasks/${taskId}`);
   },
+  cancel(taskId) {
+    return apiRequest(`/api/background-tasks/${taskId}/cancel`, {
+      method: 'POST',
+    });
+  },
 };
 
 export const equipmentApi = {
@@ -268,6 +287,14 @@ export const equipmentApi = {
     const formData = new FormData();
     formData.append('image', file);
     return apiRequest(`/api/equipment/${equipmentId}/image`, {
+      method: 'POST',
+      body: formData,
+    });
+  },
+  uploadConnectionDiagram(equipmentId, file) {
+    const formData = new FormData();
+    formData.append('image', file);
+    return apiRequest(`/api/equipment/${equipmentId}/connection-diagram`, {
       method: 'POST',
       body: formData,
     });
@@ -321,12 +348,12 @@ export const floorPlansApi = {
     });
   },
   autoLayoutFireAlarms(floorPlanId, systemType = 'non_addressable') {
-    return apiRequest(`/api/floor-plans/${floorPlanId}/fire-alarms/auto-layout?system_type=${systemType}`, {
+    return apiRequest(`/api/floor-plans/${floorPlanId}/fire-alarms/auto-layout?system_type=${encodeURIComponent(systemType)}&async=true`, {
       method: 'POST',
     });
   },
   autoLayoutSoueDevices(floorPlanId, systemType = 'non_addressable') {
-    return apiRequest(`/api/floor-plans/${floorPlanId}/soue-devices/auto-layout?system_type=${systemType}`, {
+    return apiRequest(`/api/floor-plans/${floorPlanId}/soue-devices/auto-layout?system_type=${encodeURIComponent(systemType)}&async=true`, {
       method: 'POST',
     });
   },

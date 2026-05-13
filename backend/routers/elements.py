@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from backend.auth import (
@@ -52,7 +53,6 @@ from backend.modules.elements_geometry.application.use_cases import ElementsGeom
 from backend.modules.floor_plans.application.use_cases import FloorPlanUseCases
 from backend.modules.signal_design.application.use_cases import SignalDesignUseCases
 from backend.schemas import (
-    BackgroundTaskRead,
     BatchSaveRequest,
     BatchSaveResult,
     CableRouteRead,
@@ -353,16 +353,24 @@ def list_fire_alarms(
 
 @router.post(
     "/api/floor-plans/{floor_plan_id}/fire-alarms/auto-layout",
-    response_model=BackgroundTaskRead,
-    status_code=202,
+    response_model=FireAlarmAutoLayoutRead,
     dependencies=[Depends(require_floor_plan_access)],
 )
 def auto_layout_fire_alarms(
     floor_plan_id: int,
     system_type: str = Query("non_addressable"),
+    as_task: bool = Query(False, alias="async"),
     current_user: AuthenticatedUser = Depends(require_floor_plan_access),
     db: Session = Depends(get_db),
-) -> BackgroundTaskRead:
+) -> FireAlarmAutoLayoutRead | JSONResponse:
+    if not as_task:
+        service = get_signal_design_use_cases(db)
+        layout = service.auto_layout_fire_alarms(floor_plan_id, system_type)
+        return FireAlarmAutoLayoutRead(
+            devices=layout.get("all_devices", layout.get("devices", [])),
+            summary=layout.get("summary", {}),
+            warnings=layout.get("warnings", []),
+        )
     task = BackgroundTaskService(db).enqueue(
         task_type=TASK_FIRE_ALARM_AUTO_LAYOUT,
         requested_by_user_id=current_user.id,
@@ -371,7 +379,7 @@ def auto_layout_fire_alarms(
         dedupe_key=dedupe_key_for_task(TASK_FIRE_ALARM_AUTO_LAYOUT, floor_plan_id=floor_plan_id),
         resource_path=f"/floor-plans/{floor_plan_id}",
     )
-    return background_task_read(task)
+    return JSONResponse(status_code=202, content=background_task_read(task).model_dump(mode="json"))
 
 
 @router.patch("/api/fire-alarms/{fire_alarm_id}", response_model=FireAlarmRead, dependencies=[Depends(require_fire_alarm_access)])
@@ -421,16 +429,24 @@ def list_soue_devices(
 
 @router.post(
     "/api/floor-plans/{floor_plan_id}/soue-devices/auto-layout",
-    response_model=BackgroundTaskRead,
-    status_code=202,
+    response_model=SoueDeviceAutoLayoutRead,
     dependencies=[Depends(require_floor_plan_access)],
 )
 def auto_layout_soue_devices(
     floor_plan_id: int,
     system_type: str = Query("non_addressable"),
+    as_task: bool = Query(False, alias="async"),
     current_user: AuthenticatedUser = Depends(require_floor_plan_access),
     db: Session = Depends(get_db),
-) -> BackgroundTaskRead:
+) -> SoueDeviceAutoLayoutRead | JSONResponse:
+    if not as_task:
+        service = get_signal_design_use_cases(db)
+        layout = service.auto_layout_soue_devices(floor_plan_id, system_type)
+        return SoueDeviceAutoLayoutRead(
+            devices=layout.get("devices", []),
+            summary=layout.get("summary", {}),
+            warnings=layout.get("warnings", []),
+        )
     task = BackgroundTaskService(db).enqueue(
         task_type=TASK_SOUE_AUTO_LAYOUT,
         requested_by_user_id=current_user.id,
@@ -439,7 +455,7 @@ def auto_layout_soue_devices(
         dedupe_key=dedupe_key_for_task(TASK_SOUE_AUTO_LAYOUT, floor_plan_id=floor_plan_id),
         resource_path=f"/floor-plans/{floor_plan_id}",
     )
-    return background_task_read(task)
+    return JSONResponse(status_code=202, content=background_task_read(task).model_dump(mode="json"))
 
 
 @router.patch("/api/soue-devices/{soue_device_id}", response_model=SoueDeviceRead, dependencies=[Depends(require_soue_device_access)])

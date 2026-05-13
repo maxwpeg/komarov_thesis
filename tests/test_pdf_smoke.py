@@ -10,9 +10,11 @@ from reportlab.lib.units import mm
 
 import DrawingPage as drawing_page_module
 from backend.bootstrap import register_pdf_fonts
-from backend.pdf_generator import generate_project_pdf
+from backend.pdf_generator import _resolve_project_engineer, generate_project_pdf
 from DrawingPage import DrawingPage, PlanTransform, _get_soue_device_code, _soue_device_symbol_half_extents
 from Project import Project
+from SpecificationPage import SpecificationPage
+from StructuralSchemePage import StructuralSchemePage
 from consts import PAGESIZE_A3_LANDSCAPE, PAGESIZE_A4
 
 
@@ -401,6 +403,40 @@ def test_siren_pdf_footprint_matches_editor_reference_geometry():
     assert abs(half_height - ((22.0 / 18.0) * 4.5 * mm)) < 1e-6
 
 
+def test_equipment_specification_page_sets_title_box_text():
+    page = SpecificationPage(
+        specification={"page_title": "Спецификация оборудования"},
+        creds={"Engineer": "Owner Engineer"},
+        page_number=5,
+    )
+
+    assert page.creds["Title of the Drawing"] == "Спецификация оборудования"
+    assert page.creds["Engineer"] == "Owner Engineer"
+
+
+def test_empty_equipment_specification_page_draws_with_default_title():
+    register_pdf_fonts()
+    buffer = io.BytesIO()
+    canvas_obj = canvas.Canvas(buffer)
+
+    page = SpecificationPage(specification={}, creds={"Engineer": "Owner Engineer"}, page_number=5)
+    page.draw(canvas_obj)
+    canvas_obj.save()
+
+    assert page.creds["Title of the Drawing"]
+    assert buffer.tell() > 0
+
+
+def test_project_pdf_engineer_prefers_project_owner():
+    assert _resolve_project_engineer(
+        {
+            "engineer": "Logged In Developer",
+            "owner_user": {"full_name": "Project Owner"},
+        }
+    ) == "Project Owner"
+    assert _resolve_project_engineer({"engineer": "Saved Engineer"}) == "Saved Engineer"
+
+
 def test_smoke_fire_alarm_symbol_uses_editor_inner_polyline_geometry():
     recorded_canvas = _RecordedCanvas()
 
@@ -408,12 +444,29 @@ def test_smoke_fire_alarm_symbol_uses_editor_inner_polyline_geometry():
 
     assert len(recorded_canvas.paths) == 1
     assert recorded_canvas.paths[0].operations == [
-        ("moveTo", 102.2, 43.4),
-        ("lineTo", 98.8, 49.2),
-        ("lineTo", 102.6, 49.2),
-        ("lineTo", 97.8, 56.6),
-        ("lineTo", 101.2, 50.8),
-        ("lineTo", 97.4, 50.8),
+        ("moveTo", 97.8, 43.4),
+        ("lineTo", 101.2, 49.2),
+        ("lineTo", 97.4, 49.2),
+        ("lineTo", 102.2, 56.6),
+        ("lineTo", 98.8, 50.8),
+        ("lineTo", 102.6, 50.8),
+    ]
+
+
+def test_manual_fire_alarm_symbol_is_reflected_horizontally():
+    recorded_canvas = _RecordedCanvas()
+
+    drawing_page_module.draw_fire_alarm_symbol(recorded_canvas, 100.0, 50.0, "manual_call_point", size=18.0)
+
+    assert len(recorded_canvas.paths) == 1
+    assert recorded_canvas.paths[0].operations == [
+        ("moveTo", 94.5, 53.5),
+        ("lineTo", 95.2, 50.2),
+        ("lineTo", 97.0, 47.6),
+        ("lineTo", 100.0, 46.8),
+        ("lineTo", 103.0, 47.6),
+        ("lineTo", 104.8, 50.2),
+        ("lineTo", 105.5, 53.5),
     ]
 
 
@@ -504,7 +557,132 @@ def test_generated_pdf_filename_uses_facility_name_with_cyrillic(tmp_path: Path)
     assert generated_name.endswith(".pdf")
 
 
-def test_project_launch_inserts_equipment_specification_one_sheet_later(monkeypatch):
+def test_structural_scheme_page_draws_populated_payload():
+    register_pdf_fonts()
+    buffer = io.BytesIO()
+    payload = {
+        "page_title": "Структурная схема СПС и СОУЭ",
+        "facility": "Административное здание",
+        "project_code": "PS-7",
+        "floors": [
+            {
+                "id": 1,
+                "floor_number": 1,
+                "title": "Первый этаж",
+                "building_label": "Литер А",
+                "zones": [
+                    {
+                        "key": "zone:1",
+                        "title": "ЗКСПС №1",
+                        "area_sqm": 40.0,
+                        "room_count": 3,
+                        "sps_items": [{"label": "ДИП-34А", "category": "smoke", "device_type": "smoke_detector", "quantity": 5}],
+                        "soue_items": [],
+                        "route_keys": ["route:10"],
+                    },
+                    {
+                        "key": "floor:1:soue",
+                        "title": "СОУЭ",
+                        "sps_items": [],
+                        "soue_items": [{"label": "Свирель", "category": "siren", "device_type": "siren", "quantity": 2}],
+                        "route_keys": ["route:11"],
+                    },
+                ],
+                "routes": [
+                    {
+                        "key": "route:10",
+                        "subsystem": "sps",
+                        "instrument_id": 20,
+                        "label": "СПС адресный шлейф 1",
+                        "length_m": 35.2,
+                        "target_group_keys": ["zone:1"],
+                        "target_refs": ["1ВТН1.1", "1ВТН1.2"],
+                    },
+                    {
+                        "key": "route:11",
+                        "subsystem": "soue",
+                        "instrument_id": 20,
+                        "label": "СОУЭ шлейф 1",
+                        "length_m": 12.0,
+                        "target_group_keys": ["floor:1:soue"],
+                        "target_refs": ["1BIAS1.1"],
+                    },
+                ],
+            }
+        ],
+        "instruments": [{"id": 20, "name": "ППКП", "type": "control_panel", "floor_label": "Первый этаж"}],
+        "equipment_totals": [
+            {"technical_name": "Извещатель пожарный дымовой адресный", "category": "smoke", "quantity": 5},
+            {"technical_name": "Оповещатель охранно-пожарный звуковой", "category": "siren", "quantity": 2},
+            {"technical_name": "Прибор приемно-контрольный", "category": "instrument", "quantity": 1},
+        ],
+    }
+
+    canvas_obj = canvas.Canvas(buffer)
+    StructuralSchemePage(structural_scheme=payload, page_number=1).draw(canvas_obj)
+    canvas_obj.save()
+
+    assert buffer.tell() > 0
+
+
+def test_structural_group_card_exposes_connector_for_each_detector():
+    register_pdf_fonts()
+    canvas_obj = canvas.Canvas(io.BytesIO())
+    page = StructuralSchemePage(structural_scheme={}, page_number=1)
+    connectors = page._draw_group_card(
+        canvas_obj,
+        {
+            "key": "zone:1",
+            "title": "ЗКСПС №1",
+            "sps_items": [
+                {
+                    "label": "ДИП-34А",
+                    "category": "smoke",
+                    "device_type": "smoke_detector",
+                    "quantity": 3,
+                    "device_ids": [101, 102, 103],
+                }
+            ],
+            "soue_items": [],
+        },
+        x=20 * mm,
+        y=20 * mm,
+        width=60 * mm,
+        height=36 * mm,
+    )
+
+    assert len(connectors["sps"]) == 3
+    assert len(connectors["all"]) == 3
+    assert set(connectors["by_id"]) == {101, 102, 103}
+
+
+def test_structural_route_router_uses_orthogonal_clear_path():
+    page = StructuralSchemePage(structural_scheme={}, page_number=1)
+    obstacles = [
+        {"key": "source", "rect": {"x": 0.0, "y": 10.0, "width": 20.0, "height": 20.0}},
+        {"key": "other", "rect": {"x": 35.0, "y": 8.0, "width": 20.0, "height": 24.0}},
+    ]
+
+    path = page._build_route_points(
+        start=(21.0, 20.0),
+        end=(80.0, 50.0),
+        lane_x=70.0,
+        source_rect=obstacles[0]["rect"],
+        source_key="source",
+        obstacles=obstacles,
+        min_y=0.0,
+        max_y=90.0,
+        line_index=1,
+    )
+
+    assert len(path) > 4
+    for segment in page._line_segments(path):
+        x1, y1, x2, y2 = segment
+        assert abs(x1 - x2) < 0.01 or abs(y1 - y2) < 0.01
+        assert not page._segment_intersects_rect(segment, obstacles[1]["rect"], clearance=0.7 * mm)
+
+
+def test_project_launch_places_connection_diagrams_before_specification_and_sets_total_sheets(monkeypatch):
     calls: list[str] = []
     project = Project(
         project_type="PS",
@@ -565,8 +743,18 @@ def test_project_launch_inserts_equipment_specification_one_sheet_later(monkeypa
         "add_conventional_symbols_pages",
         lambda conventional_symbols=None, segments=None, pagesize=PAGESIZE_A4: calls.append("conventional_symbols"),
     )
+    monkeypatch.setattr(
+        project,
+        "add_structural_scheme_page",
+        lambda structural_scheme=None, pagesize=PAGESIZE_A3_LANDSCAPE: calls.append("structural_scheme"),
+    )
     monkeypatch.setattr(project, "add_page", lambda pagesize, mtbox_type="1": calls.append(f"page:{pagesize}:{mtbox_type}"))
     monkeypatch.setattr(project, "add_drawing_page_with_image", lambda **kwargs: calls.append(f"drawing:{kwargs.get('sheet_kind')}"))
+    monkeypatch.setattr(
+        project,
+        "add_connection_diagram_pages",
+        lambda diagrams=None, pagesize=PAGESIZE_A3_LANDSCAPE: calls.append("connection_diagrams"),
+    )
     monkeypatch.setattr(
         project,
         "add_equipment_specification_page",
@@ -591,6 +779,7 @@ def test_project_launch_inserts_equipment_specification_one_sheet_later(monkeypa
         "general_data",
         "general_instructions",
         "conventional_symbols",
-        f"page:{PAGESIZE_A4}:1",
+        "structural_scheme",
     ]
-    assert calls[-4:] == [f"page:{PAGESIZE_A3_LANDSCAPE}:1", "specification", "power", "additional_info"]
+    assert calls[-4:] == ["connection_diagrams", "specification", "power", "additional_info"]
+    assert project.creds["Total Sheets"] == "8"

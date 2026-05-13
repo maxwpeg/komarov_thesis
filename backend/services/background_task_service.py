@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import asc
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy import asc, update
+from sqlalchemy.orm import Session, joinedload, selectinload
 
+from backend.config import settings
 from backend.errors import AppError
 from backend.models import BackgroundTask
 
@@ -99,7 +100,7 @@ class BackgroundTaskService:
     def get_task(self, task_id: int) -> BackgroundTask:
         task = (
             self.db.query(BackgroundTask)
-            .options(joinedload(BackgroundTask.requested_by_user))
+            .options(joinedload(BackgroundTask.requested_by_user), selectinload(BackgroundTask.training_runs))
             .filter(BackgroundTask.id == task_id)
             .first()
         )
@@ -108,22 +109,33 @@ class BackgroundTaskService:
         return task
 
     def claim_next(self) -> BackgroundTask | None:
-        query = (
-            self.db.query(BackgroundTask)
-            .filter(BackgroundTask.status == "queued")
-            .order_by(asc(BackgroundTask.created_at), asc(BackgroundTask.id))
-        )
-        task = query.first()
-        if task is None:
-            return None
+        self.reconcile_stale_running_tasks()
         now = utcnow()
-        task.status = "running"
-        task.attempts = int(task.attempts or 0) + 1
-        task.started_at = task.started_at or now
-        task.heartbeat_at = now
-        task.updated_at = now
-        self.db.commit()
-        return self.get_task(task.id)
+        while True:
+            task_id = (
+                self.db.query(BackgroundTask.id)
+                .filter(BackgroundTask.status == "queued")
+                .order_by(asc(BackgroundTask.created_at), asc(BackgroundTask.id))
+                .limit(1)
+                .scalar()
+            )
+            if task_id is None:
+                return None
+            result = self.db.execute(
+                update(BackgroundTask)
+                .where(BackgroundTask.id == task_id, BackgroundTask.status == "queued")
+                .values(
+                    status="running",
+                    attempts=BackgroundTask.attempts + 1,
+                    started_at=now,
+                    heartbeat_at=now,
+                    updated_at=now,
+                )
+            )
+            if result.rowcount == 1:
+                self.db.commit()
+                return self.get_task(int(task_id))
+            self.db.rollback()
 
     def heartbeat(self, task_id: int) -> BackgroundTask:
         task = self.get_task(task_id)
@@ -144,23 +156,66 @@ class BackgroundTaskService:
         self.db.commit()
         return task
 
-    def fail(self, task_id: int, error: Exception | str) -> BackgroundTask:
+    def fail(self, task_id: int, error: Exception | str, *, retry: bool = True) -> BackgroundTask:
         task = self.get_task(task_id)
         now = utcnow()
-        task.status = "failed"
         task.error_message = str(error)
-        task.finished_at = now
         task.heartbeat_at = now
         task.updated_at = now
+        if retry and int(task.attempts or 0) < settings.worker_max_attempts:
+            task.status = "queued"
+            task.started_at = None
+            task.finished_at = None
+        else:
+            task.status = "failed"
+            task.finished_at = now
         self.db.commit()
         return task
 
     def cancel(self, task_id: int, *, message: str | None = None) -> BackgroundTask:
         task = self.get_task(task_id)
+        if task.status != "queued":
+            raise AppError(409, "background_task_not_cancelable", "Only queued tasks can be canceled")
         now = utcnow()
         task.status = "canceled"
-        task.error_message = message
+        task.error_message = message or "Task canceled by administrator"
         task.finished_at = now
+        task.heartbeat_at = now
         task.updated_at = now
+        for run in task.training_runs:
+            if run.status == "queued":
+                run.status = "canceled"
+                run.error_message = task.error_message
+                run.finished_at = now
+                if run.training_batch is not None:
+                    run.training_batch.status = "canceled"
         self.db.commit()
-        return task
+        return self.get_task(task_id)
+
+    def reconcile_stale_running_tasks(self) -> int:
+        cutoff = utcnow() - timedelta(seconds=max(int(settings.worker_stale_after_seconds), 1))
+        stale_tasks = (
+            self.db.query(BackgroundTask)
+            .filter(
+                BackgroundTask.status == "running",
+                BackgroundTask.heartbeat_at.is_not(None),
+                BackgroundTask.heartbeat_at < cutoff,
+            )
+            .all()
+        )
+        changed = 0
+        now = utcnow()
+        for task in stale_tasks:
+            changed += 1
+            task.error_message = "Task heartbeat expired"
+            task.updated_at = now
+            if int(task.attempts or 0) < settings.worker_max_attempts:
+                task.status = "queued"
+                task.started_at = None
+                task.finished_at = None
+            else:
+                task.status = "failed"
+                task.finished_at = now
+        if changed:
+            self.db.commit()
+        return changed

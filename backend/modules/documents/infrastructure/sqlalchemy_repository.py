@@ -12,6 +12,7 @@ from GeneralInstructionsPage import GeneralInstructionsPage
 from PowerConsumptionCalculationPage import PowerConsumptionCalculationPage
 from backend.errors import AppError
 from backend.modules.documents.additional_info import build_project_additional_info
+from backend.modules.documents.connection_diagrams import build_project_connection_diagrams
 from backend.modules.documents.conventional_symbols import build_project_conventional_symbols
 from backend.modules.documents.general_data import (
     apply_general_data_overrides,
@@ -33,6 +34,7 @@ from backend.modules.documents.specification import (
     build_project_equipment_specification,
     extract_equipment_specification_overrides,
 )
+from backend.modules.documents.structural_scheme import build_project_structural_scheme
 from backend.modules.shared.infrastructure.persistence.models import FloorPlan as FloorPlanModel
 from backend.modules.shared.infrastructure.persistence.models import Project as ProjectModel
 from backend.schemas import (
@@ -87,6 +89,7 @@ class SqlAlchemyDocumentReadRepository:
         conventional_symbols = self.get_project_conventional_symbols(project.id)
         power_consumption = self.get_project_power_consumption_calculation(project.id)
         additional_info = self.get_project_additional_info(project.id)
+        connection_diagrams = self.get_project_connection_diagrams(project.id)
         general_instructions_sheet_count = max(1, len(GeneralInstructionsPage.paginate(general_instructions)))
         conventional_symbols_sheet_count = max(1, len(ConventionalSymbolsPage.paginate(conventional_symbols)))
         power_consumption_sheet_count = max(
@@ -106,6 +109,7 @@ class SqlAlchemyDocumentReadRepository:
             equipment_specification_included=True,
             power_consumption_sheet_count=power_consumption_sheet_count,
             additional_info_sheet_count=additional_info_sheet_count,
+            connection_diagrams_sheet_count=max(1, len(connection_diagrams)),
         )
 
     def get_project_general_data(self, project_id: int) -> dict:
@@ -131,9 +135,19 @@ class SqlAlchemyDocumentReadRepository:
         floor_plans = self.list_project_floor_plans(project_id)
         return build_project_conventional_symbols(project, floor_plans)
 
+    def get_project_structural_scheme(self, project_id: int) -> dict:
+        project = self.get_project(project_id)
+        floor_plans = self.list_project_floor_plans(project_id)
+        return build_project_structural_scheme(project, floor_plans)
+
     def get_project_additional_info(self, project_id: int) -> dict:
         project = self.get_project(project_id)
         return build_project_additional_info(project)
+
+    def get_project_connection_diagrams(self, project_id: int) -> list[dict]:
+        project = self.get_project(project_id)
+        floor_plans = self.list_project_floor_plans(project_id)
+        return build_project_connection_diagrams(project, floor_plans)
 
     def update_project_equipment_specification(
         self,

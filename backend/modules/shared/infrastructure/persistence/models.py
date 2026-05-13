@@ -45,6 +45,7 @@ class User(Base):
     )
 
     owned_projects = relationship("Project", back_populates="owner_user", foreign_keys="Project.owner_user_id")
+    deleted_projects = relationship("Project", back_populates="deleted_by_user", foreign_keys="Project.deleted_by_user_id")
     auth_sessions = relationship("AuthSession", back_populates="user", cascade="all, delete-orphan")
 
     def to_summary_dict(self):
@@ -117,6 +118,8 @@ class Project(Base):
     power_consumption_overrides = Column(JSON, nullable=True)
     additional_info_text = Column(Text, nullable=True)
     owner_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    deleted_at = Column(DateTime, nullable=True, index=True)
+    deleted_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
     latest_pdf_path = Column(String(500), nullable=True)
     latest_pdf_generated_at = Column(DateTime, nullable=True)
     
@@ -133,9 +136,11 @@ class Project(Base):
     equipment_selections = relationship("ProjectEquipmentSelection", back_populates="project", cascade="all, delete-orphan")
     equipment_links = relationship("ProjectEquipmentLink", back_populates="project", cascade="all, delete-orphan")
     owner_user = relationship("User", back_populates="owned_projects", foreign_keys=[owner_user_id])
+    deleted_by_user = relationship("User", back_populates="deleted_projects", foreign_keys=[deleted_by_user_id])
     
     def to_dict(self):
         owner = self.owner_user.to_summary_dict() if self.owner_user is not None else None
+        deleted_by = self.deleted_by_user.to_summary_dict() if self.deleted_by_user is not None else None
         return {
             "id": self.id,
             "name": self.name,
@@ -161,6 +166,9 @@ class Project(Base):
             "number_of_floors": self.number_of_floors,
             "owner_user_id": self.owner_user_id,
             "owner_user": owner,
+            "deleted_at": self.deleted_at.isoformat() if self.deleted_at else None,
+            "deleted_by_user_id": self.deleted_by_user_id,
+            "deleted_by_user": deleted_by,
             "latest_pdf_path": self.latest_pdf_path,
             "latest_pdf_generated_at": self.latest_pdf_generated_at.isoformat() if self.latest_pdf_generated_at else None,
             "created_at": self.created_at.isoformat() if self.created_at else None,
@@ -271,6 +279,7 @@ class EquipmentItem(Base):
     alarm_current_ma = Column(Float, nullable=True)
     smoke_addressing = Column(String(32), nullable=True)
     image_path = Column(String(500), nullable=True)
+    connection_diagram_path = Column(String(500), nullable=True)
     label_pdf_path = Column(String(500), nullable=True)
     manual_pdf_path = Column(String(500), nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
@@ -299,6 +308,7 @@ class EquipmentItem(Base):
             "alarm_current_ma": self.alarm_current_ma,
             "smoke_addressing": self.smoke_addressing,
             "image_path": self.image_path,
+            "connection_diagram_path": self.connection_diagram_path,
             "label_pdf_path": self.label_pdf_path,
             "manual_pdf_path": self.manual_pdf_path,
             "created_at": self.created_at.isoformat() if self.created_at else None,
@@ -1330,6 +1340,48 @@ class RecognitionActiveModel(Base):
             "activated_at": self.activated_at.isoformat() if self.activated_at else None,
             "config_snapshot": self.config_snapshot or {},
             "metrics_summary": self.metrics_summary or {},
+        }
+
+
+class ManagedFile(Base):
+    """Metadata registry for files controlled by backend storage."""
+
+    __tablename__ = "managed_files"
+
+    id = Column(Integer, primary_key=True, index=True)
+    path = Column(String(500), nullable=False, unique=True, index=True)
+    storage_root = Column(String(64), nullable=False, default="storage_objects", index=True)
+    content_type = Column(String(128), nullable=True)
+    size_bytes = Column(Integer, nullable=True)
+    sha256 = Column(String(64), nullable=True, index=True)
+    project_id = Column(Integer, nullable=True, index=True)
+    floor_plan_id = Column(Integer, nullable=True, index=True)
+    equipment_id = Column(Integer, nullable=True, index=True)
+    created_by_user_id = Column(Integer, nullable=True, index=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
+    updated_at = Column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    last_seen_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "path": self.path,
+            "storage_root": self.storage_root,
+            "content_type": self.content_type,
+            "size_bytes": self.size_bytes,
+            "sha256": self.sha256,
+            "project_id": self.project_id,
+            "floor_plan_id": self.floor_plan_id,
+            "equipment_id": self.equipment_id,
+            "created_by_user_id": self.created_by_user_id,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "last_seen_at": self.last_seen_at.isoformat() if self.last_seen_at else None,
         }
 
 

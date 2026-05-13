@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, Request, status
 from sqlalchemy.orm import Session
 
+from backend.audit import record_audit_event
 from backend.auth import AuthenticatedUser, require_developer
 from backend.background_jobs import TASK_RECOGNITION_TRAINING_RUN, dedupe_key_for_task
 from backend.database import get_db
@@ -28,6 +29,8 @@ from backend.schemas import (
     RecognitionTrainingRunRead,
 )
 from backend.services.background_task_service import BackgroundTaskService
+from backend.config import settings
+from backend.security import enforce_rate_limit
 
 router = APIRouter(tags=["recognition-training"], dependencies=[Depends(require_developer)])
 
@@ -141,10 +144,18 @@ def get_recognition_training_run_log(
 )
 def create_recognition_training_run(
     payload: RecognitionTrainingRunCreateRequest,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: AuthenticatedUser = Depends(require_developer),
     service: Any = Depends(get_recognition_training_management_service),
 ) -> BackgroundTaskRead:
+    enforce_rate_limit(
+        request,
+        "recognition_training_run",
+        discriminator=str(current_user.id),
+        limit=settings.heavy_task_rate_limit_count,
+        window_seconds=settings.heavy_task_rate_limit_window_seconds,
+    )
     run = service.create_run(
         step=payload.step,
         epochs=payload.epochs,
@@ -166,6 +177,16 @@ def create_recognition_training_run(
     if run_model is not None:
         run_model.background_task_id = task.id
         db.commit()
+    record_audit_event(
+        db,
+        "recognition_training_run_requested",
+        category="recognition",
+        use_case="CreateRecognitionTrainingRun",
+        user_id=current_user.id,
+        floor_plan_id=run.get("floor_plan_id"),
+        payload={"run_id": run["run_id"], "step": payload.step, "background_task_id": task.id},
+    )
+    db.commit()
     return background_task_read(task)
 
 

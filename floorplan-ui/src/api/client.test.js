@@ -1,5 +1,6 @@
 import {
   authApi,
+  backgroundTasksApi,
   elementsApi,
   equipmentApi,
   floorPlansApi,
@@ -45,9 +46,12 @@ describe('client API helpers', () => {
     formData.append('file', new Blob(['x']), 'plan.png');
 
     await projectsApi.list();
+    await projectsApi.listTrash();
     await projectsApi.get(7);
     await projectsApi.create({ name: 'Project' });
     await projectsApi.update(7, { name: 'Updated' });
+    await projectsApi.remove(7);
+    await projectsApi.permanentlyRemove(7);
     await projectsApi.getGeneralData(7);
     await projectsApi.updateGeneralData(7, { page_title: 'Общие данные' });
     await projectsApi.getGeneralInstructions(7);
@@ -80,6 +84,7 @@ describe('client API helpers', () => {
     await equipmentApi.update(2, { name: 'Heat' });
     await equipmentApi.remove(2);
     await equipmentApi.uploadImage(2, new File(['img'], 'device.png', { type: 'image/png' }));
+    await equipmentApi.uploadConnectionDiagram(2, new File(['diagram'], 'diagram.png', { type: 'image/png' }));
     await equipmentApi.uploadLabelPdf(2, new File(['pdf'], 'label.pdf', { type: 'application/pdf' }));
     await equipmentApi.uploadManualPdf(2, new File(['pdf'], 'manual.pdf', { type: 'application/pdf' }));
 
@@ -107,6 +112,10 @@ describe('client API helpers', () => {
     await recognitionApi.process(11, true);
     await recognitionApi.get(11, true);
     await recognitionApi.submitFeedback(11);
+
+    await backgroundTasksApi.list({ status: 'queued', task_type: 'project_pdf_generate' });
+    await backgroundTasksApi.get(12);
+    await backgroundTasksApi.cancel(12);
 
     await recognitionTrainingApi.getOverview();
     await recognitionTrainingApi.listExamples({ step: 'walls', changed_only: true, search: 'door', empty: '' });
@@ -148,6 +157,8 @@ describe('client API helpers', () => {
     expect(global.fetch.mock.calls.map((call) => call[0])).toEqual(
       expect.arrayContaining([
         '/api/projects',
+        '/api/projects/trash',
+        '/api/projects/7/permanent',
         '/api/projects/7/general-data',
         '/api/projects/7/general-instructions',
         '/api/projects/7/power-consumption-calculation',
@@ -159,9 +170,12 @@ describe('client API helpers', () => {
         '/api/users/5',
         '/api/users/5/reset-password',
         '/api/equipment',
+        '/api/equipment/2/connection-diagram',
         '/api/floor-plans/11?include_elements=false',
         '/api/floor-plans/11/pipeline/walls/detect',
         '/api/floor-plans/11/process?debug=true',
+        '/api/background-tasks?status=queued&task_type=project_pdf_generate',
+        '/api/background-tasks/12/cancel',
         '/api/recognition-training/examples?step=walls&changed_only=true&search=door',
         '/api/signal-instruments/1/merge-routes',
         '/api/floor-plans/11/cable-routes?system_type=addressable&subsystem_type=soue',
@@ -189,7 +203,7 @@ describe('client API helpers', () => {
         text: jest.fn().mockResolvedValue('Server error'),
       });
 
-    await expect(projectsApi.generatePdf(9)).resolves.toBe(rawResponse);
+    await expect(projectsApi.generatePdf(9)).resolves.toEqual({ file: true });
     await expect(projectsApi.remove(9)).resolves.toBeNull();
     await expect(projectsApi.list()).resolves.toBe('plain text');
     await expect(projectsApi.create({ name: 'Bad' })).rejects.toMatchObject({ message: 'Некорректные данные', status: 400 });
