@@ -32,6 +32,36 @@ npm install
 npm start
 ```
 
+## Docker
+
+Перед первым запуском Docker seed уже можно подготовить из текущих локальных данных:
+
+```powershell
+python backend/tools/export_docker_seed.py
+```
+
+После этого вся система поднимается одной командой из корня репозитория:
+
+```powershell
+docker compose up -d
+```
+
+Сервисы в составе compose:
+
+- `frontend` - Nginx со статической сборкой React, доступен на `http://localhost:3000`.
+- `backend` - FastAPI/Uvicorn, доступен на `http://localhost:8000`.
+- `postgres` - PostgreSQL с named volume `postgres_data`.
+- `db-seed` - одноразовый импорт seed-базы SQLite в PostgreSQL при первом запуске.
+- `storage-init` - одноразовое копирование seed-файлов в named volume `app_data`.
+
+`docker compose down` останавливает контейнеры и сохраняет данные в volumes. `docker compose down -v` удаляет volumes; при следующем `docker compose up -d` база и файловое хранилище снова инициализируются из seed-снимка. Последующие проекты, пользователи, оборудование и PDF, созданные на конкретном устройстве, остаются индивидуальными для его Docker volumes.
+
+Если нужно изменить стандартный набор данных для новых установок, обновите локальные данные обычным запуском приложения и повторно выполните:
+
+```powershell
+python backend/tools/export_docker_seed.py
+```
+
 ## Технологические решения
 
 - PDF формируется через `reportlab`; этот слой оставлен без замены.

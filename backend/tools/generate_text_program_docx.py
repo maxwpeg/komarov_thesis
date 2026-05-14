@@ -507,13 +507,13 @@ def add_program_text(doc: Document):
     )
     add_paragraph(
         doc,
-        "Вспомогательные файлы реализуют отдельные страницы документа. TitlePage.py "
-        "формирует титульные листы, DrawingPage.py – чертежи с наложением проектных "
-        "элементов, GeneralDataPage.py и GeneralInstructionsPage.py – общие данные и "
-        "указания, ConventionalSymbolsPage.py – условные обозначения, "
-        "SpecificationPage.py – спецификацию оборудования, "
-        "PowerConsumptionCalculationPage.py – расчетные таблицы, "
-        "AdditionalInfoPage.py – дополнительную справочную информацию.",
+        "Вспомогательные файлы реализуют отдельные страницы документа. pdf_documents/TitlePage.py "
+        "формирует титульные листы, pdf_documents/DrawingPage.py – чертежи с наложением проектных "
+        "элементов, pdf_documents/GeneralDataPage.py и pdf_documents/GeneralInstructionsPage.py – общие данные и "
+        "указания, pdf_documents/ConventionalSymbolsPage.py – условные обозначения, "
+        "pdf_documents/SpecificationPage.py – спецификацию оборудования, "
+        "pdf_documents/PowerConsumptionCalculationPage.py – расчетные таблицы, "
+        "pdf_documents/AdditionalInfoPage.py – дополнительную справочную информацию.",
     )
     add_paragraph(
         doc,

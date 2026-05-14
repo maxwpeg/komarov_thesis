@@ -12,12 +12,12 @@ from reportlab.lib.units import mm
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 
-from DrawingPage import DrawingPage, draw_fire_alarm_symbol
-from Page import Page
-from Project import Project as PDFProject
-from TitlePage import TitlePage
+from pdf_documents.DrawingPage import DrawingPage, draw_fire_alarm_symbol
+from pdf_documents.Page import Page
+from pdf_documents.Project import Project as PDFProject
+from pdf_documents.TitlePage import TitlePage
 from backend.bootstrap import register_pdf_fonts
-from consts import (
+from pdf_documents.consts import (
     DEFAULT_CHECKER_NAME,
     DEFAULT_CONTRACTOR_NAME,
     DEFAULT_CPE_NAME,

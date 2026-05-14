@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import time
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Iterable
@@ -22,6 +23,8 @@ class CoverageConfig:
     COVERAGE_AREA_TOLERANCE_SQM = 1e-4
     MAX_VERIFICATION_ITERATIONS = 6
     DISK_SEGMENTS = 32
+    MAX_EXACT_SEARCH_CANDIDATES = 96
+    EXACT_SEARCH_TIME_LIMIT_SECONDS = 1.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -543,8 +546,11 @@ def _solve_k_cover(
         return []
 
     upper_bound = len(greedy)
+    if len(candidates) > CoverageConfig.MAX_EXACT_SEARCH_CANDIDATES:
+        return greedy
 
     full_witness_mask = (1 << witness_count) - 1
+    deadline = time.perf_counter() + CoverageConfig.EXACT_SEARCH_TIME_LIMIT_SECONDS
 
     def dynamic_lower_bound(need_once_mask: int, need_twice_mask: int, used_mask: int) -> int:
         total_need = need_once_mask.bit_count() + need_twice_mask.bit_count()
@@ -603,6 +609,8 @@ def _solve_k_cover(
         visited: set[tuple[int, int, int]],
         best_seen: dict[tuple[int, int], int],
     ) -> list[int] | None:
+        if time.perf_counter() >= deadline:
+            return None
         if need_once_mask == 0:
             return chosen[:]
         if len(chosen) >= target_size:
@@ -660,6 +668,8 @@ def _solve_k_cover(
         return None
 
     for target_size in range(max(1, initial_lower_bound), upper_bound + 1):
+        if time.perf_counter() >= deadline:
+            return greedy
         result = search(
             target_size,
             0,
@@ -671,6 +681,8 @@ def _solve_k_cover(
         )
         if result is not None:
             return result
+        if time.perf_counter() >= deadline:
+            return greedy
     return greedy
 
 

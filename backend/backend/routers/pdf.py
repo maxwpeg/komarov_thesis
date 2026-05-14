@@ -7,10 +7,10 @@ import os
 from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy.orm import Session
 
-from AdditionalInfoPage import AdditionalInfoPage
-from ConventionalSymbolsPage import ConventionalSymbolsPage
-from GeneralInstructionsPage import GeneralInstructionsPage
-from PowerConsumptionCalculationPage import PowerConsumptionCalculationPage
+from pdf_documents.AdditionalInfoPage import AdditionalInfoPage
+from pdf_documents.ConventionalSymbolsPage import ConventionalSymbolsPage
+from pdf_documents.GeneralInstructionsPage import GeneralInstructionsPage
+from pdf_documents.PowerConsumptionCalculationPage import PowerConsumptionCalculationPage
 from backend.assets import build_asset_url
 from backend.audit import record_audit_event
 from backend.auth import AuthenticatedUser, require_project_access

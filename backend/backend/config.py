@@ -54,6 +54,9 @@ DEFAULT_DATA_DIR = _env_path("DATA_DIR", _default_data_dir())
 @dataclass(frozen=True)
 class AppConfig:
     project_root: Path = PROJECT_ROOT
+    assets_dir: Path = PROJECT_ROOT / "assets"
+    fonts_dir: Path = assets_dir / "fonts"
+    models_dir: Path = assets_dir / "models"
     data_dir: Path = DEFAULT_DATA_DIR
     uploads_dir: Path = data_dir / "uploads"
     outputs_dir: Path = data_dir / "outputs"
@@ -61,8 +64,8 @@ class AppConfig:
     object_storage_dir: Path = data_dir / "storage_objects"
     database_file: Path = data_dir / "floor_plans.db"
     feedback_file: Path = data_dir / "user_feedback.json"
-    regular_font_path: Path = PROJECT_ROOT / "GOST_A.TTF"
-    bold_font_path: Path = PROJECT_ROOT / "GOST_A_Bold.ttf"
+    regular_font_path: Path = fonts_dir / "GOST_A.TTF"
+    bold_font_path: Path = fonts_dir / "GOST_A_Bold.ttf"
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
     auth_cookie_name: str = os.getenv("AUTH_COOKIE_NAME", "auth_session")
     auth_session_ttl_hours: int = int(os.getenv("AUTH_SESSION_TTL_HOURS", "12"))

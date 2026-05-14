@@ -65,7 +65,7 @@ TP_REPLACEMENTS = {
         "• backend/tests – набор backend-интеграционных и API-тестов."
     ),
     "• Файлы Project.py, PDFGenerator.py и связанные с ними страницы формируют контур PDF-генерации.": (
-        "• Файлы backend/Project.py, backend/PDFGenerator.py и связанные с ними страницы формируют контур PDF-генерации."
+        "• Файлы backend/pdf_documents/Project.py, backend/pdf_documents/PDFGenerator.py и связанные с ними страницы формируют контур PDF-генерации."
     ),
     "Серверная часть запускается через файл main.py, который поднимает приложение backend.app:app.": (
         "Серверная часть запускается из каталога backend командой uvicorn backend.app:app --host 127.0.0.1 --port 8000."

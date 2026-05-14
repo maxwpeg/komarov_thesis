@@ -689,15 +689,24 @@ class RecognitionTrainingManagementService:
         from ultralytics import YOLO
 
         config = run.config or {}
-        model_path = (settings.project_root / str(config.get("model") or self._training_defaults(run.step)["model"])).resolve()
+        model_path = self._resolve_base_model_path(
+            str(config.get("model") or self._training_defaults(run.step)["model"])
+        )
         if not model_path.exists():
             raise AppError(400, "recognition_training_model_missing", f"Base model not found: {model_path}")
         resolved_device, resolution_reason = self._resolve_ultralytics_device_details(
             config.get("device", self._training_defaults(run.step)["device"])
         )
+        requested_batch = config.get("batch", self._training_defaults(run.step)["batch"])
+        resolved_batch = self._resolve_ultralytics_batch_size(
+            requested_batch,
+            resolved_device,
+            task="segment",
+        )
         print(
             f"[recognition-training] device requested={config.get('device', self._training_defaults(run.step)['device'])!r} "
-            f"resolved={resolved_device!r} reason={resolution_reason}",
+            f"resolved={resolved_device!r} reason={resolution_reason}; "
+            f"batch requested={requested_batch!r} resolved={resolved_batch!r}",
             flush=True,
         )
 
@@ -707,7 +716,7 @@ class RecognitionTrainingManagementService:
             data=str(Path(dataset_summary["data_yaml"]).resolve()),
             epochs=int(config.get("epochs", self._training_defaults(run.step)["epochs"])),
             imgsz=int(config.get("imgsz", self._training_defaults(run.step)["imgsz"])),
-            batch=int(config.get("batch", self._training_defaults(run.step)["batch"])),
+            batch=resolved_batch,
             patience=int(config.get("patience", self._training_defaults(run.step)["patience"])),
             device=resolved_device,
             project=str(trainer_root),
@@ -731,6 +740,8 @@ class RecognitionTrainingManagementService:
             "requested_device": str(config.get("device", self._training_defaults(run.step)["device"])),
             "resolved_device": resolved_device,
             "device_resolution_reason": resolution_reason,
+            "requested_batch": requested_batch,
+            "resolved_batch": resolved_batch,
             "results": {key: float(value) for key, value in getattr(results, "results_dict", {}).items()},
             "save_dir": str(save_dir),
         }
@@ -917,6 +928,17 @@ class RecognitionTrainingManagementService:
             self.db.commit()
 
     @staticmethod
+    def _resolve_base_model_path(value: str) -> Path:
+        raw = str(value or "").strip()
+        model_path = (settings.project_root / raw).resolve()
+        if model_path.exists():
+            return model_path
+        legacy_model_path = (settings.models_dir / Path(raw).name).resolve()
+        if legacy_model_path.exists():
+            return legacy_model_path
+        return model_path
+
+    @staticmethod
     def _training_defaults(step: str) -> dict[str, Any]:
         return dict(TRAINING_PARAMETER_DEFAULTS[step])
 
@@ -987,6 +1009,25 @@ class RecognitionTrainingManagementService:
     @classmethod
     def _resolve_ultralytics_device(cls, device_value: Any) -> str:
         return cls._resolve_ultralytics_device_details(device_value)[0]
+
+    @staticmethod
+    def _resolve_ultralytics_batch_size(batch_value: Any, resolved_device: str, *, task: str = "segment") -> int | float:
+        """Normalize training batch size for Ultralytics compatibility.
+
+        Ultralytics 8.4.x AutoBatch is CUDA-oriented. On CPU it falls back to a
+        large batch, and segment training can return a 3D proto tensor that the
+        loss expects to be 4D. Batch size 1 keeps CPU fine-tuning stable.
+        """
+        try:
+            numeric_batch = float(batch_value)
+        except (TypeError, ValueError):
+            numeric_batch = -1.0
+
+        if str(resolved_device).lower() == "cpu" and task == "segment":
+            return 1
+        if numeric_batch <= 0:
+            return batch_value
+        return int(numeric_batch)
 
     @classmethod
     def _resolve_ultralytics_device_details(cls, device_value: Any) -> tuple[str, str]:

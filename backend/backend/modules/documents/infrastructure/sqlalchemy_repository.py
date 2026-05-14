@@ -6,10 +6,10 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
-from AdditionalInfoPage import AdditionalInfoPage
-from ConventionalSymbolsPage import ConventionalSymbolsPage
-from GeneralInstructionsPage import GeneralInstructionsPage
-from PowerConsumptionCalculationPage import PowerConsumptionCalculationPage
+from pdf_documents.AdditionalInfoPage import AdditionalInfoPage
+from pdf_documents.ConventionalSymbolsPage import ConventionalSymbolsPage
+from pdf_documents.GeneralInstructionsPage import GeneralInstructionsPage
+from pdf_documents.PowerConsumptionCalculationPage import PowerConsumptionCalculationPage
 from backend.errors import AppError
 from backend.modules.documents.additional_info import build_project_additional_info
 from backend.modules.documents.connection_diagrams import build_project_connection_diagrams

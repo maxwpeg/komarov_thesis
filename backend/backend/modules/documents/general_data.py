@@ -5,7 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
-from GeneralDataPage import DEFAULT_GENERAL_DATA_REFERENCE_DOCUMENTS, DEFAULT_GENERAL_DATA_STATEMENT, GeneralDataPage
+from pdf_documents.GeneralDataPage import DEFAULT_GENERAL_DATA_REFERENCE_DOCUMENTS, DEFAULT_GENERAL_DATA_STATEMENT, GeneralDataPage
 
 
 DEFAULT_GENERAL_DATA_PAGE_TITLE = "Общие данные"

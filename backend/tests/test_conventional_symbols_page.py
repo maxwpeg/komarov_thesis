@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 from reportlab.pdfgen import canvas
 
-from ConventionalSymbolsPage import ConventionalSymbolsPage
+from pdf_documents.ConventionalSymbolsPage import ConventionalSymbolsPage
 from backend.bootstrap import register_pdf_fonts
 from backend.modules.documents.conventional_symbols import build_project_conventional_symbols
 
@@ -129,15 +129,15 @@ def test_conventional_symbols_page_draw_uses_matching_symbol_drawers(monkeypatch
     )
 
     monkeypatch.setattr(
-        "ConventionalSymbolsPage.draw_signal_instrument_symbol",
+        "pdf_documents.ConventionalSymbolsPage.draw_signal_instrument_symbol",
         lambda _c, _x, _y, instrument_type, size=0: calls.append(("instrument", instrument_type)),
     )
     monkeypatch.setattr(
-        "ConventionalSymbolsPage.draw_fire_alarm_symbol",
+        "pdf_documents.ConventionalSymbolsPage.draw_fire_alarm_symbol",
         lambda _c, _x, _y, device_type, size=0: calls.append(("fire_alarm", device_type)),
     )
     monkeypatch.setattr(
-        "ConventionalSymbolsPage.draw_soue_device_symbol",
+        "pdf_documents.ConventionalSymbolsPage.draw_soue_device_symbol",
         lambda _c, _x, _y, device_type, size=0: calls.append(("soue_device", device_type)),
     )
 

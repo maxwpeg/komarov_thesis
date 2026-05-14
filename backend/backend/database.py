@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Generator
 
-from sqlalchemy import create_engine, event, inspect
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -282,13 +282,22 @@ def _ensure_backward_compatible_columns() -> None:
             if "manual_pdf_path" not in equipment_columns:
                 connection.exec_driver_sql("ALTER TABLE equipment_items ADD COLUMN manual_pdf_path VARCHAR(500)")
             if "price" in equipment_columns:
-                connection.exec_driver_sql(
-                    """
-                    UPDATE equipment_items
-                    SET price = ROUND(price, 2)
-                    WHERE price IS NOT NULL
-                    """
-                )
+                if connection.dialect.name == "postgresql":
+                    connection.exec_driver_sql(
+                        """
+                        UPDATE equipment_items
+                        SET price = ROUND(price::numeric, 2)::double precision
+                        WHERE price IS NOT NULL
+                        """
+                    )
+                else:
+                    connection.exec_driver_sql(
+                        """
+                        UPDATE equipment_items
+                        SET price = ROUND(price, 2)
+                        WHERE price IS NOT NULL
+                        """
+                    )
             rows = connection.exec_driver_sql(
                 """
                 SELECT id, category, specs, smoke_addressing, standby_current_ma, alarm_current_ma
@@ -303,10 +312,17 @@ def _ensure_backward_compatible_columns() -> None:
                     standby_current_ma=row["standby_current_ma"],
                     alarm_current_ma=row["alarm_current_ma"],
                 )
-                connection.exec_driver_sql(
-                    "UPDATE equipment_items SET specs = ? WHERE id = ?",
-                    (json.dumps(normalized_specs, ensure_ascii=False), row["id"]),
-                )
+                specs_payload = json.dumps(normalized_specs, ensure_ascii=False)
+                if connection.dialect.name == "postgresql":
+                    connection.execute(
+                        text("UPDATE equipment_items SET specs = CAST(:specs AS JSON) WHERE id = :id"),
+                        {"specs": specs_payload, "id": row["id"]},
+                    )
+                else:
+                    connection.execute(
+                        text("UPDATE equipment_items SET specs = :specs WHERE id = :id"),
+                        {"specs": specs_payload, "id": row["id"]},
+                    )
 
         if "projects" in table_names:
             project_columns = {column["name"] for column in inspector.get_columns("projects")}
@@ -314,12 +330,14 @@ def _ensure_backward_compatible_columns() -> None:
                 connection.exec_driver_sql("ALTER TABLE projects ADD COLUMN deleted_at DATETIME")
             if "deleted_by_user_id" not in project_columns:
                 connection.exec_driver_sql("ALTER TABLE projects ADD COLUMN deleted_by_user_id INTEGER")
-            connection.exec_driver_sql(
-                """
-                UPDATE projects
-                SET code = REPLACE(code, 'RP-ZK-', 'РП-ЗК-')
-                WHERE code LIKE 'RP-ZK-%'
-                """
+            connection.execute(
+                text(
+                    """
+                    UPDATE projects
+                    SET code = REPLACE(code, 'RP-ZK-', 'РП-ЗК-')
+                    WHERE code LIKE 'RP-ZK-%'
+                    """
+                )
             )
 
         if "project_year_counters" in table_names and "projects" in table_names:
@@ -330,7 +348,11 @@ def _ensure_backward_compatible_columns() -> None:
                 FROM projects
                 GROUP BY year
                 ON CONFLICT(year) DO UPDATE SET
-                    last_number = MAX(project_year_counters.last_number, excluded.last_number),
+                    last_number = CASE
+                        WHEN project_year_counters.last_number > excluded.last_number
+                            THEN project_year_counters.last_number
+                        ELSE excluded.last_number
+                    END,
                     updated_at = CURRENT_TIMESTAMP
                 """
             )

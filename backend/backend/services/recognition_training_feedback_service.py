@@ -40,7 +40,7 @@ OPENINGS_BATCH_MIN_APPROVED = 75
 OPENINGS_BATCH_MIN_LABELED = 200
 TRAINING_PARAMETER_DEFAULTS = {
     "walls": {
-        "model": "yolov8n-seg.pt",
+        "model": "assets/models/yolov8n-seg.pt",
         "epochs": 80,
         "imgsz": 1024,
         "batch": -1,
@@ -48,7 +48,7 @@ TRAINING_PARAMETER_DEFAULTS = {
         "device": "auto",
     },
     "openings": {
-        "model": "yolov8n-seg.pt",
+        "model": "assets/models/yolov8n-seg.pt",
         "epochs": 120,
         "imgsz": 1280,
         "batch": -1,

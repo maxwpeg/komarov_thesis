@@ -14,7 +14,7 @@ extend-exclude = [
 select = ["E", "F", "I", "B", "UP"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["backend", "floorplan", "tests"]
+known-first-party = ["backend", "floorplan", "pdf_documents", "tests"]
 
 [tool.ruff.format]
 quote-style = "double"

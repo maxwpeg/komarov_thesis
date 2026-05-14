@@ -369,6 +369,16 @@ def test_resolve_ultralytics_device_uses_cpu_when_auto_and_cuda_unavailable():
             sys.modules["torchvision"] = original_torchvision
 
 
+def test_resolve_ultralytics_batch_size_forces_cpu_segment_training_to_one():
+    assert RecognitionTrainingManagementService._resolve_ultralytics_batch_size(-1, "cpu", task="segment") == 1
+    assert RecognitionTrainingManagementService._resolve_ultralytics_batch_size(16, "cpu", task="segment") == 1
+
+
+def test_resolve_ultralytics_batch_size_preserves_cuda_auto_batch():
+    assert RecognitionTrainingManagementService._resolve_ultralytics_batch_size(-1, "0", task="segment") == -1
+    assert RecognitionTrainingManagementService._resolve_ultralytics_batch_size(8, "0", task="segment") == 8
+
+
 def test_resolve_ultralytics_device_uses_first_cuda_device_when_available():
     def fake_tensor(data, *args, **kwargs):
         return {"data": data, "device": kwargs.get("device")}

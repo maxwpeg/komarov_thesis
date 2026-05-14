@@ -154,6 +154,41 @@ def test_l_shaped_room_has_no_uncovered_inner_pocket():
     _assert_exact_room_coverage(room, layout["detectors"], scale_factor=100.0, multiplicity=1)
 
 
+def test_complex_non_addressable_room_falls_back_without_hanging():
+    room = {
+        "id": 13,
+        "name": "Complex room",
+        "room_type": "general",
+        "center_x": 639.4285714285714,
+        "center_y": 375.85714285714283,
+        "boundary_points": [
+            [1096.0, 61.0],
+            [708.0, 61.0],
+            [684.0, 438.0],
+            [680.0, 314.0],
+            [306.0, 314.0],
+            [300.0, 418.0],
+            [34.0, 404.0],
+            [34.0, 643.0],
+            [671.0, 643.0],
+            [674.0, 479.0],
+            [698.0, 661.0],
+            [1096.0, 661.0],
+            [1096.0, 84.0],
+            [875.0, 81.0],
+        ],
+    }
+
+    layout = calculate_fire_alarm_layout(
+        {"rooms": [room], "doors": [], "stairs": [], "walls": []},
+        scale_factor=16.37353128882235,
+        system_type="non_addressable",
+    )
+
+    assert len(layout["detectors"]) > 0
+    assert any("approximate detector placement" in warning for warning in layout["warnings"])
+
+
 def test_small_room_still_receives_two_smoke_detectors():
     layout = calculate_fire_alarm_layout(
         {

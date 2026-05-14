@@ -9,7 +9,7 @@ from reportlab.lib import colors
 from reportlab.pdfgen import canvas
 
 from backend.bootstrap import register_pdf_fonts
-from DrawingPage import (
+from pdf_documents.DrawingPage import (
     DRAWING_SAFE_MARGIN,
     DIMENSION_LINE_OFFSET,
     EXPLICATION_GAP,
@@ -35,7 +35,7 @@ from DrawingPage import (
     resolve_opening_wall,
     wall_polygon,
 )
-from consts import DIMENSION_ARROW_SIZE, DIMENSION_TEXT_FONT_SIZE, DIMENSION_TEXT_GAP, PAGESIZE_A3_LANDSCAPE
+from pdf_documents.consts import DIMENSION_ARROW_SIZE, DIMENSION_TEXT_FONT_SIZE, DIMENSION_TEXT_GAP, PAGESIZE_A3_LANDSCAPE
 
 
 def _rasterize_contours(contours: list[np.ndarray], shape: tuple[int, int]) -> np.ndarray:

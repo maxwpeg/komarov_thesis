@@ -8,14 +8,14 @@ from pathlib import Path
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import mm
 
-import DrawingPage as drawing_page_module
+import pdf_documents.DrawingPage as drawing_page_module
 from backend.bootstrap import register_pdf_fonts
 from backend.pdf_generator import _resolve_project_engineer, generate_project_pdf
-from DrawingPage import DrawingPage, PlanTransform, _get_soue_device_code, _soue_device_symbol_half_extents
-from Project import Project
-from SpecificationPage import SpecificationPage
-from StructuralSchemePage import StructuralSchemePage
-from consts import PAGESIZE_A3_LANDSCAPE, PAGESIZE_A4
+from pdf_documents.DrawingPage import DrawingPage, PlanTransform, _get_soue_device_code, _soue_device_symbol_half_extents
+from pdf_documents.Project import Project
+from pdf_documents.SpecificationPage import SpecificationPage
+from pdf_documents.StructuralSchemePage import StructuralSchemePage
+from pdf_documents.consts import PAGESIZE_A3_LANDSCAPE, PAGESIZE_A4
 
 
 class _RecordedPath:

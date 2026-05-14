@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from reportlab.lib.units import mm
 
-from GeneralDataPage import DEFAULT_GENERAL_DATA_REFERENCE_DOCUMENTS, GeneralDataPage
-from Project import Project
+from pdf_documents.GeneralDataPage import DEFAULT_GENERAL_DATA_REFERENCE_DOCUMENTS, GeneralDataPage
+from pdf_documents.Project import Project
 from backend.bootstrap import register_pdf_fonts
 
 
@@ -21,11 +21,11 @@ def test_build_general_data_payload_uses_project_code_cpe_and_sheet_notes(monkey
     )
 
     monkeypatch.setattr(
-        "Project.ConventionalSymbolsPage.paginate",
+        "pdf_documents.Project.ConventionalSymbolsPage.paginate",
         lambda *args, **kwargs: [{"page_rows": []}, {"page_rows": []}],
     )
     monkeypatch.setattr(
-        "Project.PowerConsumptionCalculationPage.paginate",
+        "pdf_documents.Project.PowerConsumptionCalculationPage.paginate",
         lambda *args, **kwargs: [{"page_rows": []}, {"page_rows": []}, {"page_rows": []}],
     )
 
@@ -96,8 +96,8 @@ def test_build_general_data_payload_uses_general_instructions_and_symbols_page_c
         conventional_symbols={"page_title": "Условные графические обозначения", "rows": [], "decode_lines": []},
     )
 
-    monkeypatch.setattr("Project.GeneralInstructionsPage.paginate", lambda *args, **kwargs: [{}, {}, {}])
-    monkeypatch.setattr("Project.ConventionalSymbolsPage.paginate", lambda *args, **kwargs: [{}, {}])
+    monkeypatch.setattr("pdf_documents.Project.GeneralInstructionsPage.paginate", lambda *args, **kwargs: [{}, {}, {}])
+    monkeypatch.setattr("pdf_documents.Project.ConventionalSymbolsPage.paginate", lambda *args, **kwargs: [{}, {}])
 
     payload = project._build_general_data_payload()
 

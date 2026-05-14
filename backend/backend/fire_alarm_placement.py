@@ -586,19 +586,30 @@ class FireAlarmPlacement:
         if not room.get("boundary_points") or len(room["boundary_points"]) < 3:
             return [], [f"Помещение {room.get('id') or room.get('name') or 'без имени'} пропущено: нет полигона."]
 
+        coverage_need = 1 if self.system_type == "addressable" else 2
+        radius_px = self.smoke_detector_radius / _safe_scale(scale_factor)
         detector_positions, warnings = solve_room_detector_positions(
             room,
             smoke_detector_radius_mm=self.smoke_detector_radius,
             scale_factor=scale_factor,
-            coverage_need=1 if self.system_type == "addressable" else 2,
+            coverage_need=coverage_need,
         )
-        radius_px = self.smoke_detector_radius / _safe_scale(scale_factor)
+        if not detector_positions:
+            detector_positions, fallback_warnings = _select_detector_positions(
+                room,
+                radius_px,
+                scale_factor,
+                coverage_need=coverage_need,
+            )
+            warnings.extend(fallback_warnings)
+            if detector_positions:
+                warnings.append("Used approximate detector placement because exact coverage solver did not converge.")
         refined_positions, has_overlap = _refine_detector_positions_for_drawing(
             room,
             detector_positions,
             radius_px=radius_px,
             scale_factor=scale_factor,
-            coverage_need=1 if self.system_type == "addressable" else 2,
+            coverage_need=coverage_need,
         )
         if has_overlap:
             warnings.append(

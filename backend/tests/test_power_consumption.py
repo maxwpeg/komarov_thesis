@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from PowerConsumptionCalculationPage import PowerConsumptionCalculationPage
+from pdf_documents.PowerConsumptionCalculationPage import PowerConsumptionCalculationPage
 from backend.bootstrap import register_pdf_fonts
 from backend.errors import AppError
 from backend.modules.documents.power_consumption import (

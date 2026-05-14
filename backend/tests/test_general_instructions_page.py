@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from GeneralInstructionsPage import GeneralInstructionsPage
+from pdf_documents.GeneralInstructionsPage import GeneralInstructionsPage
 from backend.bootstrap import register_pdf_fonts
 from backend.modules.documents.general_instructions import build_project_general_instructions
 
