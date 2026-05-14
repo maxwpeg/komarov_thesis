@@ -30,6 +30,8 @@ outputs/
 debug_output/
 storage_objects/
 floor_plans.db
+*.db-shm
+*.db-wal
 project_counter.json
 user_feedback.json
 

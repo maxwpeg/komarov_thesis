@@ -1,111 +1,72 @@
-# Бэкенд проекта
+# Komarov Thesis App
 
-## 1. Назначение
+Проект разделен на две запускаемые папки:
 
-Данный репозиторий содержит серверную часть приложения для проектирования систем пожарной сигнализации и СОУЭ. Бэкенд отвечает за хранение проектов, обработку планов этажей, подбор оборудования, генерацию PDF-документации, обучение распознавания и фоновые задачи.
+- `backend/` - FastAPI API, миграции, распознавание планов, PDF-генерация, аудит, фоновые задачи, тесты и backend-инструменты.
+- `frontend/` - React-приложение с `package.json` прямо в корне папки.
 
-## 2. Состав репозитория
+Рабочие данные не входят в исходный код: `floor_plans.db`, `uploads/`, `outputs/`, `debug_output/`, `storage_objects/`, `.env`, кэши и временные файлы остаются локальными. После переноса старую базу и файлы можно использовать через `DATA_DIR=..` в `backend/.env`.
 
-В бэкенд-репозитории должны оставаться следующие части проекта:
+## Запуск
 
-- `backend/` - основное FastAPI-приложение, роутеры, сервисы, схемы и модули предметной области.
-- `alembic/` и `alembic.ini` - миграции базы данных.
-- `floorplan/` - модуль распознавания и обработки планов.
-- `tools/` - служебные скрипты для воркера, обучения и экспорта данных.
-- `tests/` - тесты серверной части.
-- корневые файлы `Project.py`, `DrawingPage.py`, `Page.py`, `TitlePage.py`, `SpecificationPage.py`, `GeneralDataPage.py`, `GeneralInstructionsPage.py`, `ConventionalSymbolsPage.py`, `PowerConsumptionCalculationPage.py`, `AdditionalInfoPage.py`, `ConnectionDiagramPage.py`, `StructuralSchemePage.py`, `consts.py` - слой генерации PDF.
-- `GOST_A.TTF`, `GOST_A_Bold.ttf` - шрифты для PDF.
-- `backend/requirements.txt`, `pyproject.toml`, `pytest.ini`, `.env.example`, `.gitignore` - конфигурация запуска и разработки.
-
-Папка `floorplan-ui/` относится к фронтенду и при разделении переносится в отдельный репозиторий.
-
-## 3. Требования
-
-- Python 3.12.
-- SQLite для локального запуска или другая база через `DATABASE_URL`.
-- Tesseract OCR, если используется OCR-распознавание.
-- Установленные зависимости из `backend/requirements.txt`.
-
-## 4. Переменные окружения
-
-Основные переменные задаются в файле `.env`.
-
-| Переменная | Назначение |
-| --- | --- |
-| `DATABASE_URL` | строка подключения к базе данных. Если не задана, используется `floor_plans.db` |
-| `CORS_ALLOWED_ORIGINS` | адреса фронтенда через запятую |
-| `ASSET_PUBLIC_BASE_URL` | публичный адрес бэкенда для ссылок на PDF и изображения |
-| `BOOTSTRAP_DEVELOPER_USERNAME` | логин первого администратора |
-| `BOOTSTRAP_DEVELOPER_PASSWORD` | пароль первого администратора |
-| `RUN_INLINE_WORKER` | запуск фонового воркера внутри API-процесса: `1` или `0` |
-
-## 5. Локальный запуск
+Backend:
 
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -r backend\requirements.txt
-copy .env.example .env
+cd backend
+python -m pip install -r requirements.txt
 uvicorn backend.app:app --host 127.0.0.1 --port 8000
 ```
 
-Если фоновые задачи запускаются отдельным процессом:
+Фоновый worker:
 
 ```powershell
-python tools\run_background_worker.py
+cd backend
+python tools/run_background_worker.py
 ```
 
-## 6. Проверка
+Frontend:
 
 ```powershell
-python -m pytest
+cd frontend
+npm install
+npm start
 ```
 
-Для быстрой проверки основных доработанных разделов:
+## Технологические решения
+
+- PDF формируется через `reportlab`; этот слой оставлен без замены.
+- Пароли хэшируются через PBKDF2, без перехода на другую схему в этой итерации.
+- По умолчанию используется SQLite. Для PostgreSQL-совместимого запуска можно задать `DATABASE_URL`.
+- Роль `developer` является текущим эквивалентом администратора: управление пользователями, аудит, дообучение, корзина проектов и служебные операции доступны ей.
+
+## Возможности
+
+- Проекты, планы этажей, элементы, оборудование и поэтапный pipeline распознавания.
+- Административный аудит: `/api/audit`, фильтры и экспорт CSV/JSON.
+- Фоновые задачи с прогрессом, стадиями и повторным запуском failed-задач.
+- PDF-документы проекта сохраняются как версии с датой, автором, параметрами и ссылкой скачивания.
+- Списки проектов поддерживают фильтры по автору, статусу, объекту, номеру и датам.
+
+## Ограничения
+
+- Загрузка планов этажей в текущей версии рассчитана на изображения, минимальный размер - `200x200` пикселей.
+- PDF-файлы поддерживаются как артефакты и документы оборудования, но не как импортируемый план этажа.
+- Редактор планов в этой итерации функционально не менялся.
+
+## Проверки
+
+Backend:
 
 ```powershell
-python -m pytest tests\test_pdf_smoke.py tests\test_general_data_page.py tests\test_structural_scheme.py tests\test_api.py tests\test_auth_api.py
+cd backend
+python -m compileall backend floorplan tools
+python -m pytest -q
 ```
 
-## 7. Инструкция по разделению на два репозитория
+Frontend:
 
-1. Создать два пустых репозитория:
-   - `fire-alarm-backend`;
-   - `fire-alarm-frontend`.
-2. В репозиторий `fire-alarm-backend` перенести текущее содержимое корня проекта, кроме папки `floorplan-ui/`.
-3. Не переносить в backend-репозиторий сгенерированные данные:
-   - `.venv/`;
-   - `.pytest_cache/`;
-   - `.tmp_playwright/`;
-   - `.tmp_pypdf/`;
-   - `.playwright-browsers/`;
-   - `uploads/`;
-   - `outputs/`;
-   - `debug_output/`;
-   - `storage_objects/`;
-   - `floor_plans.db`;
-   - `__pycache__/`;
-   - файлы логов.
-4. В репозиторий `fire-alarm-frontend` перенести содержимое папки `floorplan-ui/` так, чтобы `package.json` находился в корне frontend-репозитория.
-5. В backend-репозитории настроить `.env`:
-
-```env
-CORS_ALLOWED_ORIGINS=http://127.0.0.1:3000,http://localhost:3000
-ASSET_PUBLIC_BASE_URL=http://127.0.0.1:8000
+```powershell
+cd frontend
+npm.cmd test -- --watch=false --runInBand
+npm.cmd run build
 ```
-
-6. Во frontend-репозитории создать `.env`, если фронтенд и бэкенд находятся на разных адресах:
-
-```env
-REACT_APP_API_BASE_URL=http://127.0.0.1:8000
-```
-
-7. Запустить backend на порту `8000`.
-8. Запустить frontend на порту `3000`.
-9. Проверить авторизацию, список проектов, загрузку плана этажа, генерацию PDF и открытие PDF в новой вкладке.
-
-## 8. Важные замечания
-
-- Корневые PDF-файлы нельзя переносить только в папку `backend/` без изменения импортов. Сейчас они являются частью backend-репозитория.
-- Фронтенд использует cookie-авторизацию, поэтому при разных доменах нужно правильно настроить CORS и параметры cookie.
-- Загруженные файлы и PDF являются рабочими данными, а не исходным кодом. Их не следует хранить в Git.
