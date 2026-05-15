@@ -1,0 +1,1 @@
+"""Floor plans module."""

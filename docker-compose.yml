@@ -1,0 +1,103 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    pull_policy: always
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-floor_plans}
+      POSTGRES_USER: ${POSTGRES_USER:-floor_plans}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-floor_plans_password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-floor_plans} -d ${POSTGRES_DB:-floor_plans}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  storage-init:
+    image: alpine:3.20
+    pull_policy: always
+    volumes:
+      - app_data:/data
+      - ./docker/seed/files:/seed/files:ro
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        if [ -f /data/.seed_initialized ]; then
+          echo "Storage seed already initialized"
+          exit 0
+        fi
+        mkdir -p /data/uploads /data/outputs /data/debug_output /data/storage_objects
+        if [ -d /seed/files ]; then
+          cp -a /seed/files/. /data/
+        fi
+        touch /data/.seed_initialized
+        echo "Storage seed initialized"
+    restart: "no"
+
+  db-seed:
+    image: maxwpeg/kulman-backend:latest
+    pull_policy: always
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-floor_plans}:${POSTGRES_PASSWORD:-floor_plans_password}@postgres:5432/${POSTGRES_DB:-floor_plans}
+      DATA_DIR: /data
+      BOOTSTRAP_DEVELOPER_USERNAME: ${BOOTSTRAP_DEVELOPER_USERNAME:-developer}
+      BOOTSTRAP_DEVELOPER_FULL_NAME: ${BOOTSTRAP_DEVELOPER_FULL_NAME:-Local Developer}
+      BOOTSTRAP_DEVELOPER_PASSWORD: ${BOOTSTRAP_DEVELOPER_PASSWORD:-ChangeMe123!}
+    volumes:
+      - ./docker/seed/database:/seed/database:ro
+    command: ["python", "tools/import_docker_seed.py", "--seed-db", "/seed/database/floor_plans_seed.db"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  backend:
+    image: maxwpeg/kulman-backend:latest
+    pull_policy: always
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-floor_plans}:${POSTGRES_PASSWORD:-floor_plans_password}@postgres:5432/${POSTGRES_DB:-floor_plans}
+      DATA_DIR: /data
+      RUN_INLINE_WORKER: "1"
+      AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-false}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+      BOOTSTRAP_DEVELOPER_USERNAME: ${BOOTSTRAP_DEVELOPER_USERNAME:-developer}
+      BOOTSTRAP_DEVELOPER_FULL_NAME: ${BOOTSTRAP_DEVELOPER_FULL_NAME:-Local Developer}
+      BOOTSTRAP_DEVELOPER_PASSWORD: ${BOOTSTRAP_DEVELOPER_PASSWORD:-ChangeMe123!}
+      WORKER_MAX_ATTEMPTS: ${WORKER_MAX_ATTEMPTS:-3}
+      WORKER_POLL_INTERVAL_SECONDS: ${WORKER_POLL_INTERVAL_SECONDS:-2.0}
+    volumes:
+      - app_data:/data
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      storage-init:
+        condition: service_completed_successfully
+      db-seed:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    restart: unless-stopped
+
+  frontend:
+    image: maxwpeg/kulman-frontend:latest
+    pull_policy: always
+    ports:
+      - "${FRONTEND_PORT:-3000}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  app_data:

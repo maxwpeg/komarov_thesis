@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Root-level local tool caches and temporary dependency installs
+/.miktex/
+/.playwright-browsers/
+/.tmp_playwright/
+/.tmp_pypdf/
+/.tmp_*/
+/__pycache__/
+
+# Frontend
+node_modules/
+dist/
+build/
+coverage/
+.eslintcache
+
+# Environments and editor state
+.env
+.env.local
+.venv/
+venv/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.log
+
+# Generated app artifacts
+uploads/
+outputs/
+debug_output/
+storage_objects/
+floor_plans.db
+*.db-shm
+*.db-wal
+project_counter.json
+user_feedback.json
+
+# Binary documents and images
+*.pdf
+*.jpeg
+*.jpg
+*.png
