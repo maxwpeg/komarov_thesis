@@ -46,7 +46,7 @@ def get_equipment(
 @router.post("/api/equipment", response_model=EquipmentItemRead)
 def create_equipment(
     payload: EquipmentItemCreate,
-    current_user: AuthenticatedUser = Depends(require_developer),
+    current_user: AuthenticatedUser = Depends(require_current_user),
     db: Session = Depends(get_db),
     service: EquipmentUseCases = Depends(get_equipment_use_cases),
 ) -> EquipmentItemRead:
@@ -108,7 +108,7 @@ def delete_equipment(
 def upload_equipment_image(
     equipment_id: int,
     image: UploadFile = File(...),
-    current_user: AuthenticatedUser = Depends(require_developer),
+    current_user: AuthenticatedUser = Depends(require_current_user),
     db: Session = Depends(get_db),
     service: EquipmentUseCases = Depends(get_equipment_use_cases),
 ) -> EquipmentItemRead:
@@ -129,7 +129,7 @@ def upload_equipment_image(
 def upload_equipment_connection_diagram(
     equipment_id: int,
     image: UploadFile = File(...),
-    current_user: AuthenticatedUser = Depends(require_developer),
+    current_user: AuthenticatedUser = Depends(require_current_user),
     db: Session = Depends(get_db),
     service: EquipmentUseCases = Depends(get_equipment_use_cases),
 ) -> EquipmentItemRead:
@@ -150,7 +150,7 @@ def upload_equipment_connection_diagram(
 def upload_equipment_label_pdf(
     equipment_id: int,
     file: UploadFile = File(...),
-    current_user: AuthenticatedUser = Depends(require_developer),
+    current_user: AuthenticatedUser = Depends(require_current_user),
     db: Session = Depends(get_db),
     service: EquipmentUseCases = Depends(get_equipment_use_cases),
 ) -> EquipmentItemRead:
@@ -171,7 +171,7 @@ def upload_equipment_label_pdf(
 def upload_equipment_manual_pdf(
     equipment_id: int,
     file: UploadFile = File(...),
-    current_user: AuthenticatedUser = Depends(require_developer),
+    current_user: AuthenticatedUser = Depends(require_current_user),
     db: Session = Depends(get_db),
     service: EquipmentUseCases = Depends(get_equipment_use_cases),
 ) -> EquipmentItemRead:
@@ -213,7 +213,7 @@ def attach_project_equipment(
 def create_and_attach_project_equipment(
     project_id: int,
     payload: EquipmentItemCreate,
-    _: AuthenticatedUser = Depends(require_developer),
+    _: AuthenticatedUser = Depends(require_project_access),
     service: EquipmentUseCases = Depends(get_equipment_use_cases),
 ) -> ProjectEquipmentListRead:
     result = service.create_and_attach_item(project_id, payload)

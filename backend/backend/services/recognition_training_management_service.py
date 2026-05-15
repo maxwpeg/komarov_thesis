@@ -10,6 +10,7 @@ import subprocess
 import sys
 import traceback
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -43,6 +44,36 @@ from backend.services.recognition_training_feedback_service import (
 
 ACTIVE_TRAINING_RUN_STATUSES = ("queued", "running")
 QUEUED_RUN_START_GRACE_SECONDS = 20
+
+
+class _TeeStream:
+    """Forward writes to the original stream and the training log file."""
+
+    def __init__(self, original: Any, log_file: Any) -> None:
+        self._original = original
+        self._log_file = log_file
+
+    def write(self, data: str) -> int:
+        self._original.write(data)
+        self._log_file.write(data)
+        return len(data)
+
+    def flush(self) -> None:
+        self._original.flush()
+        self._log_file.flush()
+
+    def isatty(self) -> bool:
+        return bool(getattr(self._original, "isatty", lambda: False)())
+
+    def fileno(self) -> int:
+        return int(self._original.fileno())
+
+    @property
+    def encoding(self) -> str:
+        return str(getattr(self._original, "encoding", "utf-8") or "utf-8")
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._original, name)
 
 
 @dataclass(slots=True)
@@ -449,6 +480,7 @@ class RecognitionTrainingManagementService:
         artifact_dir = self._resolve_storage_path(run.artifact_dir) or self._task_artifact_dir(run_id)
         artifact_dir.mkdir(parents=True, exist_ok=True)
         run.artifact_dir = self._storage_relative_path(artifact_dir)
+        log_path = self._ensure_training_log_path(run, artifact_dir)
         run.status = "running"
         run.started_at = datetime.now(timezone.utc)
         run.error_message = None
@@ -456,41 +488,59 @@ class RecognitionTrainingManagementService:
         self.db.commit()
 
         try:
-            dataset_summary = self._build_yolo_dataset(run, artifact_dir / "dataset")
-            params_payload = {
-                "run_id": run.run_id,
-                "step": run.step,
-                "config": run.config or {},
-                "batch": batch.to_dict(),
-                "dataset": dataset_summary,
-            }
-            (artifact_dir / "params.json").write_text(json.dumps(params_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            with self._training_log_context(log_path):
+                print(
+                    f"[recognition-training] run {run.run_id} started "
+                    f"step={run.step} artifact_dir={artifact_dir}",
+                    flush=True,
+                )
+                try:
+                    dataset_summary = self._build_yolo_dataset(run, artifact_dir / "dataset")
+                    params_payload = {
+                        "run_id": run.run_id,
+                        "step": run.step,
+                        "config": run.config or {},
+                        "batch": batch.to_dict(),
+                        "dataset": dataset_summary,
+                    }
+                    (artifact_dir / "params.json").write_text(
+                        json.dumps(params_payload, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
 
-            if os.getenv("RECOGNITION_TRAINING_FAKE_RUN") == "1":
-                metrics = self._complete_fake_run(run, artifact_dir, dataset_summary)
-            else:
-                metrics = self._run_ultralytics_training(run, artifact_dir, dataset_summary)
+                    if os.getenv("RECOGNITION_TRAINING_FAKE_RUN") == "1":
+                        metrics = self._complete_fake_run(run, artifact_dir, dataset_summary)
+                    else:
+                        metrics = self._run_ultralytics_training(run, artifact_dir, dataset_summary)
 
-            finished_at = datetime.now(timezone.utc)
-            run.status = "succeeded"
-            run.metrics_summary = metrics
-            run.finished_at = finished_at
-            batch.status = "succeeded"
-            batch.summary = {
-                **(batch.summary or {}),
-                "dataset_dir": str((artifact_dir / "dataset").resolve()),
-                "training_run_id": run.run_id,
-                "metrics_summary": metrics,
-            }
-            for link in batch.example_links:
-                example = link.feedback_example
-                if example is None:
-                    continue
-                example.used_at = finished_at
-                example.status = "used"
-            (artifact_dir / "metrics.json").write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
-            self.db.commit()
-            return self.get_run(run_id)
+                    finished_at = datetime.now(timezone.utc)
+                    run.status = "succeeded"
+                    run.metrics_summary = metrics
+                    run.finished_at = finished_at
+                    batch.status = "succeeded"
+                    batch.summary = {
+                        **(batch.summary or {}),
+                        "dataset_dir": str((artifact_dir / "dataset").resolve()),
+                        "training_run_id": run.run_id,
+                        "metrics_summary": metrics,
+                    }
+                    for link in batch.example_links:
+                        example = link.feedback_example
+                        if example is None:
+                            continue
+                        example.used_at = finished_at
+                        example.status = "used"
+                    (artifact_dir / "metrics.json").write_text(
+                        json.dumps(metrics, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
+                    self.db.commit()
+                    print(f"[recognition-training] run {run.run_id} succeeded", flush=True)
+                    return self.get_run(run_id)
+                except Exception:
+                    print(f"[recognition-training] run {run.run_id} failed", file=sys.stderr, flush=True)
+                    traceback.print_exc()
+                    raise
         except Exception as exc:
             run.status = "failed"
             run.error_message = str(exc)
@@ -746,6 +796,48 @@ class RecognitionTrainingManagementService:
             "save_dir": str(save_dir),
         }
         return metrics
+
+    def _ensure_training_log_path(self, run: RecognitionTrainingRun, artifact_dir: Path) -> Path:
+        log_path = self._resolve_storage_path(run.log_path)
+        if log_path is None:
+            log_path = artifact_dir / "stdout.log"
+            run.log_path = self._storage_relative_path(log_path)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.touch(exist_ok=True)
+        return log_path
+
+    @staticmethod
+    def _stream_points_to_path(stream: Any, path: Path) -> bool:
+        try:
+            stream_stat = os.fstat(stream.fileno())
+            path_stat = path.stat()
+        except Exception:
+            return False
+        return stream_stat.st_dev == path_stat.st_dev and stream_stat.st_ino == path_stat.st_ino
+
+    @contextmanager
+    def _training_log_context(self, log_path: Path):
+        """Mirror training stdout/stderr into the persisted run log."""
+
+        stdout_already_logged = self._stream_points_to_path(sys.stdout, log_path)
+        stderr_already_logged = self._stream_points_to_path(sys.stderr, log_path)
+        if stdout_already_logged and stderr_already_logged:
+            yield
+            return
+
+        original_stdout = sys.stdout
+        original_stderr = sys.stderr
+        with log_path.open("a", encoding="utf-8") as log_file:
+            if not stdout_already_logged:
+                sys.stdout = _TeeStream(original_stdout, log_file)
+            if not stderr_already_logged:
+                sys.stderr = _TeeStream(original_stderr, log_file)
+            try:
+                yield
+            finally:
+                sys.stdout = original_stdout
+                sys.stderr = original_stderr
+                log_file.flush()
 
     def _spawn_training_process(self, run_id: str, log_path: Path) -> None:
         script_path = settings.project_root / "tools" / "run_recognition_training.py"

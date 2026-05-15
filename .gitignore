@@ -7,6 +7,14 @@ __pycache__/
 .coverage
 htmlcov/
 
+# Root-level local tool caches and temporary dependency installs
+/.miktex/
+/.playwright-browsers/
+/.tmp_playwright/
+/.tmp_pypdf/
+/.tmp_*/
+/__pycache__/
+
 # Frontend
 node_modules/
 dist/
@@ -20,6 +28,7 @@ coverage/
 .venv/
 venv/
 .idea/
+.vscode/
 .DS_Store
 Thumbs.db
 *.log
@@ -40,5 +49,3 @@ user_feedback.json
 *.jpeg
 *.jpg
 *.png
-.playwright-browsers/chromium_headless_shell-1208/chrome-headless-shell-win64/chrome-headless-shell.exe
-.playwright-browsers/chromium-1208/chrome-win64/chrome.dll

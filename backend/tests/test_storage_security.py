@@ -86,6 +86,24 @@ def _create_floor_plan_with_image(base_url: str, project_id: int) -> dict:
     return response.json()
 
 
+def _equipment_payload(name: str, description: str = "Created by engineer") -> dict:
+    return {
+        "name": name,
+        "category": "smoke",
+        "description": description,
+        "price": 1000,
+        "manufacturer": "Test",
+        "service_life_years": 10,
+        "specs": {
+            "addressing_mode": "addressable",
+            "loop_voltage_v": 24,
+            "standby_current_a": 0.0001,
+            "alarm_current_a": 0.0002,
+        },
+        "compatible_equipment_ids": [],
+    }
+
+
 def test_asset_route_rejects_path_traversal(api_server: str):
     traversal_response = requests.get(f"{api_server}/api/assets/%2e%2e/floor_plans.db", timeout=10)
     assert traversal_response.status_code == 404
@@ -162,28 +180,41 @@ def test_uploaded_floor_plan_is_registered_in_storage_integrity_report(api_serve
     assert not any(item["path"] == floor_plan["original_image_path"] for item in report["missing"])
 
 
-def test_engineer_cannot_mutate_global_equipment_catalog(api_server: str):
+def test_engineer_can_create_global_equipment_catalog_item(api_server: str):
     engineer = _create_engineer(api_server, "catalog-engineer", "Catalog Engineer")
     engineer_session = _engineer_session(api_server, engineer["username"])
     response = engineer_session.post(
         f"{api_server}/api/equipment",
-        json={
-            "name": "Smoke Engineer",
-            "category": "smoke",
-            "description": "Should not be created by engineer",
-            "price": 1000,
-            "manufacturer": "Test",
-            "service_life_years": 10,
-            "specs": {
-                "addressing_mode": "addressable",
-                "loop_voltage_v": 24,
-                "standby_current_a": 0.0001,
-                "alarm_current_a": 0.0002,
-            },
-            "compatible_equipment_ids": [],
-        },
+        json=_equipment_payload("Smoke Engineer"),
         timeout=10,
     )
 
-    assert response.status_code == 403
-    assert response.json()["code"] == "developer_role_required"
+    assert response.status_code == 200
+    created = response.json()
+    assert created["name"] == "Smoke Engineer"
+    assert created["category"] == "smoke"
+
+    image_response = engineer_session.post(
+        f"{api_server}/api/equipment/{created['id']}/image",
+        files={"image": ("equipment.png", _png_bytes(), "image/png")},
+        timeout=10,
+    )
+
+    assert image_response.status_code == 200
+    assert image_response.json()["image_path"].startswith(f"equipment/{created['id']}/image_")
+
+
+def test_engineer_can_create_and_attach_equipment_to_owned_project(api_server: str):
+    engineer = _create_engineer(api_server, "project-catalog-engineer", "Project Catalog Engineer")
+    project = _create_project(api_server, owner_user_id=engineer["id"])
+    engineer_session = _engineer_session(api_server, engineer["username"])
+
+    response = engineer_session.post(
+        f"{api_server}/api/projects/{project['id']}/equipment/create",
+        json=_equipment_payload("Smoke Project Engineer"),
+        timeout=10,
+    )
+
+    assert response.status_code == 200
+    items = response.json()["items"]
+    assert any(item["name"] == "Smoke Project Engineer" for item in items)

@@ -157,6 +157,9 @@ def test_fake_training_run_builds_dataset_and_marks_run_succeeded(isolated_datab
         assert any((artifact_dir / "dataset" / "images" / "train").iterdir())
         assert any((artifact_dir / "dataset" / "images" / "val").iterdir())
         assert completed["metrics_summary"]["sample_count"] == 50
+        log_payload = service.get_run_log(created["run_id"])
+        assert f"run {created['run_id']} started" in log_payload["content"]
+        assert f"run {created['run_id']} succeeded" in log_payload["content"]
 
         used_examples = db.query(RecognitionFeedbackExample).filter(RecognitionFeedbackExample.status == "used").all()
         assert len(used_examples) == 50
@@ -242,6 +245,46 @@ def test_forced_single_sample_run_duplicates_into_val_split(isolated_database, t
         assert train_images[0].suffix.lower() == ".png"
     finally:
         monkeypatch.delenv("RECOGNITION_TRAINING_FAKE_RUN", raising=False)
+        db.close()
+
+
+def test_failed_inline_training_writes_traceback_to_run_log(isolated_database, tmp_path: Path, monkeypatch):
+    db = database.SessionLocal()
+    try:
+        storage = StorageService()
+        floor_plan = _create_floor_plan(db, storage, tmp_path, filename="failed-inline-run.png", number=37)
+        db.add(
+            RecognitionFeedbackExample(
+                floor_plan_id=floor_plan.id,
+                recognition_id=None,
+                step="walls",
+                step_revision=1,
+                detector_version="cv.hybrid.v1",
+                source_snapshot=_wall_snapshot(floor_plan, x2=120),
+                corrected_snapshot=_wall_snapshot(floor_plan, x2=160),
+                diff_summary={"changed": True, "hardness_score": 4.0, "counts": {"missed": 1}},
+                hardness_score=4.0,
+                status="approved",
+                curation_status="approved",
+            )
+        )
+        db.commit()
+
+        def fail_training(self, run, artifact_dir, dataset_summary):
+            print("trainer stdout before failure")
+            raise RuntimeError("synthetic trainer failure")
+
+        monkeypatch.setattr(RecognitionTrainingManagementService, "_run_ultralytics_training", fail_training)
+        service = RecognitionTrainingManagementService(db, storage)
+        created = service.create_run(step="walls", force=True, spawn_process=False)
+
+        with pytest.raises(RuntimeError):
+            service.run_training_job(created["run_id"])
+
+        log_payload = service.get_run_log(created["run_id"])
+        assert "trainer stdout before failure" in log_payload["content"]
+        assert "RuntimeError: synthetic trainer failure" in log_payload["content"]
+    finally:
         db.close()
 
 
